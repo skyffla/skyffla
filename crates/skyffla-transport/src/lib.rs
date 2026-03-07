@@ -1,7 +1,7 @@
 use std::fmt;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use skyffla_protocol::TransportCapability;
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
@@ -11,6 +11,22 @@ pub enum TransportMode {
     Direct,
     Relay,
     Unknown,
+}
+
+impl fmt::Display for TransportMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct => write!(f, "p2p"),
+            Self::Relay => write!(f, "relay"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionStatus {
+    pub mode: TransportMode,
+    pub remote_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +97,38 @@ impl IrohTransport {
         Ok(IrohConnection { connection })
     }
 
+    pub async fn connection_status(&self, connection: &IrohConnection) -> ConnectionStatus {
+        let remote_id = connection.connection.remote_id();
+        let selected_path = connection.connection.to_info().selected_path();
+        let mode = match selected_path.as_ref() {
+            Some(path) if path.is_ip() => TransportMode::Direct,
+            Some(path) if path.is_relay() => TransportMode::Relay,
+            Some(_) | None => TransportMode::Unknown,
+        };
+
+        let selected_ip = selected_path
+            .as_ref()
+            .and_then(|path| match path.remote_addr() {
+                TransportAddr::Ip(addr) => Some(addr.to_string()),
+                TransportAddr::Relay(_) => None,
+                _ => None,
+            });
+
+        let remote_info_ip = self.endpoint.remote_info(remote_id).await.and_then(|info| {
+            info.into_addrs()
+                .find_map(|addr_info| match addr_info.into_addr() {
+                    TransportAddr::Ip(addr) => Some(addr.to_string()),
+                    TransportAddr::Relay(_) => None,
+                    _ => None,
+                })
+        });
+
+        ConnectionStatus {
+            mode,
+            remote_addr: selected_ip.or(remote_info_ip),
+        }
+    }
+
     pub async fn close(self) {
         self.endpoint.close().await;
     }
@@ -128,7 +176,11 @@ impl IrohConnection {
     }
 
     pub fn transport_mode(&self) -> TransportMode {
-        TransportMode::Unknown
+        match self.connection.to_info().selected_path() {
+            Some(path) if path.is_ip() => TransportMode::Direct,
+            Some(path) if path.is_relay() => TransportMode::Relay,
+            Some(_) | None => TransportMode::Unknown,
+        }
     }
 }
 
@@ -227,6 +279,9 @@ mod tests {
                 .accept_connection()
                 .await
                 .expect("host should accept connection");
+            let status = host_server.connection_status(&connection).await;
+            assert_eq!(status.mode, TransportMode::Direct);
+            assert!(status.remote_addr.is_some());
             let (mut send, mut recv) = connection
                 .accept_control_stream()
                 .await
@@ -249,6 +304,9 @@ mod tests {
             .connect(&ticket)
             .await
             .expect("joiner should connect");
+        let status = joiner.connection_status(&connection).await;
+        assert_eq!(status.mode, TransportMode::Direct);
+        assert!(status.remote_addr.is_some());
         let (mut send, mut recv) = connection
             .open_control_stream()
             .await

@@ -11,9 +11,19 @@ pub struct SessionPeer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     StateChanged(SessionState),
-    HandshakeCompleted { peer: SessionPeer },
-    ChatSent { text: String },
-    ChatReceived { text: String },
+    HandshakeCompleted {
+        peer: SessionPeer,
+    },
+    ConnectionStatus {
+        mode: String,
+        remote_addr: Option<String>,
+    },
+    ChatSent {
+        text: String,
+    },
+    ChatReceived {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

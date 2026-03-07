@@ -339,6 +339,11 @@ async fn run_connected_session(
             .context("failed to record negotiated state")?,
     ));
     sink.emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
+    let connection_status = transport.connection_status(&connection).await;
+    sink.emit_runtime_event(RuntimeEvent::ConnectionStatus {
+        mode: connection_status.mode.to_string(),
+        remote_addr: connection_status.remote_addr.clone(),
+    });
     let mut ui = UiState::new(
         &session_id,
         &config.peer_name,
@@ -350,6 +355,14 @@ async fn run_connected_session(
         ui.stream_id, ui.local_name, ui.peer_name
     ));
     ui.system(format!("connected to {}", ui.peer_name));
+    ui.system(format!(
+        "connection {} remote={}",
+        connection_status.mode,
+        connection_status
+            .remote_addr
+            .as_deref()
+            .unwrap_or("unknown")
+    ));
 
     if let Some(message) = &config.outgoing_message {
         send_chat_message(&session_id, &mut send, message, None, Some(sink)).await?;
@@ -1547,6 +1560,11 @@ impl EventSink {
                     "peer_name": peer.peer_name,
                     "peer_fingerprint": peer.peer_fingerprint,
                 }),
+                RuntimeEvent::ConnectionStatus { mode, remote_addr } => json!({
+                    "event": "connection_status",
+                    "mode": mode,
+                    "remote_addr": remote_addr,
+                }),
                 RuntimeEvent::ChatSent { text } => json!({
                     "event": "chat_sent",
                     "text": text,
@@ -1568,6 +1586,11 @@ impl EventSink {
                 peer.peer_fingerprint
                     .unwrap_or_else(|| "unknown".to_string()),
                 peer.session_id
+            ),
+            RuntimeEvent::ConnectionStatus { mode, remote_addr } => eprintln!(
+                "{} connection, remote={}",
+                mode,
+                remote_addr.unwrap_or_else(|| "unknown".to_string())
             ),
             RuntimeEvent::ChatSent { text } => eprintln!("sent: {}", text),
             RuntimeEvent::ChatReceived { text } => {

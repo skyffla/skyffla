@@ -157,6 +157,46 @@ cargo clippy --workspace --all-targets
 cargo test
 ```
 
+## Release Builds
+
+Build optimized release binaries:
+
+```sh
+. "$HOME/.cargo/env"
+cargo build --release --bins
+```
+
+The resulting executables are:
+
+- `target/release/skyffla`
+- `target/release/skyffla-rendezvous`
+
+Check their sizes:
+
+```sh
+ls -lh target/release/skyffla target/release/skyffla-rendezvous
+```
+
+On the reference macOS arm64 machine used during development, the unstripped release binaries were approximately:
+
+- `skyffla`: `19M`
+- `skyffla-rendezvous`: `4.5M`
+
+To strip debug symbols in place:
+
+```sh
+strip target/release/skyffla
+strip target/release/skyffla-rendezvous
+```
+
+To compare exact byte sizes before and after stripping:
+
+```sh
+stat -f '%N %z' target/release/skyffla target/release/skyffla-rendezvous
+```
+
+These are single executable files, but on macOS they still dynamically link against system frameworks and libraries that are expected to exist on the host system.
+
 ## Architecture Notes
 
 The implementation is intentionally split into three layers:
