@@ -19,6 +19,7 @@ use crossterm::terminal::{
 };
 use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use skyffla_protocol::{
@@ -138,6 +139,31 @@ struct FolderStats {
     total_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KnownPeerRecord {
+    peer_name: String,
+    first_seen_unix: u64,
+    last_seen_unix: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LocalState {
+    #[serde(default)]
+    history: Vec<String>,
+    #[serde(default)]
+    auto_accept_enabled: bool,
+    #[serde(default)]
+    known_peers: HashMap<String, KnownPeerRecord>,
+}
+
+struct PeerTrustStatus {
+    status: &'static str,
+    peer_name: String,
+    peer_fingerprint: Option<String>,
+    previous_name: Option<String>,
+    message: String,
+}
+
 #[derive(Clone)]
 struct PendingOutgoingTransfer {
     offer: Offer,
@@ -197,7 +223,7 @@ struct UiState {
     input_history: Vec<String>,
     history_index: Option<usize>,
     draft_buffer: Option<String>,
-    history_path: Option<PathBuf>,
+    state_path: Option<PathBuf>,
     rendered_event_lines: usize,
     rendered_width: Option<usize>,
     next_event_row: u16,
@@ -383,6 +409,7 @@ async fn run_connected_session(
         local_fingerprint.as_deref(),
     )
     .await?;
+    let peer_trust = remember_peer(&peer);
 
     sink.emit_runtime_event(state_changed_event(
         session
@@ -393,6 +420,14 @@ async fn run_connected_session(
             .context("failed to record negotiated state")?,
     ));
     sink.emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
+    if let Some(trust) = peer_trust.as_ref() {
+        sink.emit_runtime_event(RuntimeEvent::PeerTrust {
+            status: trust.status.to_string(),
+            peer_name: trust.peer_name.clone(),
+            peer_fingerprint: trust.peer_fingerprint.clone(),
+            previous_name: trust.previous_name.clone(),
+        });
+    }
     let connection_status = transport.connection_status(&connection).await;
     sink.emit_runtime_event(RuntimeEvent::ConnectionStatus {
         mode: connection_status.mode.to_string(),
@@ -417,6 +452,9 @@ async fn run_connected_session(
             .as_deref()
             .unwrap_or("unknown")
     ));
+    if let Some(trust) = peer_trust {
+        ui.system(trust.message);
+    }
 
     if let Some(message) = &config.outgoing_message {
         send_chat_message(&session_id, &mut send, message, None, Some(sink)).await?;
@@ -630,7 +668,9 @@ async fn run_interactive_chat_loop(
                                 match enabled {
                                     Some(enabled) => {
                                         ui.auto_accept_enabled = enabled;
-                                        save_auto_accept(enabled);
+                                        update_local_state(&ui.state_path, |state| {
+                                            state.auto_accept_enabled = enabled;
+                                        });
                                         ui.system(format!(
                                             "auto-accept {} for files and clipboard",
                                             if enabled { "enabled" } else { "disabled" }
@@ -2206,6 +2246,18 @@ impl EventSink {
                     "mode": mode,
                     "remote_addr": remote_addr,
                 }),
+                RuntimeEvent::PeerTrust {
+                    status,
+                    peer_name,
+                    peer_fingerprint,
+                    previous_name,
+                } => json!({
+                    "event": "peer_trust",
+                    "status": status,
+                    "peer_name": peer_name,
+                    "peer_fingerprint": peer_fingerprint,
+                    "previous_name": previous_name,
+                }),
                 RuntimeEvent::ChatSent { text } => json!({
                     "event": "chat_sent",
                     "text": text,
@@ -2233,6 +2285,30 @@ impl EventSink {
                 mode,
                 remote_addr.unwrap_or_else(|| "unknown".to_string())
             ),
+            RuntimeEvent::PeerTrust {
+                status,
+                peer_name,
+                peer_fingerprint,
+                previous_name,
+            } => match status.as_str() {
+                "new" => eprintln!(
+                    "new peer {} ({})",
+                    peer_name,
+                    peer_fingerprint.unwrap_or_else(|| "unknown".to_string())
+                ),
+                "renamed" => eprintln!(
+                    "known peer {} is now {} ({})",
+                    previous_name.unwrap_or_else(|| "unknown".to_string()),
+                    peer_name,
+                    peer_fingerprint.unwrap_or_else(|| "unknown".to_string())
+                ),
+                "unverified" => eprintln!("peer {} is unverified", peer_name),
+                _ => eprintln!(
+                    "known peer {} ({})",
+                    peer_name,
+                    peer_fingerprint.unwrap_or_else(|| "unknown".to_string())
+                ),
+            },
             RuntimeEvent::ChatSent { text } => eprintln!("sent: {}", text),
             RuntimeEvent::ChatReceived { text } => {
                 if self.stdio {
@@ -2284,23 +2360,22 @@ fn default_peer_name() -> String {
 
 impl UiState {
     fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Self {
-        let history_path = history_file_path();
-        let input_history = load_history(&history_path);
-        let auto_accept_enabled = load_auto_accept();
+        let state_path = local_state_file_path();
+        let state = load_local_state(&state_path);
         Self {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
-            auto_accept_enabled,
+            auto_accept_enabled: state.auto_accept_enabled,
             events: Vec::new(),
             transfers: Vec::new(),
             pending_offer: None,
             input_buffer: String::new(),
             cursor_index: 0,
-            input_history,
+            input_history: state.history,
             history_index: None,
             draft_buffer: None,
-            history_path,
+            state_path,
             rendered_event_lines: 0,
             rendered_width: None,
             next_event_row: 0,
@@ -2558,7 +2633,9 @@ impl UiState {
             let overflow = self.input_history.len() - 500;
             self.input_history.drain(0..overflow);
         }
-        save_history(&self.history_path, &self.input_history);
+        update_local_state(&self.state_path, |state| {
+            state.history = self.input_history.clone();
+        });
     }
 
     fn history_up(&mut self) {
@@ -2686,58 +2763,164 @@ fn describe_offer_size(offer: &Offer) -> String {
     }
 }
 
-fn history_file_path() -> Option<PathBuf> {
+fn local_state_dir_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla"))
+}
+
+fn local_state_file_path() -> Option<PathBuf> {
+    local_state_dir_path().map(|dir| dir.join("state.json"))
+}
+
+fn legacy_history_file_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_history"))
 }
 
-fn auto_accept_file_path() -> Option<PathBuf> {
+fn legacy_auto_accept_file_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_autoaccept"))
 }
 
-fn load_history(path: &Option<PathBuf>) -> Vec<String> {
+fn legacy_known_peers_file_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_known_peers.json"))
+}
+
+fn load_local_state(path: &Option<PathBuf>) -> LocalState {
     let Some(path) = path else {
-        return Vec::new();
+        return LocalState::default();
     };
+
     match std::fs::read_to_string(path) {
-        Ok(contents) => contents
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        Err(_) => Vec::new(),
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => migrate_legacy_local_state(),
     }
 }
 
-fn save_history(path: &Option<PathBuf>, history: &[String]) {
+fn update_local_state(path: &Option<PathBuf>, update: impl FnOnce(&mut LocalState)) {
     let Some(path) = path else {
         return;
     };
-    let contents = if history.is_empty() {
-        String::new()
-    } else {
-        let mut joined = history.join("\n");
-        joined.push('\n');
-        joined
-    };
-    let _ = std::fs::write(path, contents);
+
+    let mut state = load_local_state(&Some(path.clone()));
+    update(&mut state);
+    save_local_state(&Some(path.clone()), &state);
 }
 
-fn load_auto_accept() -> bool {
-    let Some(path) = auto_accept_file_path() else {
-        return false;
+fn save_local_state(path: &Option<PathBuf>, state: &LocalState) {
+    let Some(path) = path else {
+        return;
     };
-    match std::fs::read_to_string(path) {
-        Ok(contents) => matches!(contents.trim(), "on" | "true" | "1"),
-        Err(_) => false,
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(contents) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(path, contents);
     }
 }
 
-fn save_auto_accept(enabled: bool) {
-    let Some(path) = auto_accept_file_path() else {
-        return;
+fn migrate_legacy_local_state() -> LocalState {
+    let history = legacy_history_file_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|contents| {
+            contents
+                .lines()
+                .map(str::trim_end)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let auto_accept_enabled = legacy_auto_accept_file_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|contents| matches!(contents.trim(), "on" | "true" | "1"))
+        .unwrap_or(false);
+
+    let known_peers = legacy_known_peers_file_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default();
+
+    let state = LocalState {
+        history,
+        auto_accept_enabled,
+        known_peers,
     };
-    let _ = std::fs::write(path, if enabled { "on\n" } else { "off\n" });
+    save_local_state(&local_state_file_path(), &state);
+    state
+}
+
+fn remember_peer(peer: &SessionPeer) -> Option<PeerTrustStatus> {
+    let Some(fingerprint) = peer.peer_fingerprint.clone() else {
+        return Some(PeerTrustStatus {
+            status: "unverified",
+            peer_name: peer.peer_name.clone(),
+            peer_fingerprint: None,
+            previous_name: None,
+            message: format!("peer {} is unverified", peer.peer_name),
+        });
+    };
+    let now = unix_now();
+    let mut state = load_local_state(&local_state_file_path());
+    let known_peers = &mut state.known_peers;
+
+    match known_peers.get_mut(&fingerprint) {
+        Some(record) => {
+            let previous_name = if record.peer_name != peer.peer_name {
+                Some(record.peer_name.clone())
+            } else {
+                None
+            };
+            record.peer_name = peer.peer_name.clone();
+            record.last_seen_unix = now;
+            save_local_state(&local_state_file_path(), &state);
+
+            Some(PeerTrustStatus {
+                status: if previous_name.is_some() {
+                    "renamed"
+                } else {
+                    "known"
+                },
+                peer_name: peer.peer_name.clone(),
+                peer_fingerprint: Some(fingerprint.clone()),
+                previous_name: previous_name.clone(),
+                message: if let Some(previous_name) = previous_name {
+                    format!(
+                        "known peer {} is now {} ({})",
+                        previous_name, peer.peer_name, fingerprint
+                    )
+                } else {
+                    format!("known peer {} ({})", peer.peer_name, fingerprint)
+                },
+            })
+        }
+        None => {
+            known_peers.insert(
+                fingerprint.clone(),
+                KnownPeerRecord {
+                    peer_name: peer.peer_name.clone(),
+                    first_seen_unix: now,
+                    last_seen_unix: now,
+                },
+            );
+            save_local_state(&local_state_file_path(), &state);
+            Some(PeerTrustStatus {
+                status: "new",
+                peer_name: peer.peer_name.clone(),
+                peer_fingerprint: Some(fingerprint.clone()),
+                previous_name: None,
+                message: format!(
+                    "new peer trust-on-first-use: {} ({})",
+                    peer.peer_name, fingerprint
+                ),
+            })
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn expand_user_path(input: &str) -> PathBuf {

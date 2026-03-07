@@ -18,6 +18,12 @@ pub enum RuntimeEvent {
         mode: String,
         remote_addr: Option<String>,
     },
+    PeerTrust {
+        status: String,
+        peer_name: String,
+        peer_fingerprint: Option<String>,
+        previous_name: Option<String>,
+    },
     ChatSent {
         text: String,
     },
