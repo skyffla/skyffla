@@ -18,10 +18,11 @@ use crossterm::terminal::{
 use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
 use serde_json::json;
+use sha2::{Digest as ShaDigestTrait, Sha256};
 use skyffla_protocol::{
     decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, Compression,
-    ControlMessage, DataStreamHeader, Envelope, Hello, HelloAck, Offer, Reject, TransferKind,
-    TransportCapability, PROTOCOL_VERSION,
+    ControlMessage, DataStreamHeader, Digest, Envelope, Hello, HelloAck, Offer, Reject,
+    TransferKind, TransportCapability, PROTOCOL_VERSION,
 };
 use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
 use skyffla_session::{
@@ -618,6 +619,7 @@ async fn run_stdio_sender(
                 sink.emit_json_event(json!({
                     "event": "complete",
                     "transfer_id": transfer_id,
+                    "digest": digest_json(complete.digest.as_ref()),
                 }));
                 return Ok(());
             }
@@ -675,6 +677,7 @@ async fn run_stdio_receiver(
     let mut stdout = tokio::io::stdout();
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
     loop {
         match data_recv.read(&mut buffer).await {
             Ok(Some(bytes_read)) => {
@@ -683,6 +686,7 @@ async fn run_stdio_receiver(
                     .await
                     .context("failed to write stdio payload to stdout")?;
                 stdout.flush().await.context("failed to flush stdout")?;
+                hasher.update(&buffer[..bytes_read]);
                 bytes_done += bytes_read as u64;
                 sink.emit_json_event(json!({
                     "event": "progress",
@@ -696,6 +700,7 @@ async fn run_stdio_receiver(
         }
     }
 
+    let digest = finalize_sha256_digest(hasher);
     write_envelope(
         send,
         &Envelope::new(
@@ -703,7 +708,7 @@ async fn run_stdio_receiver(
             next_message_id(),
             ControlMessage::Complete(Complete {
                 transfer_id: offer.transfer_id.clone(),
-                digest: None,
+                digest: Some(digest.clone()),
             }),
         ),
     )
@@ -711,6 +716,7 @@ async fn run_stdio_receiver(
     sink.emit_json_event(json!({
         "event": "complete",
         "transfer_id": offer.transfer_id,
+        "digest": digest_json(Some(&digest)),
     }));
     Ok(())
 }
@@ -845,7 +851,11 @@ async fn handle_post_handshake_message(
         }
         ControlMessage::Complete(complete) => {
             ui.mark_transfer_completed(&complete.transfer_id);
-            ui.system(format!("transfer {} complete", complete.transfer_id));
+            ui.system(format!(
+                "transfer {} complete{}",
+                complete.transfer_id,
+                format_digest_suffix(complete.digest.as_ref())
+            ));
             Ok(())
         }
         ControlMessage::Reject(reject) => {
@@ -932,7 +942,11 @@ async fn send_file(
             }
             ControlMessage::Complete(complete) => {
                 ui.mark_transfer_completed(&complete.transfer_id);
-                ui.system(format!("transfer {} complete", complete.transfer_id));
+                ui.system(format!(
+                    "transfer {} complete{}",
+                    complete.transfer_id,
+                    format_digest_suffix(complete.digest.as_ref())
+                ));
             }
             ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
                 ui.mark_transfer_rejected(&reject.transfer_id);
@@ -973,6 +987,7 @@ async fn send_file(
         .with_context(|| format!("failed to open {}", path.display()))?;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
     loop {
         let bytes_read = file
             .read(&mut buffer)
@@ -985,6 +1000,7 @@ async fn send_file(
             .write_all(&buffer[..bytes_read])
             .await
             .context("failed to stream file bytes")?;
+        hasher.update(&buffer[..bytes_read]);
         bytes_done += bytes_read as u64;
         ui.update_transfer_progress(&transfer_id, bytes_done, Some(metadata.len()));
         ui.render();
@@ -992,7 +1008,12 @@ async fn send_file(
     data_send.finish().context("failed to finish data stream")?;
 
     ui.mark_transfer_completed(&transfer_id);
-    ui.system(format!("sent file {}", file_name));
+    let digest = finalize_sha256_digest(hasher);
+    ui.system(format!(
+        "sent file {}{}",
+        file_name,
+        format_digest_suffix(Some(&digest))
+    ));
     ui.render();
     Ok(())
 }
@@ -1107,6 +1128,7 @@ async fn send_folder(
 
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
     loop {
         let bytes_read = tar_stdout
             .read(&mut buffer)
@@ -1119,6 +1141,7 @@ async fn send_folder(
             .write_all(&buffer[..bytes_read])
             .await
             .context("failed to stream folder archive bytes")?;
+        hasher.update(&buffer[..bytes_read]);
         bytes_done += bytes_read as u64;
         ui.update_transfer_progress(&transfer_id, bytes_done, Some(stats.total_bytes));
         ui.render();
@@ -1134,7 +1157,12 @@ async fn send_folder(
     }
 
     ui.mark_transfer_completed(&transfer_id);
-    ui.system(format!("sent folder {}", folder_name));
+    let digest = finalize_sha256_digest(hasher);
+    ui.system(format!(
+        "sent folder {}{}",
+        folder_name,
+        format_digest_suffix(Some(&digest))
+    ));
     ui.render();
     Ok(())
 }
@@ -1201,7 +1229,13 @@ async fn send_clipboard(
     data_send.finish().context("failed to finish data stream")?;
     ui.update_transfer_progress(&transfer_id, bytes.len() as u64, Some(bytes.len() as u64));
     ui.mark_transfer_completed(&transfer_id);
-    ui.system("sent clipboard text".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = finalize_sha256_digest(hasher);
+    ui.system(format!(
+        "sent clipboard text{}",
+        format_digest_suffix(Some(&digest))
+    ));
     ui.render();
     Ok(())
 }
@@ -1249,6 +1283,7 @@ async fn accept_pending_offer(
     }
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
     let completion_label = match offer.kind.clone() {
         TransferKind::File => {
             let target_path = download_dir.join(&item_name);
@@ -1264,6 +1299,7 @@ async fn accept_pending_offer(
                             .with_context(|| {
                                 format!("failed to write {}", target_path.display())
                             })?;
+                        hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
                         ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
                         ui.render();
@@ -1291,6 +1327,7 @@ async fn accept_pending_offer(
                             .write_all(&buffer[..bytes_read])
                             .await
                             .context("failed to write folder archive bytes to tar")?;
+                        hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
                         ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
                         ui.render();
@@ -1321,6 +1358,7 @@ async fn accept_pending_offer(
                 match data_recv.read(&mut buffer).await {
                     Ok(Some(bytes_read)) => {
                         data.extend_from_slice(&buffer[..bytes_read]);
+                        hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
                         ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
                         ui.render();
@@ -1338,6 +1376,7 @@ async fn accept_pending_offer(
         }
         _ => bail!("unsupported accepted transfer kind: {:?}", offer.kind),
     };
+    let digest = finalize_sha256_digest(hasher);
 
     write_envelope(
         send,
@@ -1346,16 +1385,17 @@ async fn accept_pending_offer(
             next_message_id(),
             ControlMessage::Complete(Complete {
                 transfer_id: offer.transfer_id.clone(),
-                digest: None,
+                digest: Some(digest.clone()),
             }),
         ),
     )
     .await?;
     ui.mark_transfer_completed(&offer.transfer_id);
     ui.system(format!(
-        "received {} {}",
+        "received {} {}{}",
         transfer_kind_label(&offer.kind),
-        completion_label
+        completion_label,
+        format_digest_suffix(Some(&digest))
     ));
     ui.render();
     Ok(())
@@ -1948,6 +1988,30 @@ fn collect_folder_stats(path: &Path) -> Result<FolderStats> {
     };
     visit(path, &mut stats)?;
     Ok(stats)
+}
+
+fn finalize_sha256_digest(hasher: Sha256) -> Digest {
+    let bytes = hasher.finalize();
+    Digest {
+        algorithm: "sha256".to_string(),
+        value_hex: format!("{bytes:x}"),
+    }
+}
+
+fn format_digest_suffix(digest: Option<&Digest>) -> String {
+    digest
+        .map(|digest| format!(" [{}:{}]", digest.algorithm, digest.value_hex))
+        .unwrap_or_default()
+}
+
+fn digest_json(digest: Option<&Digest>) -> serde_json::Value {
+    match digest {
+        Some(digest) => json!({
+            "algorithm": digest.algorithm,
+            "value_hex": digest.value_hex,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 async fn read_clipboard_text() -> Result<String> {
