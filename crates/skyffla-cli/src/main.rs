@@ -2119,6 +2119,11 @@ impl UiState {
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor_index = self.input_buffer.len();
             }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_buffer.truncate(self.cursor_index);
+                self.history_index = None;
+                self.draft_buffer = None;
+            }
             KeyCode::Enter => {
                 let submitted = self.input_buffer.trim().to_string();
                 self.history_index = None;
@@ -2292,7 +2297,7 @@ fn help_lines() -> &'static [&'static str] {
         "/cancel [id]  cancel an active transfer",
         "/quit  close the session",
         "shortcuts: q quit, y accept, n reject, ctrl+c close",
-        "editing: up/down history, ctrl+a line start, ctrl+e line end",
+        "editing: up/down history, ctrl+a line start, ctrl+e line end, ctrl+k kill to end",
     ]
 }
 
