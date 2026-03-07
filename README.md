@@ -27,13 +27,14 @@ What exists now:
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
 - `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, tar-based folder transfer, and explicit text clipboard transfer
+- `skyffla host --stdio` and `skyffla join --stdio` for pipeline-style byte transport with optional JSON events on `stderr`
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
-- `stdio` transfer flow
 - richer key-driven TUI navigation beyond the current command-based flow
 - persistent transfer history or resumable transfers
+- non-interactive acceptance flags outside the current `stdio` path
 
 ## Repository Layout
 
@@ -198,6 +199,8 @@ Current supported flags:
 - `--download-dir <path>` to choose where received files are written
 - `--name <peer-name>` to set the local handshake name
 - `--message <text>` to use a one-shot non-interactive chat send after connect
+- `--stdio` to disable the TUI and stream payload bytes over the session
+- `--json` to emit machine-readable session events on `stderr`
 
 Default behavior without `--message`:
 
@@ -255,9 +258,35 @@ Clipboard transfer example after connect:
 Clipboard transfer currently supports text only and writes to the local clipboard only after explicit acceptance.
 
 Planned next CLI additions:
+- non-interactive acceptance flags for non-stdio workflows
 
-- `skyffla host <stream-id> --stdio`
-- `skyffla join <stream-id> --stdio`
+Current `stdio` example:
+
+Terminal 1:
+
+```sh
+. "$HOME/.cargo/env"
+SKYFFLA_RENDEZVOUS_ADDR=127.0.0.1:18080 cargo run -p skyffla-rendezvous
+```
+
+Terminal 2:
+
+```sh
+printf 'hello from stdin\n' | cargo run -p skyffla -- host demo-room --server http://127.0.0.1:18080 --stdio --json
+```
+
+Terminal 3:
+
+```sh
+cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --stdio --json
+```
+
+Current `stdio` behavior:
+
+- host sends stdin bytes to the joiner
+- joiner writes payload bytes to stdout
+- JSON session/progress events are written to stderr when `--json` is enabled
+- clipboard features are not available in `--stdio` mode
 
 Current rendezvous server:
 

@@ -17,6 +17,7 @@ use crossterm::terminal::{
 };
 use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
+use serde_json::json;
 use skyffla_protocol::{
     decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, Compression,
     ControlMessage, DataStreamHeader, Envelope, Hello, HelloAck, Offer, Reject, TransferKind,
@@ -64,6 +65,10 @@ struct SessionArgs {
     name: Option<String>,
     #[arg(long)]
     message: Option<String>,
+    #[arg(long)]
+    stdio: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -73,11 +78,20 @@ enum Role {
 }
 
 struct SessionConfig {
+    role: Role,
     stream_id: String,
     rendezvous_server: String,
     download_dir: PathBuf,
     peer_name: String,
     outgoing_message: Option<String>,
+    stdio: bool,
+    json_events: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EventSink {
+    stdio: bool,
+    json: bool,
 }
 
 enum UserInput {
@@ -166,9 +180,10 @@ async fn main() -> Result<()> {
 
 async fn run_host(args: SessionArgs) -> Result<()> {
     let config = SessionConfig::from_args(Role::Host, args);
+    let sink = EventSink::from_config(&config);
     let client = Client::new();
     let mut session = SessionMachine::new();
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::HostRequested {
                 stream_id: config.stream_id.clone(),
@@ -179,18 +194,27 @@ async fn run_host(args: SessionArgs) -> Result<()> {
     let transport = IrohTransport::bind().await?;
     let ticket = transport.local_ticket()?;
     register_stream(&client, &config, &ticket).await?;
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::TransportConnecting)
             .context("failed to enter connecting state")?,
     ));
 
-    eprintln!(
-        "waiting for peer on stream {} via {}",
-        config.stream_id, config.rendezvous_server
-    );
+    if config.json_events {
+        sink.emit_json_event(json!({
+            "event": "waiting",
+            "stream_id": config.stream_id,
+            "server": config.rendezvous_server,
+        }));
+    } else {
+        eprintln!(
+            "waiting for peer on stream {} via {}",
+            config.stream_id, config.rendezvous_server
+        );
+    }
     let connection = transport.accept_connection().await?;
-    let result = run_connected_session(&config, &mut session, &transport, connection, true).await;
+    let result =
+        run_connected_session(&config, &sink, &mut session, &transport, connection, true).await;
     let delete_result = delete_stream(&client, &config).await;
     transport.close().await;
     delete_result?;
@@ -199,9 +223,10 @@ async fn run_host(args: SessionArgs) -> Result<()> {
 
 async fn run_join(args: SessionArgs) -> Result<()> {
     let config = SessionConfig::from_args(Role::Join, args);
+    let sink = EventSink::from_config(&config);
     let client = Client::new();
     let mut session = SessionMachine::new();
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::JoinRequested {
                 stream_id: config.stream_id.clone(),
@@ -211,7 +236,7 @@ async fn run_join(args: SessionArgs) -> Result<()> {
 
     let transport = IrohTransport::bind().await?;
     let peer = resolve_stream(&client, &config).await?;
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::TransportConnecting)
             .context("failed to enter connecting state")?,
@@ -221,7 +246,8 @@ async fn run_join(args: SessionArgs) -> Result<()> {
             encoded: peer.ticket,
         })
         .await?;
-    let result = run_connected_session(&config, &mut session, &transport, connection, false).await;
+    let result =
+        run_connected_session(&config, &sink, &mut session, &transport, connection, false).await;
     transport.close().await;
     result
 }
@@ -272,13 +298,14 @@ async fn delete_stream(client: &Client, config: &SessionConfig) -> Result<()> {
 
 async fn run_connected_session(
     config: &SessionConfig,
+    sink: &EventSink,
     session: &mut SessionMachine,
     transport: &IrohTransport,
     connection: IrohConnection,
     is_host: bool,
 ) -> Result<()> {
     let session_id = config.stream_id.clone();
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::PeerConnected {
                 session_id: session_id.clone(),
@@ -302,15 +329,15 @@ async fn run_connected_session(
     )
     .await?;
 
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::Negotiated {
                 session_id: session_id.clone(),
-                stdio: false,
+                stdio: config.stdio,
             })
             .context("failed to record negotiated state")?,
     ));
-    emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
+    sink.emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
     let mut ui = UiState::new(
         &session_id,
         &config.peer_name,
@@ -324,14 +351,16 @@ async fn run_connected_session(
     ui.system(format!("connected to {}", ui.peer_name));
 
     if let Some(message) = &config.outgoing_message {
-        send_chat_message(&session_id, &mut send, message, None, true).await?;
+        send_chat_message(&session_id, &mut send, message, None, Some(sink)).await?;
         ui.chat("you", message);
         send.finish()
             .context("failed to finish control stream send side")?;
 
         while let Some(envelope) = read_envelope(&mut recv).await? {
-            handle_post_handshake_message(&mut ui, envelope, true).await?;
+            handle_post_handshake_message(&mut ui, envelope, Some(sink)).await?;
         }
+    } else if config.stdio {
+        run_stdio_session(config, sink, &session_id, &connection, &mut send, &mut recv).await?;
     } else {
         run_interactive_chat_loop(
             config,
@@ -344,12 +373,12 @@ async fn run_connected_session(
         .await?;
     }
 
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::CloseRequested)
             .context("failed to enter closing state")?,
     ));
-    emit_runtime_event(state_changed_event(
+    sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::Closed)
             .context("failed to enter closed state")?,
@@ -404,7 +433,7 @@ async fn run_interactive_chat_loop(
                             }
                             UserInput::Chat(text) => {
                                 if !text.is_empty() {
-                                    send_chat_message(session_id, send, &text, Some(ui), false).await?;
+                                    send_chat_message(session_id, send, &text, Some(ui), None).await?;
                                 }
                             }
                             UserInput::SendFile(path) => {
@@ -460,7 +489,7 @@ async fn run_interactive_chat_loop(
             envelope = read_envelope(recv) => {
                 match envelope? {
                     Some(envelope) => {
-                        handle_post_handshake_message(ui, envelope, false).await?
+                        handle_post_handshake_message(ui, envelope, None).await?
                     }
                     None => break,
                 }
@@ -469,6 +498,220 @@ async fn run_interactive_chat_loop(
         }
     }
 
+    Ok(())
+}
+
+async fn run_stdio_session(
+    config: &SessionConfig,
+    sink: &EventSink,
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    match config.role {
+        Role::Host => run_stdio_sender(sink, session_id, connection, send, recv).await,
+        Role::Join => run_stdio_receiver(sink, session_id, connection, send, recv).await,
+    }
+}
+
+async fn run_stdio_sender(
+    sink: &EventSink,
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    let transfer_id = format!("t{}", next_message_id());
+    let offer = Offer {
+        transfer_id: transfer_id.clone(),
+        kind: TransferKind::Stdio,
+        name: "stdio".to_string(),
+        size: None,
+        mime: Some("application/octet-stream".to_string()),
+        item_count: None,
+        compression: None,
+        path_hint: None,
+    };
+    write_envelope(
+        send,
+        &Envelope::new(session_id, next_message_id(), ControlMessage::Offer(offer)),
+    )
+    .await?;
+    sink.emit_json_event(json!({
+        "event": "offer",
+        "transfer_id": transfer_id,
+        "kind": "stdio",
+        "name": "stdio",
+    }));
+
+    loop {
+        let envelope = read_envelope(recv)
+            .await?
+            .context("peer closed control stream while stdio offer was pending")?;
+        match envelope.payload {
+            ControlMessage::Accept(Accept {
+                transfer_id: accepted,
+            }) if accepted == transfer_id => {
+                break;
+            }
+            ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
+                bail!(
+                    "stdio transfer rejected{}",
+                    reject
+                        .reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+            other => bail!(
+                "unexpected control message while waiting for stdio accept: {:?}",
+                other
+            ),
+        }
+    }
+
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.clone(),
+            kind: TransferKind::Stdio,
+        },
+    )
+    .await?;
+
+    let mut stdin = tokio::io::stdin();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    loop {
+        let bytes_read = stdin
+            .read(&mut buffer)
+            .await
+            .context("failed to read stdin for stdio transfer")?;
+        if bytes_read == 0 {
+            break;
+        }
+        data_send
+            .write_all(&buffer[..bytes_read])
+            .await
+            .context("failed to write stdio payload bytes")?;
+        bytes_done += bytes_read as u64;
+        sink.emit_json_event(json!({
+            "event": "progress",
+            "transfer_id": transfer_id,
+            "bytes_done": bytes_done,
+            "bytes_total": serde_json::Value::Null,
+        }));
+    }
+    data_send
+        .finish()
+        .context("failed to finish stdio data stream")?;
+
+    loop {
+        let envelope = read_envelope(recv)
+            .await?
+            .context("peer closed control stream before stdio completion")?;
+        match envelope.payload {
+            ControlMessage::Complete(complete) if complete.transfer_id == transfer_id => {
+                sink.emit_json_event(json!({
+                    "event": "complete",
+                    "transfer_id": transfer_id,
+                }));
+                return Ok(());
+            }
+            other => bail!(
+                "unexpected control message while waiting for stdio complete: {:?}",
+                other
+            ),
+        }
+    }
+}
+
+async fn run_stdio_receiver(
+    sink: &EventSink,
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    let offer = loop {
+        let envelope = read_envelope(recv)
+            .await?
+            .context("peer closed control stream before stdio offer")?;
+        match envelope.payload {
+            ControlMessage::Offer(offer) if offer.kind == TransferKind::Stdio => break offer,
+            other => bail!("expected stdio offer, got {:?}", other),
+        }
+    };
+
+    sink.emit_json_event(json!({
+        "event": "offer",
+        "transfer_id": offer.transfer_id,
+        "kind": "stdio",
+        "name": offer.name,
+    }));
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Accept(Accept {
+                transfer_id: offer.transfer_id.clone(),
+            }),
+        ),
+    )
+    .await?;
+
+    let (_, mut data_recv) = connection.accept_data_stream().await?;
+    let header = read_data_header(&mut data_recv)
+        .await?
+        .context("peer closed data stream before sending a stdio header")?;
+    if header.transfer_id != offer.transfer_id || header.kind != TransferKind::Stdio {
+        bail!("received unexpected stdio data stream header");
+    }
+
+    let mut stdout = tokio::io::stdout();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    loop {
+        match data_recv.read(&mut buffer).await {
+            Ok(Some(bytes_read)) => {
+                stdout
+                    .write_all(&buffer[..bytes_read])
+                    .await
+                    .context("failed to write stdio payload to stdout")?;
+                stdout.flush().await.context("failed to flush stdout")?;
+                bytes_done += bytes_read as u64;
+                sink.emit_json_event(json!({
+                    "event": "progress",
+                    "transfer_id": offer.transfer_id,
+                    "bytes_done": bytes_done,
+                    "bytes_total": serde_json::Value::Null,
+                }));
+            }
+            Ok(None) => break,
+            Err(error) => return Err(error).context("failed reading stdio payload stream"),
+        }
+    }
+
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Complete(Complete {
+                transfer_id: offer.transfer_id.clone(),
+                digest: None,
+            }),
+        ),
+    )
+    .await?;
+    sink.emit_json_event(json!({
+        "event": "complete",
+        "transfer_id": offer.transfer_id,
+    }));
     Ok(())
 }
 
@@ -543,7 +786,7 @@ async fn send_chat_message(
     send: &mut SendStream,
     text: &str,
     ui: Option<&mut UiState>,
-    emit_runtime: bool,
+    sink: Option<&EventSink>,
 ) -> Result<()> {
     let envelope = Envelope::new(
         session_id,
@@ -556,8 +799,8 @@ async fn send_chat_message(
     if let Some(ui) = ui {
         ui.chat("you", text);
     }
-    if emit_runtime {
-        emit_runtime_event(RuntimeEvent::ChatSent {
+    if let Some(sink) = sink {
+        sink.emit_runtime_event(RuntimeEvent::ChatSent {
             text: text.to_string(),
         });
     }
@@ -567,13 +810,13 @@ async fn send_chat_message(
 async fn handle_post_handshake_message(
     ui: &mut UiState,
     envelope: Envelope,
-    emit_runtime: bool,
+    sink: Option<&EventSink>,
 ) -> Result<()> {
     match envelope.payload {
         ControlMessage::ChatMessage(message) => {
             let text = message.text;
-            if emit_runtime {
-                emit_runtime_event(RuntimeEvent::ChatReceived { text: text.clone() });
+            if let Some(sink) = sink {
+                sink.emit_runtime_event(RuntimeEvent::ChatReceived { text: text.clone() });
             }
             let speaker = ui.peer_name.clone();
             ui.chat(&speaker, &text);
@@ -1243,23 +1486,67 @@ fn short_fingerprint(raw: &str) -> Option<String> {
     }
 }
 
-fn emit_runtime_event(event: RuntimeEvent) {
-    match event {
-        RuntimeEvent::StateChanged(state) => eprintln!("state: {:?}", state),
-        RuntimeEvent::HandshakeCompleted { peer } => eprintln!(
-            "connected to {} ({}) session={}",
-            peer.peer_name,
-            peer.peer_fingerprint
-                .unwrap_or_else(|| "unknown".to_string()),
-            peer.session_id
-        ),
-        RuntimeEvent::ChatSent { text } => eprintln!("sent: {}", text),
-        RuntimeEvent::ChatReceived { text } => println!("{}", text),
+impl EventSink {
+    fn from_config(config: &SessionConfig) -> Self {
+        Self {
+            stdio: config.stdio,
+            json: config.json_events,
+        }
+    }
+
+    fn emit_runtime_event(&self, event: RuntimeEvent) {
+        if self.json {
+            let value = match event {
+                RuntimeEvent::StateChanged(state) => json!({
+                    "event": "state_changed",
+                    "state": format!("{state:?}"),
+                }),
+                RuntimeEvent::HandshakeCompleted { peer } => json!({
+                    "event": "connected",
+                    "session_id": peer.session_id,
+                    "peer_name": peer.peer_name,
+                    "peer_fingerprint": peer.peer_fingerprint,
+                }),
+                RuntimeEvent::ChatSent { text } => json!({
+                    "event": "chat_sent",
+                    "text": text,
+                }),
+                RuntimeEvent::ChatReceived { text } => json!({
+                    "event": "chat_received",
+                    "text": text,
+                }),
+            };
+            self.emit_json_event(value);
+            return;
+        }
+
+        match event {
+            RuntimeEvent::StateChanged(state) => eprintln!("state: {:?}", state),
+            RuntimeEvent::HandshakeCompleted { peer } => eprintln!(
+                "connected to {} ({}) session={}",
+                peer.peer_name,
+                peer.peer_fingerprint
+                    .unwrap_or_else(|| "unknown".to_string()),
+                peer.session_id
+            ),
+            RuntimeEvent::ChatSent { text } => eprintln!("sent: {}", text),
+            RuntimeEvent::ChatReceived { text } => {
+                if self.stdio {
+                    eprintln!("received: {}", text);
+                } else {
+                    println!("{}", text);
+                }
+            }
+        }
+    }
+
+    fn emit_json_event(&self, value: serde_json::Value) {
+        eprintln!("{}", value);
     }
 }
 
 impl SessionConfig {
-    fn from_args(_role: Role, args: SessionArgs) -> Self {
+    fn from_args(role: Role, args: SessionArgs) -> Self {
         let stream_id = args
             .stream_id
             .or_else(|| std::env::var("SKYFFLA_STREAM_ID").ok())
@@ -1268,12 +1555,19 @@ impl SessionConfig {
                 eprintln!("missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID");
                 std::process::exit(2);
             });
+        if args.stdio && args.message.is_some() {
+            eprintln!("--stdio cannot be combined with --message");
+            std::process::exit(2);
+        }
         Self {
+            role,
             stream_id,
             rendezvous_server: args.server,
             download_dir: args.download_dir,
             peer_name: args.name.unwrap_or_else(default_peer_name),
             outgoing_message: args.message,
+            stdio: args.stdio,
+            json_events: args.json,
         }
     }
 }
