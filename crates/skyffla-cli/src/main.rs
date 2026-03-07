@@ -146,6 +146,7 @@ struct UiState {
     input_history: Vec<String>,
     history_index: Option<usize>,
     draft_buffer: Option<String>,
+    history_path: Option<PathBuf>,
     rendered_event_lines: usize,
     rendered_width: Option<usize>,
     next_event_row: u16,
@@ -1927,6 +1928,8 @@ fn default_peer_name() -> String {
 
 impl UiState {
     fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Self {
+        let history_path = history_file_path();
+        let input_history = load_history(&history_path);
         Self {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
@@ -1936,9 +1939,10 @@ impl UiState {
             pending_offer: None,
             input_buffer: String::new(),
             cursor_index: 0,
-            input_history: Vec::new(),
+            input_history,
             history_index: None,
             draft_buffer: None,
+            history_path,
             rendered_event_lines: 0,
             rendered_width: None,
             next_event_row: 0,
@@ -2122,7 +2126,7 @@ impl UiState {
                 self.cursor_index = 0;
                 let previous = std::mem::take(&mut self.input_buffer);
                 if !submitted.is_empty() {
-                    self.input_history.push(previous);
+                    self.record_history(previous);
                     return Some(submitted);
                 }
             }
@@ -2180,6 +2184,18 @@ impl UiState {
             timestamp: compact_timestamp(),
             text,
         });
+    }
+
+    fn record_history(&mut self, line: String) {
+        if line.trim().is_empty() {
+            return;
+        }
+        self.input_history.push(line);
+        if self.input_history.len() > 500 {
+            let overflow = self.input_history.len() - 500;
+            self.input_history.drain(0..overflow);
+        }
+        save_history(&self.history_path, &self.input_history);
     }
 
     fn history_up(&mut self) {
@@ -2259,7 +2275,7 @@ fn parse_user_input(input: &str) -> UserInput {
     } else if trimmed == "/reject" {
         UserInput::Reject
     } else if let Some(path) = trimmed.strip_prefix("/send ") {
-        UserInput::SendFile(PathBuf::from(path.trim()))
+        UserInput::SendFile(expand_user_path(path.trim()))
     } else {
         UserInput::Chat(trimmed.to_string())
     }
@@ -2298,6 +2314,55 @@ fn describe_offer_size(offer: &Offer) -> String {
         (_, Some(size), _) => format!(" ({} bytes)", size),
         _ => String::new(),
     }
+}
+
+fn history_file_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_history"))
+}
+
+fn load_history(path: &Option<PathBuf>) -> Vec<String> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(contents) => contents
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_history(path: &Option<PathBuf>, history: &[String]) {
+    let Some(path) = path else {
+        return;
+    };
+    let contents = if history.is_empty() {
+        String::new()
+    } else {
+        let mut joined = history.join("\n");
+        joined.push('\n');
+        joined
+    };
+    let _ = std::fs::write(path, contents);
+}
+
+fn expand_user_path(input: &str) -> PathBuf {
+    if input == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(input));
+    }
+
+    if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+
+    PathBuf::from(input)
 }
 
 fn collect_folder_stats(path: &Path) -> Result<FolderStats> {
