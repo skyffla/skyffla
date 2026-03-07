@@ -26,13 +26,12 @@ What exists now:
 - SQLite-backed rendezvous store and `axum` HTTP service
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
-- minimal `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, and one-shot chat via `--message`
+- minimal `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, and interactive text chat
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
 - TUI
-- interactive multi-message chat loop
 - session-to-transport runtime wiring
 - file, folder, clipboard, or `stdio` transfer flows
 
@@ -195,7 +194,12 @@ Current supported flags:
 
 - `--server <url>` to point at the rendezvous API
 - `--name <peer-name>` to set the local handshake name
-- `--message <text>` to send a one-shot chat message after connect
+- `--message <text>` to use a one-shot non-interactive chat send after connect
+
+Default behavior without `--message`:
+
+- enter a simple line-oriented chat loop on stdin/stdout
+- type `/quit` to close the session
 
 Example local smoke test:
 
@@ -210,15 +214,17 @@ Terminal 2:
 
 ```sh
 . "$HOME/.cargo/env"
-cargo run -p skyffla -- host demo-room --server http://127.0.0.1:18080 --name host --message "hello from host"
+cargo run -p skyffla -- host demo-room --server http://127.0.0.1:18080 --name host
 ```
 
 Terminal 3:
 
 ```sh
 . "$HOME/.cargo/env"
-cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --name join --message "hello from join"
+cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --name join
 ```
+
+Then type chat lines in either terminal and use `/quit` to exit.
 
 Planned next CLI additions:
 
@@ -296,6 +302,7 @@ Current tests cover:
 - `iroh` bootstrap ticket round trips
 - end-to-end native `iroh` control-stream exchange between two local peers
 - build validation for the minimal `host`/`join` CLI path
+- manual smoke-test validation for interactive chat and clean `/quit` shutdown
 
 Run all tests:
 
@@ -318,17 +325,15 @@ cargo test -p skyffla-rendezvous
 Near-term work:
 
 - connect transport events to `skyffla-session`
-- extend the CLI from one-shot messaging into a real interactive loop
 - build the full TUI
 
 Expected implementation order:
 
-1. Extend the CLI from one-shot messaging into a real interactive loop
-2. Prove stable end-to-end chat over the session abstraction
-3. Add file and folder transfer
-4. Add clipboard transfer
-5. Add `stdio` automation mode
-6. Build the TUI on top of the same session events
+1. Prove stable end-to-end chat over the session abstraction
+2. Add file and folder transfer
+3. Add clipboard transfer
+4. Add `stdio` automation mode
+5. Build the TUI on top of the same session events
 
 ## Notes For New Contributors
 

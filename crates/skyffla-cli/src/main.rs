@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use iroh::endpoint::{ReadExactError, RecvStream, SendStream};
+use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
 use skyffla_protocol::{
     decode_frame, encode_frame, Capabilities, ChatMessage, ControlMessage, Envelope, Hello,
@@ -13,7 +13,7 @@ use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
 };
 use skyffla_transport::{IrohConnection, IrohTransport, PeerTicket};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -213,28 +213,19 @@ async fn run_connected_session(
     emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer });
 
     if let Some(message) = &config.outgoing_message {
-        let envelope = Envelope::new(
-            &session_id,
-            next_message_id(),
-            ControlMessage::ChatMessage(ChatMessage {
-                text: message.clone(),
-            }),
-        );
-        write_envelope(&mut send, &envelope).await?;
+        send_chat_message(&session_id, &mut send, message).await?;
         emit_runtime_event(RuntimeEvent::ChatSent {
             text: message.clone(),
         });
-    }
-    send.finish()
-        .context("failed to finish control stream send side")?;
+        send.finish()
+            .context("failed to finish control stream send side")?;
 
-    while let Some(envelope) = read_envelope(&mut recv).await? {
-        match envelope.payload {
-            ControlMessage::ChatMessage(message) => {
-                emit_runtime_event(RuntimeEvent::ChatReceived { text: message.text });
-            }
-            other => bail!("unexpected control message after handshake: {:?}", other),
+        while let Some(envelope) = read_envelope(&mut recv).await? {
+            handle_post_handshake_message(envelope)?;
         }
+    } else {
+        eprintln!("interactive chat ready; type /quit to exit");
+        run_interactive_chat_loop(&session_id, &mut send, &mut recv).await?;
     }
 
     emit_runtime_event(state_changed_event(
@@ -247,6 +238,55 @@ async fn run_connected_session(
             .transition(SessionEvent::Closed)
             .context("failed to enter closed state")?,
     ));
+
+    Ok(())
+}
+
+async fn run_interactive_chat_loop(
+    session_id: &str,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut send_open = true;
+
+    loop {
+        if !send_open {
+            match read_envelope(recv).await? {
+                Some(envelope) => handle_post_handshake_message(envelope)?,
+                None => break,
+            }
+            continue;
+        }
+
+        tokio::select! {
+            line = lines.next_line() => {
+                match line.context("failed to read stdin line")? {
+                    Some(line) => {
+                        let text = line.trim_end().to_string();
+                        if text == "/quit" {
+                            send.finish().context("failed to finish control stream send side")?;
+                            send_open = false;
+                        } else if !text.is_empty() {
+                            send_chat_message(session_id, send, &text).await?;
+                            emit_runtime_event(RuntimeEvent::ChatSent { text });
+                        }
+                    }
+                    None => {
+                        send.finish().context("failed to finish control stream send side")?;
+                        send_open = false;
+                    }
+                }
+            }
+            envelope = read_envelope(recv) => {
+                match envelope? {
+                    Some(envelope) => handle_post_handshake_message(envelope)?,
+                    None => break,
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -317,6 +357,27 @@ async fn exchange_hello(
     }
 }
 
+async fn send_chat_message(session_id: &str, send: &mut SendStream, text: &str) -> Result<()> {
+    let envelope = Envelope::new(
+        session_id,
+        next_message_id(),
+        ControlMessage::ChatMessage(ChatMessage {
+            text: text.to_string(),
+        }),
+    );
+    write_envelope(send, &envelope).await
+}
+
+fn handle_post_handshake_message(envelope: Envelope) -> Result<()> {
+    match envelope.payload {
+        ControlMessage::ChatMessage(message) => {
+            emit_runtime_event(RuntimeEvent::ChatReceived { text: message.text });
+            Ok(())
+        }
+        other => bail!("unexpected control message after handshake: {:?}", other),
+    }
+}
+
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()> {
     let bytes = encode_frame(envelope)?;
     send.write_all(&bytes)
@@ -336,6 +397,8 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Option<Envelope>> {
         Err(ReadExactError::FinishedEarly(bytes_read)) => {
             bail!("peer closed control stream mid-frame after {bytes_read} bytes")
         }
+        Err(ReadExactError::ReadError(ReadError::ClosedStream))
+        | Err(ReadExactError::ReadError(ReadError::ConnectionLost(_))) => return Ok(None),
         Err(ReadExactError::ReadError(error)) => {
             return Err(error).context("failed to read envelope prefix")
         }
