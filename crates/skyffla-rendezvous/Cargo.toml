@@ -1,0 +1,21 @@
+[package]
+name = "skyffla-rendezvous"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+axum = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde.workspace = true
+serde_json = "1"
+skyffla-protocol = { path = "../skyffla-protocol" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "skyffla-rendezvous"
+path = "src/main.rs"

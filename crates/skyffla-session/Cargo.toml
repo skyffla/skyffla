@@ -1,0 +1,8 @@
+[package]
+name = "skyffla-session"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+skyffla-protocol = { path = "../skyffla-protocol" }

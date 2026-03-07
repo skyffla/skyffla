@@ -1,0 +1,11 @@
+[package]
+name = "skyffla-transport"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+iroh = "0.96"
+serde_json = "1"
+skyffla-protocol = { path = "../skyffla-protocol" }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync"] }

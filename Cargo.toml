@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/skyffla-cli",
+    "crates/skyffla-protocol",
+    "crates/skyffla-rendezvous",
+    "crates/skyffla-session",
+    "crates/skyffla-transport",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"

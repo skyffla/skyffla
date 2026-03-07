@@ -1,0 +1,9 @@
+[package]
+name = "skyffla-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "skyffla"
+path = "src/main.rs"
