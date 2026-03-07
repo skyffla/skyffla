@@ -20,9 +20,9 @@ use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use skyffla_protocol::{
-    decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, Compression,
-    ControlMessage, DataStreamHeader, Digest, Envelope, Hello, HelloAck, Offer, Reject,
-    TransferKind, TransportCapability, PROTOCOL_VERSION,
+    decode_frame, encode_frame, Accept, Cancel, Capabilities, ChatMessage, Complete, Compression,
+    ControlMessage, DataStreamHeader, Digest, Envelope, ErrorMessage, Hello, HelloAck, Offer,
+    Reject, TransferKind, TransportCapability, PROTOCOL_VERSION,
 };
 use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
 use skyffla_session::{
@@ -101,6 +101,7 @@ enum UserInput {
     SendClipboard,
     Accept,
     Reject,
+    Cancel(Option<String>),
     Help,
     Quit,
 }
@@ -112,6 +113,7 @@ enum TransferStateUi {
     Streaming,
     Completed,
     Rejected,
+    Cancelled,
 }
 
 #[derive(Clone, Debug)]
@@ -429,11 +431,18 @@ async fn run_interactive_chat_loop(
     let mut send_open = true;
     ui.system("interactive session ready; use /help for commands".to_string());
     ui.render();
+    let shutdown_signal = wait_for_shutdown_signal();
+    tokio::pin!(shutdown_signal);
 
     loop {
         tokio::select! {
             maybe_key = input_rx.recv() => {
-                let Some(key) = maybe_key else { break };
+                let Some(key) = maybe_key else {
+                    if send_open {
+                        shutdown_interactive_session(session_id, send, ui, "input closed").await?;
+                    }
+                    break;
+                };
                 if !send_open {
                     continue;
                 }
@@ -441,9 +450,14 @@ async fn run_interactive_chat_loop(
                 if let Some(line) = ui.handle_key_event(key) {
                     match parse_user_input(&line) {
                             UserInput::Quit => {
-                                send.finish().context("failed to finish control stream send side")?;
+                                shutdown_interactive_session(
+                                    session_id,
+                                    send,
+                                    ui,
+                                    "user requested shutdown",
+                                )
+                                .await?;
                                 send_open = false;
-                                ui.system("closing session".to_string());
                             }
                             UserInput::Chat(text) => {
                                 if !text.is_empty() {
@@ -451,23 +465,46 @@ async fn run_interactive_chat_loop(
                                 }
                             }
                             UserInput::SendFile(path) => {
-                                send_path(session_id, connection, send, recv, &path, ui).await?;
+                                if let Err(error) =
+                                    send_path(session_id, connection, send, recv, &path, ui).await
+                                {
+                                    ui.system(format!("send failed: {error:#}"));
+                                }
                             }
                             UserInput::SendClipboard => {
-                                send_clipboard(session_id, connection, send, recv, ui).await?;
+                                if let Err(error) =
+                                    send_clipboard(session_id, connection, send, recv, ui).await
+                                {
+                                    ui.system(format!("clipboard send failed: {error:#}"));
+                                }
                             }
                             UserInput::Accept => {
                                 if let Some(offer) = ui.pending_offer.clone() {
                                     ui.pending_offer = None;
-                                    accept_pending_offer(
+                                    if let Err(error) = accept_pending_offer(
                                         session_id,
                                         connection,
                                         send,
                                         &config.download_dir,
-                                        offer,
+                                        offer.clone(),
                                         ui,
                                     )
-                                    .await?;
+                                    .await
+                                    {
+                                        let _ = send_transfer_error(
+                                            session_id,
+                                            send,
+                                            "transfer_failed",
+                                            &error.to_string(),
+                                            Some(offer.transfer_id.as_str()),
+                                        )
+                                        .await;
+                                        ui.mark_transfer_cancelled(&offer.transfer_id);
+                                        ui.system(format!(
+                                            "receive failed for {}: {error:#}",
+                                            offer.name
+                                        ));
+                                    }
                                 } else {
                                     ui.system("no pending offer to accept".to_string());
                                 }
@@ -491,6 +528,24 @@ async fn run_interactive_chat_loop(
                                     ui.system("no pending offer to reject".to_string());
                                 }
                             }
+                            UserInput::Cancel(requested) => {
+                                match resolve_cancel_target(ui, requested.as_deref()) {
+                                    Ok(Some(transfer_id)) => {
+                                        cancel_transfer(
+                                            session_id,
+                                            send,
+                                            ui,
+                                            &transfer_id,
+                                            "user cancelled",
+                                        )
+                                        .await?;
+                                    }
+                                    Ok(None) => {
+                                        ui.system("no active transfer to cancel".to_string());
+                                    }
+                                    Err(message) => ui.system(message),
+                                }
+                            }
                             UserInput::Help => {
                                 for line in help_lines() {
                                     ui.system(line.to_string());
@@ -508,6 +563,13 @@ async fn run_interactive_chat_loop(
                     None => break,
                 }
                 ui.render();
+            }
+            _ = &mut shutdown_signal => {
+                if send_open {
+                    shutdown_interactive_session(session_id, send, ui, "terminal disconnected").await?;
+                    ui.render();
+                }
+                break;
             }
         }
     }
@@ -579,6 +641,19 @@ async fn run_stdio_sender(
                         .unwrap_or_default()
                 );
             }
+            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
+                bail!(
+                    "stdio transfer cancelled{}",
+                    cancel
+                        .reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
+                bail!("stdio transfer error {}: {}", error.code, error.message);
+            }
             other => bail!(
                 "unexpected control message while waiting for stdio accept: {:?}",
                 other
@@ -636,6 +711,19 @@ async fn run_stdio_sender(
                 }));
                 return Ok(());
             }
+            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
+                bail!(
+                    "stdio transfer cancelled{}",
+                    cancel
+                        .reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
+                bail!("stdio transfer error {}: {}", error.code, error.message);
+            }
             other => bail!(
                 "unexpected control message while waiting for stdio complete: {:?}",
                 other
@@ -657,6 +745,7 @@ async fn run_stdio_receiver(
             .context("peer closed control stream before stdio offer")?;
         match envelope.payload {
             ControlMessage::Offer(offer) if offer.kind == TransferKind::Stdio => break offer,
+            ControlMessage::Error(error) => bail!("peer error {}: {}", error.code, error.message),
             other => bail!("expected stdio offer, got {:?}", other),
         }
     };
@@ -884,6 +973,31 @@ async fn handle_post_handshake_message(
             ));
             Ok(())
         }
+        ControlMessage::Cancel(cancel) => {
+            ui.mark_transfer_cancelled(&cancel.transfer_id);
+            ui.system(format!(
+                "transfer {} cancelled{}",
+                cancel.transfer_id,
+                cancel
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            ));
+            Ok(())
+        }
+        ControlMessage::Error(error) => {
+            if let Some(transfer_id) = error.transfer_id.as_deref() {
+                ui.mark_transfer_cancelled(transfer_id);
+                ui.system(format!(
+                    "transfer {} error {}: {}",
+                    transfer_id, error.code, error.message
+                ));
+            } else {
+                ui.system(format!("peer error {}: {}", error.code, error.message));
+            }
+            Ok(())
+        }
         other => bail!("unexpected control message after handshake: {:?}", other),
     }
 }
@@ -971,6 +1085,29 @@ async fn send_file(
                         .as_deref()
                         .map(|r| format!(" ({r})"))
                         .unwrap_or_default()
+                ));
+                ui.render();
+                return Ok(());
+            }
+            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
+                ui.mark_transfer_cancelled(&cancel.transfer_id);
+                ui.system(format!(
+                    "transfer {} cancelled{}",
+                    cancel.transfer_id,
+                    cancel
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ));
+                ui.render();
+                return Ok(());
+            }
+            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
+                ui.mark_transfer_cancelled(&transfer_id);
+                ui.system(format!(
+                    "transfer {} error {}: {}",
+                    transfer_id, error.code, error.message
                 ));
                 ui.render();
                 return Ok(());
@@ -1450,6 +1587,29 @@ async fn wait_for_transfer_accept(
                 ui.render();
                 return Ok(false);
             }
+            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
+                ui.mark_transfer_cancelled(&cancel.transfer_id);
+                ui.system(format!(
+                    "transfer {} cancelled{}",
+                    cancel.transfer_id,
+                    cancel
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ));
+                ui.render();
+                return Ok(false);
+            }
+            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(transfer_id) => {
+                ui.mark_transfer_cancelled(transfer_id);
+                ui.system(format!(
+                    "transfer {} error {}: {}",
+                    transfer_id, error.code, error.message
+                ));
+                ui.render();
+                return Ok(false);
+            }
             other => bail!(
                 "unexpected control message while waiting for transfer accept: {:?}",
                 other
@@ -1457,6 +1617,130 @@ async fn wait_for_transfer_accept(
         }
         ui.render();
     }
+}
+
+async fn shutdown_interactive_session(
+    session_id: &str,
+    send: &mut SendStream,
+    ui: &mut UiState,
+    reason: &str,
+) -> Result<()> {
+    let cancelled = cancel_active_transfers(session_id, send, ui, reason).await?;
+    if cancelled > 0 {
+        ui.system(format!(
+            "cancelled {} transfer(s) before closing",
+            cancelled
+        ));
+    }
+    send.finish()
+        .context("failed to finish control stream send side")?;
+    ui.system("closing session".to_string());
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to register SIGHUP handler");
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = sighup.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    std::future::pending::<()>().await;
+}
+
+async fn cancel_active_transfers(
+    session_id: &str,
+    send: &mut SendStream,
+    ui: &mut UiState,
+    reason: &str,
+) -> Result<usize> {
+    let transfer_ids = ui.cancellable_transfer_ids();
+    for transfer_id in &transfer_ids {
+        cancel_transfer(session_id, send, ui, transfer_id, reason).await?;
+    }
+    Ok(transfer_ids.len())
+}
+
+async fn cancel_transfer(
+    session_id: &str,
+    send: &mut SendStream,
+    ui: &mut UiState,
+    transfer_id: &str,
+    reason: &str,
+) -> Result<()> {
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Cancel(Cancel {
+                transfer_id: transfer_id.to_string(),
+                reason: Some(reason.to_string()),
+            }),
+        ),
+    )
+    .await?;
+    ui.mark_transfer_cancelled(transfer_id);
+    if ui
+        .pending_offer
+        .as_ref()
+        .is_some_and(|offer| offer.transfer_id == transfer_id)
+    {
+        ui.pending_offer = None;
+    }
+    ui.system(format!("transfer {} cancelled ({})", transfer_id, reason));
+    Ok(())
+}
+
+fn resolve_cancel_target(
+    ui: &UiState,
+    requested: Option<&str>,
+) -> std::result::Result<Option<String>, String> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(transfer_id) => {
+            if !ui.has_transfer(transfer_id) {
+                return Err(format!("unknown transfer {}", transfer_id));
+            }
+            Ok(Some(transfer_id.to_string()))
+        }
+        None => {
+            let cancellable = ui.cancellable_transfer_ids();
+            match cancellable.len() {
+                0 => Ok(None),
+                1 => Ok(cancellable.into_iter().next()),
+                _ => Err("multiple active transfers; use /cancel <transfer-id>".to_string()),
+            }
+        }
+    }
+}
+
+async fn send_transfer_error(
+    session_id: &str,
+    send: &mut SendStream,
+    code: &str,
+    message: &str,
+    transfer_id: Option<&str>,
+) -> Result<()> {
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Error(ErrorMessage {
+                code: code.to_string(),
+                message: message.to_string(),
+                transfer_id: transfer_id.map(ToOwned::to_owned),
+            }),
+        ),
+    )
+    .await
 }
 
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()> {
@@ -1693,6 +1977,33 @@ impl UiState {
         if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
             transfer.state = TransferStateUi::Rejected;
         }
+    }
+
+    fn mark_transfer_cancelled(&mut self, transfer_id: &str) {
+        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.state = TransferStateUi::Cancelled;
+        }
+    }
+
+    fn cancellable_transfer_ids(&self) -> Vec<String> {
+        self.transfers
+            .iter()
+            .filter(|transfer| {
+                matches!(
+                    transfer.state,
+                    TransferStateUi::Pending
+                        | TransferStateUi::AwaitingDecision
+                        | TransferStateUi::Streaming
+                )
+            })
+            .map(|transfer| transfer.id.clone())
+            .collect()
+    }
+
+    fn has_transfer(&self, transfer_id: &str) -> bool {
+        self.transfers
+            .iter()
+            .any(|transfer| transfer.id == transfer_id)
     }
 
     fn update_transfer_progress(&mut self, transfer_id: &str, done: u64, total: Option<u64>) {
@@ -1939,6 +2250,10 @@ fn parse_user_input(input: &str) -> UserInput {
         UserInput::Help
     } else if trimmed == "/clip" {
         UserInput::SendClipboard
+    } else if trimmed == "/cancel" {
+        UserInput::Cancel(None)
+    } else if let Some(transfer_id) = trimmed.strip_prefix("/cancel ") {
+        UserInput::Cancel(Some(transfer_id.trim().to_string()))
     } else if trimmed == "/accept" {
         UserInput::Accept
     } else if trimmed == "/reject" {
@@ -1958,8 +2273,9 @@ fn help_lines() -> &'static [&'static str] {
         "/clip  offer clipboard text",
         "/accept  accept the pending file offer",
         "/reject  reject the pending file offer",
+        "/cancel [id]  cancel an active transfer",
         "/quit  close the session",
-        "shortcuts: q quit, y accept, n reject",
+        "shortcuts: q quit, y accept, n reject, ctrl+c close",
         "editing: up/down history, ctrl+a line start, ctrl+e line end",
     ]
 }
