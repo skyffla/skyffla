@@ -2,6 +2,21 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPeer {
+    pub session_id: String,
+    pub peer_name: String,
+    pub peer_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    StateChanged(SessionState),
+    HandshakeCompleted { peer: SessionPeer },
+    ChatSent { text: String },
+    ChatReceived { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     Idle,
     Hosting { stream_id: String },
@@ -148,6 +163,10 @@ impl Default for SessionMachine {
             transfers: BTreeMap::new(),
         }
     }
+}
+
+pub fn state_changed_event(state: &SessionState) -> RuntimeEvent {
+    RuntimeEvent::StateChanged(state.clone())
 }
 
 fn is_valid_transfer_transition(from: &TransferState, to: &TransferState) -> bool {

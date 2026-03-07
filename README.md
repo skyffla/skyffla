@@ -22,16 +22,17 @@ What exists now:
 
 - Cargo workspace with the planned crate layout
 - protocol types and CBOR length-prefixed framing
-- session state machine skeleton
+- session state machine plus minimal runtime event types
 - SQLite-backed rendezvous store and `axum` HTTP service
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
+- minimal `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, and one-shot chat via `--message`
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
-- real CLI commands
 - TUI
+- interactive multi-message chat loop
 - session-to-transport runtime wiring
 - file, folder, clipboard, or `stdio` transfer flows
 
@@ -185,12 +186,42 @@ Transport direction:
 
 ## Current Commands
 
-There are placeholder CLI binaries in the workspace today, but the rendezvous server is now runnable.
-
-Planned CLI:
+Current CLI:
 
 - `skyffla host <stream-id>`
 - `skyffla join <stream-id>`
+
+Current supported flags:
+
+- `--server <url>` to point at the rendezvous API
+- `--name <peer-name>` to set the local handshake name
+- `--message <text>` to send a one-shot chat message after connect
+
+Example local smoke test:
+
+Terminal 1:
+
+```sh
+. "$HOME/.cargo/env"
+SKYFFLA_RENDEZVOUS_ADDR=127.0.0.1:18080 cargo run -p skyffla-rendezvous
+```
+
+Terminal 2:
+
+```sh
+. "$HOME/.cargo/env"
+cargo run -p skyffla -- host demo-room --server http://127.0.0.1:18080 --name host --message "hello from host"
+```
+
+Terminal 3:
+
+```sh
+. "$HOME/.cargo/env"
+cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --name join --message "hello from join"
+```
+
+Planned next CLI additions:
+
 - `skyffla host <stream-id> --stdio`
 - `skyffla join <stream-id> --stdio`
 
@@ -264,6 +295,7 @@ Current tests cover:
 - HTTP endpoint behavior and rate limiting
 - `iroh` bootstrap ticket round trips
 - end-to-end native `iroh` control-stream exchange between two local peers
+- build validation for the minimal `host`/`join` CLI path
 
 Run all tests:
 
@@ -286,16 +318,17 @@ cargo test -p skyffla-rendezvous
 Near-term work:
 
 - connect transport events to `skyffla-session`
-- add a minimal CLI flow before building the full TUI
+- extend the CLI from one-shot messaging into a real interactive loop
+- build the full TUI
 
 Expected implementation order:
 
-1. Connect transport lifecycle events to `skyffla-session`
-2. Add a minimal `host` and `join` CLI flow
-3. Prove end-to-end chat
-4. Add file and folder transfer
-5. Add clipboard transfer
-6. Add `stdio` automation mode
+1. Extend the CLI from one-shot messaging into a real interactive loop
+2. Prove stable end-to-end chat over the session abstraction
+3. Add file and folder transfer
+4. Add clipboard transfer
+5. Add `stdio` automation mode
+6. Build the TUI on top of the same session events
 
 ## Notes For New Contributors
 
