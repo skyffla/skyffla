@@ -26,12 +26,12 @@ What exists now:
 - SQLite-backed rendezvous store and `axum` HTTP service
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
-- `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, and tar-based folder transfer
+- `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, tar-based folder transfer, and explicit text clipboard transfer
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
-- clipboard and `stdio` transfer flows
+- `stdio` transfer flow
 - richer key-driven TUI navigation beyond the current command-based flow
 - persistent transfer history or resumable transfers
 
@@ -65,6 +65,7 @@ Required on macOS:
 - Git
 - Rust toolchain
 - `tar` available on `PATH` for folder transfer send/extract
+- local clipboard access available for `/clip` send/receive
 
 Recommended:
 
@@ -202,6 +203,7 @@ Default behavior without `--message`:
 
 - enter a full-screen terminal UI for chat/transfers
 - use `/send <path>` to transfer a file or folder
+- use `/clip` to transfer text clipboard contents
 - use `/accept` or `y` to accept an incoming file offer
 - use `/reject` or `n` to reject an incoming file offer
 - type `/quit` or `q` to close the session
@@ -243,6 +245,14 @@ The receiver currently must explicitly `/accept` or `/reject` each incoming file
 Shortcuts are also available: `y` accepts, `n` rejects, and `q` quits.
 Transfer status and byte progress are shown live in the TUI.
 Folder transfer currently shells out to local `tar` on both peers.
+
+Clipboard transfer example after connect:
+
+```text
+/clip
+```
+
+Clipboard transfer currently supports text only and writes to the local clipboard only after explicit acceptance.
 
 Planned next CLI additions:
 

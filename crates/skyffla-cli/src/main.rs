@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use arboard::Clipboard;
 use clap::{Args, Parser, Subcommand};
 use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -30,6 +31,7 @@ use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
+use tokio::task;
 
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -81,6 +83,7 @@ struct SessionConfig {
 enum UserInput {
     Chat(String),
     SendFile(PathBuf),
+    SendClipboard,
     Accept,
     Reject,
     Help,
@@ -407,6 +410,9 @@ async fn run_interactive_chat_loop(
                             UserInput::SendFile(path) => {
                                 send_path(session_id, connection, send, recv, &path, ui).await?;
                             }
+                            UserInput::SendClipboard => {
+                                send_clipboard(session_id, connection, send, recv, ui).await?;
+                            }
                             UserInput::Accept => {
                                 if let Some(offer) = ui.pending_offer.clone() {
                                     ui.pending_offer = None;
@@ -574,7 +580,10 @@ async fn handle_post_handshake_message(
             Ok(())
         }
         ControlMessage::Offer(offer)
-            if matches!(offer.kind, TransferKind::File | TransferKind::FolderArchive) =>
+            if matches!(
+                offer.kind,
+                TransferKind::File | TransferKind::FolderArchive | TransferKind::Clipboard
+            ) =>
         {
             ui.pending_offer = Some(offer.clone());
             ui.upsert_transfer(TransferUi {
@@ -887,6 +896,73 @@ async fn send_folder(
     Ok(())
 }
 
+async fn send_clipboard(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    ui: &mut UiState,
+) -> Result<()> {
+    let clipboard_text = read_clipboard_text().await?;
+    let transfer_id = format!("t{}", next_message_id());
+    let bytes = clipboard_text.as_bytes();
+    let offer = Offer {
+        transfer_id: transfer_id.clone(),
+        kind: TransferKind::Clipboard,
+        name: "clipboard".to_string(),
+        size: Some(bytes.len() as u64),
+        mime: Some("text/plain".to_string()),
+        item_count: None,
+        compression: None,
+        path_hint: None,
+    };
+
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Offer(offer.clone()),
+        ),
+    )
+    .await?;
+    ui.upsert_transfer(TransferUi {
+        id: transfer_id.clone(),
+        state: TransferStateUi::Pending,
+        bytes_done: 0,
+        bytes_total: Some(bytes.len() as u64),
+    });
+    ui.system(format!("offered clipboard text ({} bytes)", bytes.len()));
+    ui.render();
+
+    if !wait_for_transfer_accept(recv, &transfer_id, ui).await? {
+        return Ok(());
+    }
+
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.clone(),
+            kind: TransferKind::Clipboard,
+        },
+    )
+    .await?;
+    ui.mark_transfer_streaming(&transfer_id);
+    ui.render();
+
+    data_send
+        .write_all(bytes)
+        .await
+        .context("failed to stream clipboard bytes")?;
+    data_send.finish().context("failed to finish data stream")?;
+    ui.update_transfer_progress(&transfer_id, bytes.len() as u64, Some(bytes.len() as u64));
+    ui.mark_transfer_completed(&transfer_id);
+    ui.system("sent clipboard text".to_string());
+    ui.render();
+    Ok(())
+}
+
 async fn accept_pending_offer(
     session_id: &str,
     connection: &IrohConnection,
@@ -995,6 +1071,27 @@ async fn accept_pending_offer(
                 bail!("tar extractor exited with status {status}");
             }
             download_dir.join(&item_name).display().to_string()
+        }
+        TransferKind::Clipboard => {
+            let mut data = Vec::new();
+            loop {
+                match data_recv.read(&mut buffer).await {
+                    Ok(Some(bytes_read)) => {
+                        data.extend_from_slice(&buffer[..bytes_read]);
+                        bytes_done += bytes_read as u64;
+                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
+                        ui.render();
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        return Err(error).context("failed to read incoming clipboard stream");
+                    }
+                }
+            }
+            let text =
+                String::from_utf8(data).context("received clipboard payload was not UTF-8")?;
+            write_clipboard_text(text).await?;
+            "local clipboard".to_string()
         }
         _ => bail!("unsupported accepted transfer kind: {:?}", offer.kind),
     };
@@ -1483,6 +1580,8 @@ fn parse_user_input(input: &str) -> UserInput {
         UserInput::Quit
     } else if trimmed == "/help" {
         UserInput::Help
+    } else if trimmed == "/clip" {
+        UserInput::SendClipboard
     } else if trimmed == "/accept" {
         UserInput::Accept
     } else if trimmed == "/reject" {
@@ -1498,11 +1597,13 @@ fn help_lines() -> &'static [&'static str] {
     &[
         "commands:",
         "/help  show this help",
-        "/send <path>  offer a file",
+        "/send <path>  offer a file or folder",
+        "/clip  offer clipboard text",
         "/accept  accept the pending file offer",
         "/reject  reject the pending file offer",
         "/quit  close the session",
-        "shortcuts: q quit, y accept, n reject, ctrl+a line start, ctrl+e line end",
+        "shortcuts: q quit, y accept, n reject",
+        "editing: up/down history, ctrl+a line start, ctrl+e line end",
     ]
 }
 
@@ -1553,6 +1654,28 @@ fn collect_folder_stats(path: &Path) -> Result<FolderStats> {
     };
     visit(path, &mut stats)?;
     Ok(stats)
+}
+
+async fn read_clipboard_text() -> Result<String> {
+    task::spawn_blocking(|| {
+        let mut clipboard = Clipboard::new().context("failed to access local clipboard")?;
+        clipboard
+            .get_text()
+            .context("failed to read text from local clipboard")
+    })
+    .await
+    .context("clipboard read task failed")?
+}
+
+async fn write_clipboard_text(text: String) -> Result<()> {
+    task::spawn_blocking(move || {
+        let mut clipboard = Clipboard::new().context("failed to access local clipboard")?;
+        clipboard
+            .set_text(text)
+            .context("failed to write text to local clipboard")
+    })
+    .await
+    .context("clipboard write task failed")?
 }
 
 fn wrap_prefixed_lines(prefix: &str, text: &str, width: usize) -> Vec<String> {
