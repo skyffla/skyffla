@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -102,6 +104,7 @@ enum UserInput {
     Accept,
     Reject,
     Cancel(Option<String>),
+    AutoAccept(Option<bool>),
     Help,
     Quit,
 }
@@ -129,15 +132,63 @@ struct EventLine {
     text: String,
 }
 
+#[derive(Clone)]
 struct FolderStats {
     item_count: u64,
     total_bytes: u64,
+}
+
+#[derive(Clone)]
+struct PendingOutgoingTransfer {
+    offer: Offer,
+    source: OutgoingTransferSource,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+enum OutgoingTransferSource {
+    File {
+        path: PathBuf,
+        file_name: String,
+        size: u64,
+    },
+    Folder {
+        path: PathBuf,
+        folder_name: String,
+        stats: FolderStats,
+    },
+    Clipboard {
+        text: String,
+    },
+}
+
+enum TransferTaskEvent {
+    Progress {
+        transfer_id: String,
+        bytes_done: u64,
+        bytes_total: Option<u64>,
+    },
+    LocalComplete {
+        transfer_id: String,
+        message: String,
+    },
+    ReceiveComplete {
+        transfer_id: String,
+        message: String,
+        digest: Digest,
+    },
+    Failed {
+        transfer_id: String,
+        message: String,
+        notify_peer: bool,
+    },
 }
 
 struct UiState {
     stream_id: String,
     peer_name: String,
     local_name: String,
+    auto_accept_enabled: bool,
     events: Vec<EventLine>,
     transfers: Vec<TransferUi>,
     pending_offer: Option<Offer>,
@@ -414,6 +465,9 @@ async fn run_interactive_chat_loop(
 ) -> Result<()> {
     let _terminal = TerminalUiGuard::activate()?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let (task_tx, mut task_rx) = mpsc::unbounded_channel();
+    let mut pending_outgoing = HashMap::<String, PendingOutgoingTransfer>::new();
+    let mut running_transfers = HashMap::<String, Arc<AtomicBool>>::new();
     thread::spawn(move || loop {
         match event::poll(Duration::from_millis(100)) {
             Ok(true) => match event::read() {
@@ -431,6 +485,10 @@ async fn run_interactive_chat_loop(
     });
     let mut send_open = true;
     ui.system("interactive session ready; use /help for commands".to_string());
+    ui.system(format!(
+        "auto-accept is {} for files and clipboard",
+        if ui.auto_accept_enabled { "on" } else { "off" }
+    ));
     ui.render();
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
@@ -440,7 +498,14 @@ async fn run_interactive_chat_loop(
             maybe_key = input_rx.recv() => {
                 let Some(key) = maybe_key else {
                     if send_open {
-                        shutdown_interactive_session(session_id, send, ui, "input closed").await?;
+                        shutdown_interactive_session(
+                            session_id,
+                            send,
+                            ui,
+                            "input closed",
+                            &mut pending_outgoing,
+                            &mut running_transfers,
+                        ).await?;
                     }
                     break;
                 };
@@ -456,6 +521,8 @@ async fn run_interactive_chat_loop(
                                     send,
                                     ui,
                                     "user requested shutdown",
+                                    &mut pending_outgoing,
+                                    &mut running_transfers,
                                 )
                                 .await?;
                                 send_open = false;
@@ -466,45 +533,53 @@ async fn run_interactive_chat_loop(
                                 }
                             }
                             UserInput::SendFile(path) => {
-                                if let Err(error) =
-                                    send_path(session_id, connection, send, recv, &path, ui).await
-                                {
-                                    ui.system(format!("send failed: {error:#}"));
+                                match send_path(session_id, send, &path, ui).await {
+                                    Ok(plan) => {
+                                        pending_outgoing.insert(plan.offer.transfer_id.clone(), plan);
+                                    }
+                                    Err(error) => ui.system(format!("send failed: {error:#}")),
                                 }
                             }
                             UserInput::SendClipboard => {
-                                if let Err(error) =
-                                    send_clipboard(session_id, connection, send, recv, ui).await
-                                {
-                                    ui.system(format!("clipboard send failed: {error:#}"));
+                                match send_clipboard(session_id, send, ui).await {
+                                    Ok(plan) => {
+                                        pending_outgoing.insert(plan.offer.transfer_id.clone(), plan);
+                                    }
+                                    Err(error) => ui.system(format!("clipboard send failed: {error:#}")),
                                 }
                             }
                             UserInput::Accept => {
                                 if let Some(offer) = ui.pending_offer.clone() {
                                     ui.pending_offer = None;
-                                    if let Err(error) = accept_pending_offer(
+                                    match accept_pending_offer(
                                         session_id,
                                         connection,
                                         send,
                                         &config.download_dir,
                                         offer.clone(),
                                         ui,
+                                        task_tx.clone(),
                                     )
                                     .await
                                     {
-                                        let _ = send_transfer_error(
-                                            session_id,
-                                            send,
-                                            "transfer_failed",
-                                            &error.to_string(),
-                                            Some(offer.transfer_id.as_str()),
-                                        )
-                                        .await;
-                                        ui.mark_transfer_cancelled(&offer.transfer_id);
-                                        ui.system(format!(
-                                            "receive failed for {}: {error:#}",
-                                            offer.name
-                                        ));
+                                        Ok(cancel) => {
+                                            running_transfers.insert(offer.transfer_id.clone(), cancel);
+                                        }
+                                        Err(error) => {
+                                            let _ = send_transfer_error(
+                                                session_id,
+                                                send,
+                                                "transfer_failed",
+                                                &error.to_string(),
+                                                Some(offer.transfer_id.as_str()),
+                                            )
+                                            .await;
+                                            ui.mark_transfer_cancelled(&offer.transfer_id);
+                                            ui.system(format!(
+                                                "receive failed for {}: {error:#}",
+                                                offer.name
+                                            ));
+                                        }
                                     }
                                 } else {
                                     ui.system("no pending offer to accept".to_string());
@@ -540,11 +615,33 @@ async fn run_interactive_chat_loop(
                                             "user cancelled",
                                         )
                                         .await?;
+                                        if let Some(cancel) = running_transfers.remove(&transfer_id) {
+                                            cancel.store(true, Ordering::SeqCst);
+                                        }
+                                        pending_outgoing.remove(&transfer_id);
                                     }
                                     Ok(None) => {
                                         ui.system("no active transfer to cancel".to_string());
                                     }
                                     Err(message) => ui.system(message),
+                                }
+                            }
+                            UserInput::AutoAccept(enabled) => {
+                                match enabled {
+                                    Some(enabled) => {
+                                        ui.auto_accept_enabled = enabled;
+                                        save_auto_accept(enabled);
+                                        ui.system(format!(
+                                            "auto-accept {} for files and clipboard",
+                                            if enabled { "enabled" } else { "disabled" }
+                                        ));
+                                    }
+                                    None => {
+                                        ui.system(format!(
+                                            "auto-accept is {} for files and clipboard",
+                                            if ui.auto_accept_enabled { "on" } else { "off" }
+                                        ));
+                                    }
                                 }
                             }
                             UserInput::Help => {
@@ -559,15 +656,76 @@ async fn run_interactive_chat_loop(
             envelope = read_envelope(recv) => {
                 match envelope? {
                     Some(envelope) => {
-                        handle_post_handshake_message(ui, envelope, None).await?
+                        handle_interactive_envelope(
+                            session_id,
+                            connection,
+                            send,
+                            &config.download_dir,
+                            ui,
+                            task_tx.clone(),
+                            &mut pending_outgoing,
+                            &mut running_transfers,
+                            envelope,
+                        ).await?;
                     }
                     None => break,
                 }
                 ui.render();
             }
+            maybe_event = task_rx.recv() => {
+                let Some(event) = maybe_event else { break; };
+                match event {
+                    TransferTaskEvent::Progress { transfer_id, bytes_done, bytes_total } => {
+                        ui.update_transfer_progress(&transfer_id, bytes_done, bytes_total);
+                    }
+                    TransferTaskEvent::LocalComplete { transfer_id, message } => {
+                        running_transfers.remove(&transfer_id);
+                        ui.mark_transfer_completed(&transfer_id);
+                        ui.system(message);
+                    }
+                    TransferTaskEvent::ReceiveComplete { transfer_id, message, digest } => {
+                        running_transfers.remove(&transfer_id);
+                        write_envelope(
+                            send,
+                            &Envelope::new(
+                                session_id,
+                                next_message_id(),
+                                ControlMessage::Complete(Complete {
+                                    transfer_id: transfer_id.clone(),
+                                    digest: Some(digest),
+                                }),
+                            ),
+                        ).await?;
+                        ui.mark_transfer_completed(&transfer_id);
+                        ui.system(message);
+                    }
+                    TransferTaskEvent::Failed { transfer_id, message, notify_peer } => {
+                        running_transfers.remove(&transfer_id);
+                        ui.mark_transfer_cancelled(&transfer_id);
+                        ui.system(message.clone());
+                        if notify_peer {
+                            let _ = send_transfer_error(
+                                session_id,
+                                send,
+                                "transfer_failed",
+                                &message,
+                                Some(transfer_id.as_str()),
+                            ).await;
+                        }
+                    }
+                }
+                ui.render();
+            }
             _ = &mut shutdown_signal => {
                 if send_open {
-                    shutdown_interactive_session(session_id, send, ui, "terminal disconnected").await?;
+                    shutdown_interactive_session(
+                        session_id,
+                        send,
+                        ui,
+                        "terminal disconnected",
+                        &mut pending_outgoing,
+                        &mut running_transfers,
+                    ).await?;
                     ui.render();
                 }
                 break;
@@ -916,6 +1074,158 @@ async fn send_chat_message(
     Ok(())
 }
 
+async fn handle_interactive_envelope(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    download_dir: &Path,
+    ui: &mut UiState,
+    task_tx: mpsc::UnboundedSender<TransferTaskEvent>,
+    pending_outgoing: &mut HashMap<String, PendingOutgoingTransfer>,
+    running_transfers: &mut HashMap<String, Arc<AtomicBool>>,
+    envelope: Envelope,
+) -> Result<()> {
+    match envelope.payload {
+        ControlMessage::ChatMessage(message) => {
+            let text = message.text;
+            let speaker = ui.peer_name.clone();
+            ui.chat(&speaker, &text);
+            Ok(())
+        }
+        ControlMessage::Accept(Accept { transfer_id }) => {
+            if let Some(plan) = pending_outgoing.remove(&transfer_id) {
+                ui.mark_transfer_streaming(&transfer_id);
+                running_transfers.insert(transfer_id.clone(), plan.cancel.clone());
+                spawn_outgoing_transfer_task(connection.clone(), plan, task_tx);
+            } else {
+                ui.system(format!("transfer {} accepted", transfer_id));
+            }
+            Ok(())
+        }
+        ControlMessage::Offer(offer)
+            if matches!(
+                offer.kind,
+                TransferKind::File | TransferKind::FolderArchive | TransferKind::Clipboard
+            ) =>
+        {
+            ui.upsert_transfer(TransferUi {
+                id: offer.transfer_id.clone(),
+                state: TransferStateUi::AwaitingDecision,
+                bytes_done: 0,
+                bytes_total: offer.size,
+            });
+            let should_auto_accept = ui.auto_accept_enabled
+                && matches!(offer.kind, TransferKind::File | TransferKind::Clipboard);
+            if should_auto_accept {
+                ui.system(format!(
+                    "auto-accepting {} {}{}",
+                    transfer_kind_label(&offer.kind),
+                    offer.name,
+                    describe_offer_size(&offer)
+                ));
+                match accept_pending_offer(
+                    session_id,
+                    connection,
+                    send,
+                    download_dir,
+                    offer.clone(),
+                    ui,
+                    task_tx.clone(),
+                )
+                .await
+                {
+                    Ok(cancel) => {
+                        running_transfers.insert(offer.transfer_id.clone(), cancel);
+                    }
+                    Err(error) => {
+                        let _ = send_transfer_error(
+                            session_id,
+                            send,
+                            "transfer_failed",
+                            &error.to_string(),
+                            Some(offer.transfer_id.as_str()),
+                        )
+                        .await;
+                        ui.mark_transfer_cancelled(&offer.transfer_id);
+                        ui.system(format!("auto-accept failed for {}: {error:#}", offer.name));
+                    }
+                }
+            } else {
+                ui.pending_offer = Some(offer.clone());
+                ui.system(format!(
+                    "incoming {} offer: {}{}. /accept or /reject",
+                    transfer_kind_label(&offer.kind),
+                    offer.name,
+                    describe_offer_size(&offer)
+                ));
+            }
+            Ok(())
+        }
+        ControlMessage::Complete(complete) => {
+            pending_outgoing.remove(&complete.transfer_id);
+            running_transfers.remove(&complete.transfer_id);
+            ui.mark_transfer_completed(&complete.transfer_id);
+            ui.system(format!(
+                "transfer {} complete{}",
+                complete.transfer_id,
+                format_digest_suffix(complete.digest.as_ref())
+            ));
+            Ok(())
+        }
+        ControlMessage::Reject(reject) => {
+            pending_outgoing.remove(&reject.transfer_id);
+            if let Some(cancel) = running_transfers.remove(&reject.transfer_id) {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            ui.mark_transfer_rejected(&reject.transfer_id);
+            ui.system(format!(
+                "transfer {} rejected{}",
+                reject.transfer_id,
+                reject
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            ));
+            Ok(())
+        }
+        ControlMessage::Cancel(cancel) => {
+            pending_outgoing.remove(&cancel.transfer_id);
+            if let Some(flag) = running_transfers.remove(&cancel.transfer_id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+            ui.mark_transfer_cancelled(&cancel.transfer_id);
+            ui.system(format!(
+                "transfer {} cancelled{}",
+                cancel.transfer_id,
+                cancel
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            ));
+            Ok(())
+        }
+        ControlMessage::Error(error) => {
+            if let Some(transfer_id) = error.transfer_id.as_deref() {
+                pending_outgoing.remove(transfer_id);
+                if let Some(flag) = running_transfers.remove(transfer_id) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                ui.mark_transfer_cancelled(transfer_id);
+                ui.system(format!(
+                    "transfer {} error {}: {}",
+                    transfer_id, error.code, error.message
+                ));
+            } else {
+                ui.system(format!("peer error {}: {}", error.code, error.message));
+            }
+            Ok(())
+        }
+        other => bail!("unexpected control message after handshake: {:?}", other),
+    }
+}
+
 async fn handle_post_handshake_message(
     ui: &mut UiState,
     envelope: Envelope,
@@ -1005,12 +1315,10 @@ async fn handle_post_handshake_message(
 
 async fn send_file(
     session_id: &str,
-    connection: &IrohConnection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
     path: &Path,
     ui: &mut UiState,
-) -> Result<()> {
+) -> Result<PendingOutgoingTransfer> {
     let metadata = fs::metadata(path)
         .await
         .with_context(|| format!("failed to stat {}", path.display()))?;
@@ -1052,138 +1360,30 @@ async fn send_file(
     });
     ui.system(format!("offered file {}", file_name));
     ui.render();
-
-    loop {
-        let envelope = read_envelope(recv)
-            .await?
-            .context("peer closed control stream while file offer was pending")?;
-        match envelope.payload {
-            ControlMessage::Accept(Accept {
-                transfer_id: accepted,
-            }) if accepted == transfer_id => {
-                break;
-            }
-            ControlMessage::ChatMessage(message) => {
-                let text = message.text;
-                let speaker = ui.peer_name.clone();
-                ui.chat(&speaker, &text);
-            }
-            ControlMessage::Complete(complete) => {
-                ui.mark_transfer_completed(&complete.transfer_id);
-                ui.system(format!(
-                    "transfer {} complete{}",
-                    complete.transfer_id,
-                    format_digest_suffix(complete.digest.as_ref())
-                ));
-            }
-            ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
-                ui.mark_transfer_rejected(&reject.transfer_id);
-                ui.system(format!(
-                    "transfer {} rejected{}",
-                    reject.transfer_id,
-                    reject
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(" ({r})"))
-                        .unwrap_or_default()
-                ));
-                ui.render();
-                return Ok(());
-            }
-            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
-                ui.mark_transfer_cancelled(&cancel.transfer_id);
-                ui.system(format!(
-                    "transfer {} cancelled{}",
-                    cancel.transfer_id,
-                    cancel
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(" ({r})"))
-                        .unwrap_or_default()
-                ));
-                ui.render();
-                return Ok(());
-            }
-            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
-                ui.mark_transfer_cancelled(&transfer_id);
-                ui.system(format!(
-                    "transfer {} error {}: {}",
-                    transfer_id, error.code, error.message
-                ));
-                ui.render();
-                return Ok(());
-            }
-            other => bail!(
-                "unexpected control message while waiting for file accept: {:?}",
-                other
-            ),
-        }
-        ui.render();
-    }
-
-    let (mut data_send, _) = connection.open_data_stream().await?;
-    write_data_header(
-        &mut data_send,
-        &DataStreamHeader {
-            transfer_id: transfer_id.clone(),
-            kind: TransferKind::File,
+    Ok(PendingOutgoingTransfer {
+        offer,
+        source: OutgoingTransferSource::File {
+            path: path.to_path_buf(),
+            file_name,
+            size: metadata.len(),
         },
-    )
-    .await?;
-    ui.mark_transfer_streaming(&transfer_id);
-    ui.render();
-
-    let mut file = File::open(path)
-        .await
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    let mut bytes_done = 0_u64;
-    let mut hasher = Sha256::new();
-    loop {
-        let bytes_read = file
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if bytes_read == 0 {
-            break;
-        }
-        data_send
-            .write_all(&buffer[..bytes_read])
-            .await
-            .context("failed to stream file bytes")?;
-        hasher.update(&buffer[..bytes_read]);
-        bytes_done += bytes_read as u64;
-        ui.update_transfer_progress(&transfer_id, bytes_done, Some(metadata.len()));
-        ui.render();
-    }
-    data_send.finish().context("failed to finish data stream")?;
-
-    ui.mark_transfer_completed(&transfer_id);
-    let digest = finalize_sha256_digest(hasher);
-    ui.system(format!(
-        "sent file {}{}",
-        file_name,
-        format_digest_suffix(Some(&digest))
-    ));
-    ui.render();
-    Ok(())
+        cancel: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 async fn send_path(
     session_id: &str,
-    connection: &IrohConnection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
     path: &Path,
     ui: &mut UiState,
-) -> Result<()> {
+) -> Result<PendingOutgoingTransfer> {
     let metadata = fs::metadata(path)
         .await
         .with_context(|| format!("failed to stat {}", path.display()))?;
     if metadata.is_dir() {
-        send_folder(session_id, connection, send, recv, path, ui).await
+        send_folder(session_id, send, path, ui).await
     } else if metadata.is_file() {
-        send_file(session_id, connection, send, recv, path, ui).await
+        send_file(session_id, send, path, ui).await
     } else {
         bail!(
             "{} is neither a regular file nor a directory",
@@ -1194,12 +1394,10 @@ async fn send_path(
 
 async fn send_folder(
     session_id: &str,
-    connection: &IrohConnection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
     path: &Path,
     ui: &mut UiState,
-) -> Result<()> {
+) -> Result<PendingOutgoingTransfer> {
     if !path.is_dir() {
         bail!("{} is not a directory", path.display());
     }
@@ -1242,89 +1440,22 @@ async fn send_folder(
         folder_name, stats.item_count, stats.total_bytes
     ));
     ui.render();
-
-    if !wait_for_transfer_accept(recv, &transfer_id, ui).await? {
-        return Ok(());
-    }
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut child = TokioCommand::new("tar")
-        .arg("-cf")
-        .arg("-")
-        .arg("-C")
-        .arg(parent)
-        .arg(&folder_name)
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("failed to start tar for folder transfer")?;
-    let mut tar_stdout = child
-        .stdout
-        .take()
-        .context("failed to capture tar stdout")?;
-
-    let (mut data_send, _) = connection.open_data_stream().await?;
-    write_data_header(
-        &mut data_send,
-        &DataStreamHeader {
-            transfer_id: transfer_id.clone(),
-            kind: TransferKind::FolderArchive,
+    Ok(PendingOutgoingTransfer {
+        offer,
+        source: OutgoingTransferSource::Folder {
+            path: path.to_path_buf(),
+            folder_name,
+            stats,
         },
-    )
-    .await?;
-    ui.mark_transfer_streaming(&transfer_id);
-    ui.render();
-
-    let mut buffer = vec![0_u8; 64 * 1024];
-    let mut bytes_done = 0_u64;
-    let mut hasher = Sha256::new();
-    loop {
-        let bytes_read = tar_stdout
-            .read(&mut buffer)
-            .await
-            .context("failed to read tar output")?;
-        if bytes_read == 0 {
-            break;
-        }
-        data_send
-            .write_all(&buffer[..bytes_read])
-            .await
-            .context("failed to stream folder archive bytes")?;
-        hasher.update(&buffer[..bytes_read]);
-        bytes_done += bytes_read as u64;
-        ui.update_transfer_progress(&transfer_id, bytes_done, Some(stats.total_bytes));
-        ui.render();
-    }
-    data_send.finish().context("failed to finish data stream")?;
-
-    let status = child
-        .wait()
-        .await
-        .context("failed waiting for tar sender")?;
-    if !status.success() {
-        bail!("tar sender exited with status {status}");
-    }
-
-    ui.mark_transfer_completed(&transfer_id);
-    let digest = finalize_sha256_digest(hasher);
-    ui.system(format!(
-        "sent folder {}{}",
-        folder_name,
-        format_digest_suffix(Some(&digest))
-    ));
-    ui.render();
-    Ok(())
+        cancel: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 async fn send_clipboard(
     session_id: &str,
-    connection: &IrohConnection,
     send: &mut SendStream,
-    recv: &mut RecvStream,
     ui: &mut UiState,
-) -> Result<()> {
+) -> Result<PendingOutgoingTransfer> {
     let clipboard_text = read_clipboard_text().await?;
     let transfer_id = format!("t{}", next_message_id());
     let bytes = clipboard_text.as_bytes();
@@ -1356,39 +1487,13 @@ async fn send_clipboard(
     });
     ui.system(format!("offered clipboard text ({} bytes)", bytes.len()));
     ui.render();
-
-    if !wait_for_transfer_accept(recv, &transfer_id, ui).await? {
-        return Ok(());
-    }
-
-    let (mut data_send, _) = connection.open_data_stream().await?;
-    write_data_header(
-        &mut data_send,
-        &DataStreamHeader {
-            transfer_id: transfer_id.clone(),
-            kind: TransferKind::Clipboard,
+    Ok(PendingOutgoingTransfer {
+        offer,
+        source: OutgoingTransferSource::Clipboard {
+            text: clipboard_text,
         },
-    )
-    .await?;
-    ui.mark_transfer_streaming(&transfer_id);
-    ui.render();
-
-    data_send
-        .write_all(bytes)
-        .await
-        .context("failed to stream clipboard bytes")?;
-    data_send.finish().context("failed to finish data stream")?;
-    ui.update_transfer_progress(&transfer_id, bytes.len() as u64, Some(bytes.len() as u64));
-    ui.mark_transfer_completed(&transfer_id);
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = finalize_sha256_digest(hasher);
-    ui.system(format!(
-        "sent clipboard text{}",
-        format_digest_suffix(Some(&digest))
-    ));
-    ui.render();
-    Ok(())
+        cancel: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 async fn accept_pending_offer(
@@ -1398,7 +1503,8 @@ async fn accept_pending_offer(
     download_dir: &Path,
     offer: Offer,
     ui: &mut UiState,
-) -> Result<()> {
+    task_tx: mpsc::UnboundedSender<TransferTaskEvent>,
+) -> Result<Arc<AtomicBool>> {
     let item_name = offer.name.clone();
     write_envelope(
         send,
@@ -1422,6 +1528,298 @@ async fn accept_pending_offer(
     fs::create_dir_all(download_dir)
         .await
         .with_context(|| format!("failed to create {}", download_dir.display()))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    spawn_incoming_transfer_task(
+        connection.clone(),
+        download_dir.to_path_buf(),
+        offer,
+        cancel.clone(),
+        task_tx,
+    );
+    Ok(cancel)
+}
+
+fn spawn_outgoing_transfer_task(
+    connection: IrohConnection,
+    plan: PendingOutgoingTransfer,
+    task_tx: mpsc::UnboundedSender<TransferTaskEvent>,
+) {
+    task::spawn(async move {
+        let result = match &plan.source {
+            OutgoingTransferSource::File {
+                path,
+                file_name,
+                size,
+            } => {
+                run_outgoing_file_transfer(
+                    &connection,
+                    &plan.offer.transfer_id,
+                    path,
+                    file_name,
+                    *size,
+                    &plan.cancel,
+                    &task_tx,
+                )
+                .await
+            }
+            OutgoingTransferSource::Folder {
+                path,
+                folder_name,
+                stats,
+            } => {
+                run_outgoing_folder_transfer(
+                    &connection,
+                    &plan.offer.transfer_id,
+                    path,
+                    folder_name,
+                    stats.clone(),
+                    &plan.cancel,
+                    &task_tx,
+                )
+                .await
+            }
+            OutgoingTransferSource::Clipboard { text } => {
+                run_outgoing_clipboard_transfer(
+                    &connection,
+                    &plan.offer.transfer_id,
+                    text,
+                    &plan.cancel,
+                    &task_tx,
+                )
+                .await
+            }
+        };
+
+        if let Err(error) = result {
+            let _ = task_tx.send(TransferTaskEvent::Failed {
+                transfer_id: plan.offer.transfer_id.clone(),
+                message: format!("transfer {} failed: {error:#}", plan.offer.transfer_id),
+                notify_peer: false,
+            });
+        }
+    });
+}
+
+fn spawn_incoming_transfer_task(
+    connection: IrohConnection,
+    download_dir: PathBuf,
+    offer: Offer,
+    cancel: Arc<AtomicBool>,
+    task_tx: mpsc::UnboundedSender<TransferTaskEvent>,
+) {
+    task::spawn(async move {
+        if let Err(error) =
+            run_incoming_transfer(connection, download_dir, offer.clone(), cancel, &task_tx).await
+        {
+            let _ = task_tx.send(TransferTaskEvent::Failed {
+                transfer_id: offer.transfer_id.clone(),
+                message: format!("receive failed for {}: {error:#}", offer.name),
+                notify_peer: true,
+            });
+        }
+    });
+}
+
+async fn run_outgoing_file_transfer(
+    connection: &IrohConnection,
+    transfer_id: &str,
+    path: &Path,
+    file_name: &str,
+    size: u64,
+    cancel: &Arc<AtomicBool>,
+    task_tx: &mpsc::UnboundedSender<TransferTaskEvent>,
+) -> Result<()> {
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.to_string(),
+            kind: TransferKind::File,
+        },
+    )
+    .await?;
+
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let bytes_read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        data_send
+            .write_all(&buffer[..bytes_read])
+            .await
+            .context("failed to stream file bytes")?;
+        hasher.update(&buffer[..bytes_read]);
+        bytes_done += bytes_read as u64;
+        let _ = task_tx.send(TransferTaskEvent::Progress {
+            transfer_id: transfer_id.to_string(),
+            bytes_done,
+            bytes_total: Some(size),
+        });
+    }
+    if !cancel.load(Ordering::SeqCst) {
+        data_send.finish().context("failed to finish data stream")?;
+        let digest = finalize_sha256_digest(hasher);
+        let _ = task_tx.send(TransferTaskEvent::LocalComplete {
+            transfer_id: transfer_id.to_string(),
+            message: format!(
+                "sent file {}{}",
+                file_name,
+                format_digest_suffix(Some(&digest))
+            ),
+        });
+    }
+    Ok(())
+}
+
+async fn run_outgoing_folder_transfer(
+    connection: &IrohConnection,
+    transfer_id: &str,
+    path: &Path,
+    folder_name: &str,
+    stats: FolderStats,
+    cancel: &Arc<AtomicBool>,
+    task_tx: &mpsc::UnboundedSender<TransferTaskEvent>,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut child = TokioCommand::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(parent)
+        .arg(folder_name)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to start tar for folder transfer")?;
+    let mut tar_stdout = child
+        .stdout
+        .take()
+        .context("failed to capture tar stdout")?;
+
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.to_string(),
+            kind: TransferKind::FolderArchive,
+        },
+    )
+    .await?;
+
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    let mut hasher = Sha256::new();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.start_kill();
+            return Ok(());
+        }
+        let bytes_read = tar_stdout
+            .read(&mut buffer)
+            .await
+            .context("failed to read tar output")?;
+        if bytes_read == 0 {
+            break;
+        }
+        data_send
+            .write_all(&buffer[..bytes_read])
+            .await
+            .context("failed to stream folder archive bytes")?;
+        hasher.update(&buffer[..bytes_read]);
+        bytes_done += bytes_read as u64;
+        let _ = task_tx.send(TransferTaskEvent::Progress {
+            transfer_id: transfer_id.to_string(),
+            bytes_done,
+            bytes_total: Some(stats.total_bytes),
+        });
+    }
+
+    let status = child
+        .wait()
+        .await
+        .context("failed waiting for tar sender")?;
+    if !status.success() {
+        bail!("tar sender exited with status {status}");
+    }
+
+    if !cancel.load(Ordering::SeqCst) {
+        data_send.finish().context("failed to finish data stream")?;
+        let digest = finalize_sha256_digest(hasher);
+        let _ = task_tx.send(TransferTaskEvent::LocalComplete {
+            transfer_id: transfer_id.to_string(),
+            message: format!(
+                "sent folder {}{}",
+                folder_name,
+                format_digest_suffix(Some(&digest))
+            ),
+        });
+    }
+    Ok(())
+}
+
+async fn run_outgoing_clipboard_transfer(
+    connection: &IrohConnection,
+    transfer_id: &str,
+    text: &str,
+    cancel: &Arc<AtomicBool>,
+    task_tx: &mpsc::UnboundedSender<TransferTaskEvent>,
+) -> Result<()> {
+    let bytes = text.as_bytes();
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.to_string(),
+            kind: TransferKind::Clipboard,
+        },
+    )
+    .await?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    data_send
+        .write_all(bytes)
+        .await
+        .context("failed to stream clipboard bytes")?;
+    data_send.finish().context("failed to finish data stream")?;
+    let _ = task_tx.send(TransferTaskEvent::Progress {
+        transfer_id: transfer_id.to_string(),
+        bytes_done: bytes.len() as u64,
+        bytes_total: Some(bytes.len() as u64),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = finalize_sha256_digest(hasher);
+    let _ = task_tx.send(TransferTaskEvent::LocalComplete {
+        transfer_id: transfer_id.to_string(),
+        message: format!("sent clipboard text{}", format_digest_suffix(Some(&digest))),
+    });
+    Ok(())
+}
+
+async fn run_incoming_transfer(
+    connection: IrohConnection,
+    download_dir: PathBuf,
+    offer: Offer,
+    cancel: Arc<AtomicBool>,
+    task_tx: &mpsc::UnboundedSender<TransferTaskEvent>,
+) -> Result<()> {
+    let item_name = offer.name.clone();
     let (_, mut data_recv) = connection.accept_data_stream().await?;
     let header = read_data_header(&mut data_recv)
         .await?
@@ -1432,6 +1830,7 @@ async fn accept_pending_offer(
             offer.transfer_id
         );
     }
+
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
     let mut hasher = Sha256::new();
@@ -1442,6 +1841,9 @@ async fn accept_pending_offer(
                 .await
                 .with_context(|| format!("failed to create {}", target_path.display()))?;
             loop {
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
                 match data_recv.read(&mut buffer).await {
                     Ok(Some(bytes_read)) => {
                         output
@@ -1452,8 +1854,11 @@ async fn accept_pending_offer(
                             })?;
                         hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
-                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
-                        ui.render();
+                        let _ = task_tx.send(TransferTaskEvent::Progress {
+                            transfer_id: offer.transfer_id.clone(),
+                            bytes_done,
+                            bytes_total: offer.size,
+                        });
                     }
                     Ok(None) => break,
                     Err(error) => return Err(error).context("failed to read incoming file stream"),
@@ -1466,12 +1871,16 @@ async fn accept_pending_offer(
                 .arg("-xf")
                 .arg("-")
                 .arg("-C")
-                .arg(download_dir)
+                .arg(&download_dir)
                 .stdin(Stdio::piped())
                 .spawn()
                 .context("failed to start tar for folder extraction")?;
             let mut tar_stdin = child.stdin.take().context("failed to capture tar stdin")?;
             loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = child.start_kill();
+                    return Ok(());
+                }
                 match data_recv.read(&mut buffer).await {
                     Ok(Some(bytes_read)) => {
                         tar_stdin
@@ -1480,12 +1889,15 @@ async fn accept_pending_offer(
                             .context("failed to write folder archive bytes to tar")?;
                         hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
-                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
-                        ui.render();
+                        let _ = task_tx.send(TransferTaskEvent::Progress {
+                            transfer_id: offer.transfer_id.clone(),
+                            bytes_done,
+                            bytes_total: offer.size,
+                        });
                     }
                     Ok(None) => break,
                     Err(error) => {
-                        return Err(error).context("failed to read incoming folder stream")
+                        return Err(error).context("failed to read incoming folder stream");
                     }
                 }
             }
@@ -1506,13 +1918,19 @@ async fn accept_pending_offer(
         TransferKind::Clipboard => {
             let mut data = Vec::new();
             loop {
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
                 match data_recv.read(&mut buffer).await {
                     Ok(Some(bytes_read)) => {
                         data.extend_from_slice(&buffer[..bytes_read]);
                         hasher.update(&buffer[..bytes_read]);
                         bytes_done += bytes_read as u64;
-                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
-                        ui.render();
+                        let _ = task_tx.send(TransferTaskEvent::Progress {
+                            transfer_id: offer.transfer_id.clone(),
+                            bytes_done,
+                            bytes_total: offer.size,
+                        });
                     }
                     Ok(None) => break,
                     Err(error) => {
@@ -1527,97 +1945,19 @@ async fn accept_pending_offer(
         }
         _ => bail!("unsupported accepted transfer kind: {:?}", offer.kind),
     };
+
     let digest = finalize_sha256_digest(hasher);
-
-    write_envelope(
-        send,
-        &Envelope::new(
-            session_id,
-            next_message_id(),
-            ControlMessage::Complete(Complete {
-                transfer_id: offer.transfer_id.clone(),
-                digest: Some(digest.clone()),
-            }),
+    let _ = task_tx.send(TransferTaskEvent::ReceiveComplete {
+        transfer_id: offer.transfer_id.clone(),
+        message: format!(
+            "received {} {}{}",
+            transfer_kind_label(&offer.kind),
+            completion_label,
+            format_digest_suffix(Some(&digest))
         ),
-    )
-    .await?;
-    ui.mark_transfer_completed(&offer.transfer_id);
-    ui.system(format!(
-        "received {} {}{}",
-        transfer_kind_label(&offer.kind),
-        completion_label,
-        format_digest_suffix(Some(&digest))
-    ));
-    ui.render();
+        digest,
+    });
     Ok(())
-}
-
-async fn wait_for_transfer_accept(
-    recv: &mut RecvStream,
-    transfer_id: &str,
-    ui: &mut UiState,
-) -> Result<bool> {
-    loop {
-        let envelope = read_envelope(recv)
-            .await?
-            .context("peer closed control stream while transfer offer was pending")?;
-        match envelope.payload {
-            ControlMessage::Accept(Accept {
-                transfer_id: accepted,
-            }) if accepted == transfer_id => return Ok(true),
-            ControlMessage::ChatMessage(message) => {
-                let text = message.text;
-                let speaker = ui.peer_name.clone();
-                ui.chat(&speaker, &text);
-            }
-            ControlMessage::Complete(complete) => {
-                ui.mark_transfer_completed(&complete.transfer_id);
-                ui.system(format!("transfer {} complete", complete.transfer_id));
-            }
-            ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
-                ui.mark_transfer_rejected(&reject.transfer_id);
-                ui.system(format!(
-                    "transfer {} rejected{}",
-                    reject.transfer_id,
-                    reject
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(" ({r})"))
-                        .unwrap_or_default()
-                ));
-                ui.render();
-                return Ok(false);
-            }
-            ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
-                ui.mark_transfer_cancelled(&cancel.transfer_id);
-                ui.system(format!(
-                    "transfer {} cancelled{}",
-                    cancel.transfer_id,
-                    cancel
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(" ({r})"))
-                        .unwrap_or_default()
-                ));
-                ui.render();
-                return Ok(false);
-            }
-            ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(transfer_id) => {
-                ui.mark_transfer_cancelled(transfer_id);
-                ui.system(format!(
-                    "transfer {} error {}: {}",
-                    transfer_id, error.code, error.message
-                ));
-                ui.render();
-                return Ok(false);
-            }
-            other => bail!(
-                "unexpected control message while waiting for transfer accept: {:?}",
-                other
-            ),
-        }
-        ui.render();
-    }
 }
 
 async fn shutdown_interactive_session(
@@ -1625,8 +1965,18 @@ async fn shutdown_interactive_session(
     send: &mut SendStream,
     ui: &mut UiState,
     reason: &str,
+    pending_outgoing: &mut HashMap<String, PendingOutgoingTransfer>,
+    running_transfers: &mut HashMap<String, Arc<AtomicBool>>,
 ) -> Result<()> {
-    let cancelled = cancel_active_transfers(session_id, send, ui, reason).await?;
+    let cancelled = cancel_active_transfers(
+        session_id,
+        send,
+        ui,
+        reason,
+        pending_outgoing,
+        running_transfers,
+    )
+    .await?;
     if cancelled > 0 {
         ui.system(format!(
             "cancelled {} transfer(s) before closing",
@@ -1661,10 +2011,16 @@ async fn cancel_active_transfers(
     send: &mut SendStream,
     ui: &mut UiState,
     reason: &str,
+    pending_outgoing: &mut HashMap<String, PendingOutgoingTransfer>,
+    running_transfers: &mut HashMap<String, Arc<AtomicBool>>,
 ) -> Result<usize> {
     let transfer_ids = ui.cancellable_transfer_ids();
     for transfer_id in &transfer_ids {
         cancel_transfer(session_id, send, ui, transfer_id, reason).await?;
+        pending_outgoing.remove(transfer_id);
+        if let Some(cancel) = running_transfers.remove(transfer_id) {
+            cancel.store(true, Ordering::SeqCst);
+        }
     }
     Ok(transfer_ids.len())
 }
@@ -1930,10 +2286,12 @@ impl UiState {
     fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Self {
         let history_path = history_file_path();
         let input_history = load_history(&history_path);
+        let auto_accept_enabled = load_auto_accept();
         Self {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
+            auto_accept_enabled,
             events: Vec::new(),
             transfers: Vec::new(),
             pending_offer: None,
@@ -2275,6 +2633,12 @@ fn parse_user_input(input: &str) -> UserInput {
         UserInput::Cancel(None)
     } else if let Some(transfer_id) = trimmed.strip_prefix("/cancel ") {
         UserInput::Cancel(Some(transfer_id.trim().to_string()))
+    } else if trimmed == "/autoaccept" {
+        UserInput::AutoAccept(None)
+    } else if trimmed == "/autoaccept on" {
+        UserInput::AutoAccept(Some(true))
+    } else if trimmed == "/autoaccept off" {
+        UserInput::AutoAccept(Some(false))
     } else if trimmed == "/accept" {
         UserInput::Accept
     } else if trimmed == "/reject" {
@@ -2295,6 +2659,7 @@ fn help_lines() -> &'static [&'static str] {
         "/accept  accept the pending file offer",
         "/reject  reject the pending file offer",
         "/cancel [id]  cancel an active transfer",
+        "/autoaccept on|off  auto-accept incoming files and clipboard",
         "/quit  close the session",
         "shortcuts: q quit, y accept, n reject, ctrl+c close",
         "editing: up/down history, ctrl+a line start, ctrl+e line end, ctrl+k kill to end",
@@ -2325,6 +2690,10 @@ fn history_file_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_history"))
 }
 
+fn auto_accept_file_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_autoaccept"))
+}
+
 fn load_history(path: &Option<PathBuf>) -> Vec<String> {
     let Some(path) = path else {
         return Vec::new();
@@ -2352,6 +2721,23 @@ fn save_history(path: &Option<PathBuf>, history: &[String]) {
         joined
     };
     let _ = std::fs::write(path, contents);
+}
+
+fn load_auto_accept() -> bool {
+    let Some(path) = auto_accept_file_path() else {
+        return false;
+    };
+    match std::fs::read_to_string(path) {
+        Ok(contents) => matches!(contents.trim(), "on" | "true" | "1"),
+        Err(_) => false,
+    }
+}
+
+fn save_auto_accept(enabled: bool) {
+    let Some(path) = auto_accept_file_path() else {
+        return;
+    };
+    let _ = std::fs::write(path, if enabled { "on\n" } else { "off\n" });
 }
 
 fn expand_user_path(input: &str) -> PathBuf {

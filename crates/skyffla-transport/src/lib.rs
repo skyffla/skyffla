@@ -143,7 +143,7 @@ impl PeerTransport for IrohTransport {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IrohConnection {
     connection: Connection,
 }
