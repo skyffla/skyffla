@@ -26,12 +26,12 @@ What exists now:
 - SQLite-backed rendezvous store and `axum` HTTP service
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
-- `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, and single-file transfer
+- `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, and tar-based folder transfer
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
-- folder, clipboard, and `stdio` transfer flows
+- clipboard and `stdio` transfer flows
 - richer key-driven TUI navigation beyond the current command-based flow
 - persistent transfer history or resumable transfers
 
@@ -64,6 +64,7 @@ Required on macOS:
 
 - Git
 - Rust toolchain
+- `tar` available on `PATH` for folder transfer send/extract
 
 Recommended:
 
@@ -200,7 +201,7 @@ Current supported flags:
 Default behavior without `--message`:
 
 - enter a full-screen terminal UI for chat/transfers
-- use `/send <path>` to transfer a single file
+- use `/send <path>` to transfer a file or folder
 - use `/accept` or `y` to accept an incoming file offer
 - use `/reject` or `n` to reject an incoming file offer
 - type `/quit` or `q` to close the session
@@ -231,15 +232,17 @@ cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --name jo
 
 Then type chat lines in either terminal and use `/quit` to exit.
 
-Single-file transfer example after connect:
+File or folder transfer example after connect:
 
 ```text
 /send /path/to/file.txt
+/send /path/to/folder
 ```
 
-The receiver currently must explicitly `/accept` or `/reject` each incoming file offer.
+The receiver currently must explicitly `/accept` or `/reject` each incoming file or folder offer.
 Shortcuts are also available: `y` accepts, `n` rejects, and `q` quits.
 Transfer status and byte progress are shown live in the TUI.
+Folder transfer currently shells out to local `tar` on both peers.
 
 Planned next CLI additions:
 

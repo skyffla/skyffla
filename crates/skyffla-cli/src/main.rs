@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,9 +17,9 @@ use crossterm::terminal::{
 use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
 use skyffla_protocol::{
-    decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, ControlMessage,
-    DataStreamHeader, Envelope, Hello, HelloAck, Offer, Reject, TransferKind, TransportCapability,
-    PROTOCOL_VERSION,
+    decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, Compression,
+    ControlMessage, DataStreamHeader, Envelope, Hello, HelloAck, Offer, Reject, TransferKind,
+    TransportCapability, PROTOCOL_VERSION,
 };
 use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
 use skyffla_session::{
@@ -27,6 +28,7 @@ use skyffla_session::{
 use skyffla_transport::{IrohConnection, IrohTransport, PeerTicket};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -105,6 +107,11 @@ struct TransferUi {
 struct EventLine {
     timestamp: String,
     text: String,
+}
+
+struct FolderStats {
+    item_count: u64,
+    total_bytes: u64,
 }
 
 struct UiState {
@@ -398,7 +405,7 @@ async fn run_interactive_chat_loop(
                                 }
                             }
                             UserInput::SendFile(path) => {
-                                send_file(session_id, connection, send, recv, &path, ui).await?;
+                                send_path(session_id, connection, send, recv, &path, ui).await?;
                             }
                             UserInput::Accept => {
                                 if let Some(offer) = ui.pending_offer.clone() {
@@ -566,7 +573,9 @@ async fn handle_post_handshake_message(
             ui.chat(&speaker, &text);
             Ok(())
         }
-        ControlMessage::Offer(offer) if offer.kind == TransferKind::File => {
+        ControlMessage::Offer(offer)
+            if matches!(offer.kind, TransferKind::File | TransferKind::FolderArchive) =>
+        {
             ui.pending_offer = Some(offer.clone());
             ui.upsert_transfer(TransferUi {
                 id: offer.transfer_id.clone(),
@@ -575,9 +584,10 @@ async fn handle_post_handshake_message(
                 bytes_total: offer.size,
             });
             ui.system(format!(
-                "incoming file offer: {} ({} bytes). /accept or /reject",
+                "incoming {} offer: {}{}. /accept or /reject",
+                transfer_kind_label(&offer.kind),
                 offer.name,
-                offer.size.unwrap_or(0)
+                describe_offer_size(&offer)
             ));
             Ok(())
         }
@@ -735,6 +745,148 @@ async fn send_file(
     Ok(())
 }
 
+async fn send_path(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    path: &Path,
+    ui: &mut UiState,
+) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .await
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+    if metadata.is_dir() {
+        send_folder(session_id, connection, send, recv, path, ui).await
+    } else if metadata.is_file() {
+        send_file(session_id, connection, send, recv, path, ui).await
+    } else {
+        bail!(
+            "{} is neither a regular file nor a directory",
+            path.display()
+        )
+    }
+}
+
+async fn send_folder(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    path: &Path,
+    ui: &mut UiState,
+) -> Result<()> {
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+
+    let folder_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("failed to derive folder name from {}", path.display()))?;
+    let stats = collect_folder_stats(path)?;
+    let transfer_id = format!("t{}", next_message_id());
+    let offer = Offer {
+        transfer_id: transfer_id.clone(),
+        kind: TransferKind::FolderArchive,
+        name: folder_name.clone(),
+        size: Some(stats.total_bytes),
+        mime: None,
+        item_count: Some(stats.item_count),
+        compression: Some(Compression::Tar),
+        path_hint: Some(folder_name.clone()),
+    };
+
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Offer(offer.clone()),
+        ),
+    )
+    .await?;
+    ui.upsert_transfer(TransferUi {
+        id: transfer_id.clone(),
+        state: TransferStateUi::Pending,
+        bytes_done: 0,
+        bytes_total: Some(stats.total_bytes),
+    });
+    ui.system(format!(
+        "offered folder {} ({} items, {} bytes)",
+        folder_name, stats.item_count, stats.total_bytes
+    ));
+    ui.render();
+
+    if !wait_for_transfer_accept(recv, &transfer_id, ui).await? {
+        return Ok(());
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut child = TokioCommand::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(parent)
+        .arg(&folder_name)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to start tar for folder transfer")?;
+    let mut tar_stdout = child
+        .stdout
+        .take()
+        .context("failed to capture tar stdout")?;
+
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.clone(),
+            kind: TransferKind::FolderArchive,
+        },
+    )
+    .await?;
+    ui.mark_transfer_streaming(&transfer_id);
+    ui.render();
+
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    loop {
+        let bytes_read = tar_stdout
+            .read(&mut buffer)
+            .await
+            .context("failed to read tar output")?;
+        if bytes_read == 0 {
+            break;
+        }
+        data_send
+            .write_all(&buffer[..bytes_read])
+            .await
+            .context("failed to stream folder archive bytes")?;
+        bytes_done += bytes_read as u64;
+        ui.update_transfer_progress(&transfer_id, bytes_done, Some(stats.total_bytes));
+        ui.render();
+    }
+    data_send.finish().context("failed to finish data stream")?;
+
+    let status = child
+        .wait()
+        .await
+        .context("failed waiting for tar sender")?;
+    if !status.success() {
+        bail!("tar sender exited with status {status}");
+    }
+
+    ui.mark_transfer_completed(&transfer_id);
+    ui.system(format!("sent folder {}", folder_name));
+    ui.render();
+    Ok(())
+}
+
 async fn accept_pending_offer(
     session_id: &str,
     connection: &IrohConnection,
@@ -743,7 +895,7 @@ async fn accept_pending_offer(
     offer: Offer,
     ui: &mut UiState,
 ) -> Result<()> {
-    let file_name = offer.name.clone();
+    let item_name = offer.name.clone();
     write_envelope(
         send,
         &Envelope::new(
@@ -756,44 +908,96 @@ async fn accept_pending_offer(
     )
     .await?;
     ui.mark_transfer_streaming(&offer.transfer_id);
-    ui.system(format!("accepting file {}", file_name));
+    ui.system(format!(
+        "accepting {} {}",
+        transfer_kind_label(&offer.kind),
+        item_name
+    ));
     ui.render();
 
     fs::create_dir_all(download_dir)
         .await
         .with_context(|| format!("failed to create {}", download_dir.display()))?;
-    let target_path = download_dir.join(&file_name);
     let (_, mut data_recv) = connection.accept_data_stream().await?;
     let header = read_data_header(&mut data_recv)
         .await?
         .context("peer closed data stream before sending a header")?;
-    if header.transfer_id != offer.transfer_id || header.kind != TransferKind::File {
+    if header.transfer_id != offer.transfer_id || header.kind != offer.kind {
         bail!(
             "received unexpected data stream header for transfer {}",
             offer.transfer_id
         );
     }
-
-    let mut output = File::create(&target_path)
-        .await
-        .with_context(|| format!("failed to create {}", target_path.display()))?;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut bytes_done = 0_u64;
-    loop {
-        match data_recv.read(&mut buffer).await {
-            Ok(Some(bytes_read)) => {
-                output
-                    .write_all(&buffer[..bytes_read])
-                    .await
-                    .with_context(|| format!("failed to write {}", target_path.display()))?;
-                bytes_done += bytes_read as u64;
-                ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
-                ui.render();
+    let completion_label = match offer.kind.clone() {
+        TransferKind::File => {
+            let target_path = download_dir.join(&item_name);
+            let mut output = File::create(&target_path)
+                .await
+                .with_context(|| format!("failed to create {}", target_path.display()))?;
+            loop {
+                match data_recv.read(&mut buffer).await {
+                    Ok(Some(bytes_read)) => {
+                        output
+                            .write_all(&buffer[..bytes_read])
+                            .await
+                            .with_context(|| {
+                                format!("failed to write {}", target_path.display())
+                            })?;
+                        bytes_done += bytes_read as u64;
+                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
+                        ui.render();
+                    }
+                    Ok(None) => break,
+                    Err(error) => return Err(error).context("failed to read incoming file stream"),
+                }
             }
-            Ok(None) => break,
-            Err(error) => return Err(error).context("failed to read incoming file stream"),
+            target_path.display().to_string()
         }
-    }
+        TransferKind::FolderArchive => {
+            let mut child = TokioCommand::new("tar")
+                .arg("-xf")
+                .arg("-")
+                .arg("-C")
+                .arg(download_dir)
+                .stdin(Stdio::piped())
+                .spawn()
+                .context("failed to start tar for folder extraction")?;
+            let mut tar_stdin = child.stdin.take().context("failed to capture tar stdin")?;
+            loop {
+                match data_recv.read(&mut buffer).await {
+                    Ok(Some(bytes_read)) => {
+                        tar_stdin
+                            .write_all(&buffer[..bytes_read])
+                            .await
+                            .context("failed to write folder archive bytes to tar")?;
+                        bytes_done += bytes_read as u64;
+                        ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
+                        ui.render();
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        return Err(error).context("failed to read incoming folder stream")
+                    }
+                }
+            }
+            tar_stdin
+                .shutdown()
+                .await
+                .context("failed to finish tar stdin")?;
+            drop(tar_stdin);
+            let status = child
+                .wait()
+                .await
+                .context("failed waiting for tar extractor")?;
+            if !status.success() {
+                bail!("tar extractor exited with status {status}");
+            }
+            download_dir.join(&item_name).display().to_string()
+        }
+        _ => bail!("unsupported accepted transfer kind: {:?}", offer.kind),
+    };
 
     write_envelope(
         send,
@@ -808,9 +1012,58 @@ async fn accept_pending_offer(
     )
     .await?;
     ui.mark_transfer_completed(&offer.transfer_id);
-    ui.system(format!("received file {}", target_path.display()));
+    ui.system(format!(
+        "received {} {}",
+        transfer_kind_label(&offer.kind),
+        completion_label
+    ));
     ui.render();
     Ok(())
+}
+
+async fn wait_for_transfer_accept(
+    recv: &mut RecvStream,
+    transfer_id: &str,
+    ui: &mut UiState,
+) -> Result<bool> {
+    loop {
+        let envelope = read_envelope(recv)
+            .await?
+            .context("peer closed control stream while transfer offer was pending")?;
+        match envelope.payload {
+            ControlMessage::Accept(Accept {
+                transfer_id: accepted,
+            }) if accepted == transfer_id => return Ok(true),
+            ControlMessage::ChatMessage(message) => {
+                let text = message.text;
+                let speaker = ui.peer_name.clone();
+                ui.chat(&speaker, &text);
+            }
+            ControlMessage::Complete(complete) => {
+                ui.mark_transfer_completed(&complete.transfer_id);
+                ui.system(format!("transfer {} complete", complete.transfer_id));
+            }
+            ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
+                ui.mark_transfer_rejected(&reject.transfer_id);
+                ui.system(format!(
+                    "transfer {} rejected{}",
+                    reject.transfer_id,
+                    reject
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ));
+                ui.render();
+                return Ok(false);
+            }
+            other => bail!(
+                "unexpected control message while waiting for transfer accept: {:?}",
+                other
+            ),
+        }
+        ui.render();
+    }
 }
 
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()> {
@@ -1251,6 +1504,55 @@ fn help_lines() -> &'static [&'static str] {
         "/quit  close the session",
         "shortcuts: q quit, y accept, n reject, ctrl+a line start, ctrl+e line end",
     ]
+}
+
+fn transfer_kind_label(kind: &TransferKind) -> &'static str {
+    match kind {
+        TransferKind::File => "file",
+        TransferKind::FolderArchive => "folder",
+        TransferKind::Clipboard => "clipboard",
+        TransferKind::Stdio => "stdio",
+    }
+}
+
+fn describe_offer_size(offer: &Offer) -> String {
+    match (offer.kind.clone(), offer.size, offer.item_count) {
+        (TransferKind::FolderArchive, Some(size), Some(items)) => {
+            format!(" ({} items, {} bytes)", items, size)
+        }
+        (TransferKind::FolderArchive, _, Some(items)) => format!(" ({} items)", items),
+        (_, Some(size), _) => format!(" ({} bytes)", size),
+        _ => String::new(),
+    }
+}
+
+fn collect_folder_stats(path: &Path) -> Result<FolderStats> {
+    fn visit(path: &Path, stats: &mut FolderStats) -> Result<()> {
+        for entry in std::fs::read_dir(path)
+            .with_context(|| format!("failed to read directory {}", path.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read entry in {}", path.display()))?;
+            let entry_path = entry.path();
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to stat {}", entry_path.display()))?;
+            stats.item_count += 1;
+            if metadata.is_dir() {
+                visit(&entry_path, stats)?;
+            } else if metadata.is_file() {
+                stats.total_bytes += metadata.len();
+            }
+        }
+        Ok(())
+    }
+
+    let mut stats = FolderStats {
+        item_count: 0,
+        total_bytes: 0,
+    };
+    visit(path, &mut stats)?;
+    Ok(stats)
 }
 
 fn wrap_prefixed_lines(prefix: &str, text: &str, width: usize) -> Vec<String> {

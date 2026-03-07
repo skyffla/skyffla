@@ -15,7 +15,7 @@ skyffla-protocol = { path = "../skyffla-protocol" }
 skyffla-rendezvous = { path = "../skyffla-rendezvous" }
 skyffla-session = { path = "../skyffla-session" }
 skyffla-transport = { path = "../skyffla-transport" }
-tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread"] }
 
 [[bin]]
 name = "skyffla"
