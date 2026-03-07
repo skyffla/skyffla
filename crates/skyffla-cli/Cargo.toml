@@ -6,9 +6,11 @@ version.workspace = true
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.29"
 iroh = "0.96"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
 skyffla-protocol = { path = "../skyffla-protocol" }
 skyffla-rendezvous = { path = "../skyffla-rendezvous" }
 skyffla-session = { path = "../skyffla-session" }

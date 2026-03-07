@@ -26,14 +26,14 @@ What exists now:
 - SQLite-backed rendezvous store and `axum` HTTP service
 - basic IP-based rendezvous rate limiting
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
-- minimal `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, and interactive text chat
+- `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, and single-file transfer
 - unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
 
 What does not exist yet:
 
-- TUI
-- session-to-transport runtime wiring
-- file, folder, clipboard, or `stdio` transfer flows
+- folder, clipboard, and `stdio` transfer flows
+- richer key-driven TUI navigation beyond the current command-based flow
+- persistent transfer history or resumable transfers
 
 ## Repository Layout
 
@@ -193,13 +193,18 @@ Current CLI:
 Current supported flags:
 
 - `--server <url>` to point at the rendezvous API
+- `--download-dir <path>` to choose where received files are written
 - `--name <peer-name>` to set the local handshake name
 - `--message <text>` to use a one-shot non-interactive chat send after connect
 
 Default behavior without `--message`:
 
-- enter a simple line-oriented chat loop on stdin/stdout
-- type `/quit` to close the session
+- enter a full-screen terminal UI for chat/transfers
+- use `/send <path>` to transfer a single file
+- use `/accept` or `y` to accept an incoming file offer
+- use `/reject` or `n` to reject an incoming file offer
+- type `/quit` or `q` to close the session
+- transfer status and byte progress update live in the transfer list
 
 Example local smoke test:
 
@@ -225,6 +230,16 @@ cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --name jo
 ```
 
 Then type chat lines in either terminal and use `/quit` to exit.
+
+Single-file transfer example after connect:
+
+```text
+/send /path/to/file.txt
+```
+
+The receiver currently must explicitly `/accept` or `/reject` each incoming file offer.
+Shortcuts are also available: `y` accepts, `n` rejects, and `q` quits.
+Transfer status and byte progress are shown live in the TUI.
 
 Planned next CLI additions:
 
@@ -303,6 +318,7 @@ Current tests cover:
 - end-to-end native `iroh` control-stream exchange between two local peers
 - build validation for the minimal `host`/`join` CLI path
 - manual smoke-test validation for interactive chat and clean `/quit` shutdown
+- manual smoke-test validation for `/send` plus `/accept`/`/reject`, transfer progress, and downloaded file contents
 
 Run all tests:
 
@@ -330,10 +346,11 @@ Near-term work:
 Expected implementation order:
 
 1. Prove stable end-to-end chat over the session abstraction
-2. Add file and folder transfer
-3. Add clipboard transfer
-4. Add `stdio` automation mode
-5. Build the TUI on top of the same session events
+2. Add explicit file accept/reject UX and transfer progress
+3. Add folder transfer
+4. Add clipboard transfer
+5. Add `stdio` automation mode
+6. Build the TUI on top of the same session events
 
 ## Notes For New Contributors
 

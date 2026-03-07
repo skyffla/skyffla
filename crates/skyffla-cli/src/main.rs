@@ -1,19 +1,33 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use crossterm::cursor::{MoveTo, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::queue;
+use crossterm::style::Print;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType, ScrollUp,
+};
 use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use reqwest::Client;
 use skyffla_protocol::{
-    decode_frame, encode_frame, Capabilities, ChatMessage, ControlMessage, Envelope, Hello,
-    HelloAck, TransportCapability, PROTOCOL_VERSION,
+    decode_frame, encode_frame, Accept, Capabilities, ChatMessage, Complete, ControlMessage,
+    DataStreamHeader, Envelope, Hello, HelloAck, Offer, Reject, TransferKind, TransportCapability,
+    PROTOCOL_VERSION,
 };
 use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
 use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
 };
 use skyffla_transport::{IrohConnection, IrohTransport, PeerTicket};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -33,9 +47,15 @@ enum Command {
 
 #[derive(Args, Clone)]
 struct SessionArgs {
-    stream_id: String,
-    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    stream_id: Option<String>,
+    #[arg(
+        long,
+        env = "SKYFFLA_RENDEZVOUS_URL",
+        default_value = "http://127.0.0.1:8080"
+    )]
     server: String,
+    #[arg(long, default_value = ".")]
+    download_dir: PathBuf,
     #[arg(long)]
     name: Option<String>,
     #[arg(long)]
@@ -51,8 +71,78 @@ enum Role {
 struct SessionConfig {
     stream_id: String,
     rendezvous_server: String,
+    download_dir: PathBuf,
     peer_name: String,
     outgoing_message: Option<String>,
+}
+
+enum UserInput {
+    Chat(String),
+    SendFile(PathBuf),
+    Accept,
+    Reject,
+    Help,
+    Quit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransferStateUi {
+    Pending,
+    AwaitingDecision,
+    Streaming,
+    Completed,
+    Rejected,
+}
+
+#[derive(Clone, Debug)]
+struct TransferUi {
+    id: String,
+    state: TransferStateUi,
+    bytes_done: u64,
+    bytes_total: Option<u64>,
+}
+
+struct EventLine {
+    timestamp: String,
+    text: String,
+}
+
+struct UiState {
+    stream_id: String,
+    peer_name: String,
+    local_name: String,
+    events: Vec<EventLine>,
+    transfers: Vec<TransferUi>,
+    pending_offer: Option<Offer>,
+    input_buffer: String,
+    cursor_index: usize,
+    input_history: Vec<String>,
+    history_index: Option<usize>,
+    draft_buffer: Option<String>,
+    rendered_event_lines: usize,
+    rendered_width: Option<usize>,
+    next_event_row: u16,
+}
+
+struct TerminalUiGuard;
+
+impl TerminalUiGuard {
+    fn activate() -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw mode")?;
+        let mut stdout = std::io::stdout();
+        write!(stdout, "\x1b[?1049h")?;
+        stdout.flush().context("failed to initialize terminal UI")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalUiGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "\x1b[?25h\x1b[?1049l");
+        let _ = stdout.flush();
+    }
 }
 
 #[tokio::main]
@@ -210,22 +300,38 @@ async fn run_connected_session(
             })
             .context("failed to record negotiated state")?,
     ));
-    emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer });
+    emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
+    let mut ui = UiState::new(
+        &session_id,
+        &config.peer_name,
+        &transport.endpoint().id().to_string(),
+    );
+    ui.peer_name = peer.peer_name.clone();
+    ui.system(format!(
+        "session stream={} you={} peer={}",
+        ui.stream_id, ui.local_name, ui.peer_name
+    ));
+    ui.system(format!("connected to {}", ui.peer_name));
 
     if let Some(message) = &config.outgoing_message {
-        send_chat_message(&session_id, &mut send, message).await?;
-        emit_runtime_event(RuntimeEvent::ChatSent {
-            text: message.clone(),
-        });
+        send_chat_message(&session_id, &mut send, message, None, true).await?;
+        ui.chat("you", message);
         send.finish()
             .context("failed to finish control stream send side")?;
 
         while let Some(envelope) = read_envelope(&mut recv).await? {
-            handle_post_handshake_message(envelope)?;
+            handle_post_handshake_message(&mut ui, envelope, true).await?;
         }
     } else {
-        eprintln!("interactive chat ready; type /quit to exit");
-        run_interactive_chat_loop(&session_id, &mut send, &mut recv).await?;
+        run_interactive_chat_loop(
+            config,
+            &session_id,
+            &connection,
+            &mut send,
+            &mut recv,
+            &mut ui,
+        )
+        .await?;
     }
 
     emit_runtime_event(state_changed_event(
@@ -243,47 +349,109 @@ async fn run_connected_session(
 }
 
 async fn run_interactive_chat_loop(
+    config: &SessionConfig,
     session_id: &str,
+    connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
+    ui: &mut UiState,
 ) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
-    let mut send_open = true;
-
-    loop {
-        if !send_open {
-            match read_envelope(recv).await? {
-                Some(envelope) => handle_post_handshake_message(envelope)?,
-                None => break,
-            }
-            continue;
-        }
-
-        tokio::select! {
-            line = lines.next_line() => {
-                match line.context("failed to read stdin line")? {
-                    Some(line) => {
-                        let text = line.trim_end().to_string();
-                        if text == "/quit" {
-                            send.finish().context("failed to finish control stream send side")?;
-                            send_open = false;
-                        } else if !text.is_empty() {
-                            send_chat_message(session_id, send, &text).await?;
-                            emit_runtime_event(RuntimeEvent::ChatSent { text });
-                        }
-                    }
-                    None => {
-                        send.finish().context("failed to finish control stream send side")?;
-                        send_open = false;
+    let _terminal = TerminalUiGuard::activate()?;
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    thread::spawn(move || loop {
+        match event::poll(Duration::from_millis(100)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    if input_tx.send(key).is_err() {
+                        break;
                     }
                 }
+                Ok(_) => {}
+                Err(_) => break,
+            },
+            Ok(false) => {}
+            Err(_) => break,
+        }
+    });
+    let mut send_open = true;
+    ui.system("interactive session ready; use /help for commands".to_string());
+    ui.render();
+
+    loop {
+        tokio::select! {
+            maybe_key = input_rx.recv() => {
+                let Some(key) = maybe_key else { break };
+                if !send_open {
+                    continue;
+                }
+
+                if let Some(line) = ui.handle_key_event(key) {
+                    match parse_user_input(&line) {
+                            UserInput::Quit => {
+                                send.finish().context("failed to finish control stream send side")?;
+                                send_open = false;
+                                ui.system("closing session".to_string());
+                            }
+                            UserInput::Chat(text) => {
+                                if !text.is_empty() {
+                                    send_chat_message(session_id, send, &text, Some(ui), false).await?;
+                                }
+                            }
+                            UserInput::SendFile(path) => {
+                                send_file(session_id, connection, send, recv, &path, ui).await?;
+                            }
+                            UserInput::Accept => {
+                                if let Some(offer) = ui.pending_offer.clone() {
+                                    ui.pending_offer = None;
+                                    accept_pending_offer(
+                                        session_id,
+                                        connection,
+                                        send,
+                                        &config.download_dir,
+                                        offer,
+                                        ui,
+                                    )
+                                    .await?;
+                                } else {
+                                    ui.system("no pending offer to accept".to_string());
+                                }
+                            }
+                            UserInput::Reject => {
+                                if let Some(offer) = ui.pending_offer.take() {
+                                    write_envelope(
+                                        send,
+                                        &Envelope::new(
+                                            session_id,
+                                            next_message_id(),
+                                            ControlMessage::Reject(Reject {
+                                                transfer_id: offer.transfer_id.clone(),
+                                                reason: Some("user rejected".to_string()),
+                                            }),
+                                        ),
+                                    ).await?;
+                                    ui.mark_transfer_rejected(&offer.transfer_id);
+                                    ui.system(format!("rejected file {}", offer.name));
+                                } else {
+                                    ui.system("no pending offer to reject".to_string());
+                                }
+                            }
+                            UserInput::Help => {
+                                for line in help_lines() {
+                                    ui.system(line.to_string());
+                                }
+                            }
+                        }
+                }
+                ui.render();
             }
             envelope = read_envelope(recv) => {
                 match envelope? {
-                    Some(envelope) => handle_post_handshake_message(envelope)?,
+                    Some(envelope) => {
+                        handle_post_handshake_message(ui, envelope, false).await?
+                    }
                     None => break,
                 }
+                ui.render();
             }
         }
     }
@@ -357,7 +525,13 @@ async fn exchange_hello(
     }
 }
 
-async fn send_chat_message(session_id: &str, send: &mut SendStream, text: &str) -> Result<()> {
+async fn send_chat_message(
+    session_id: &str,
+    send: &mut SendStream,
+    text: &str,
+    ui: Option<&mut UiState>,
+    emit_runtime: bool,
+) -> Result<()> {
     let envelope = Envelope::new(
         session_id,
         next_message_id(),
@@ -365,17 +539,278 @@ async fn send_chat_message(session_id: &str, send: &mut SendStream, text: &str) 
             text: text.to_string(),
         }),
     );
-    write_envelope(send, &envelope).await
+    write_envelope(send, &envelope).await?;
+    if let Some(ui) = ui {
+        ui.chat("you", text);
+    }
+    if emit_runtime {
+        emit_runtime_event(RuntimeEvent::ChatSent {
+            text: text.to_string(),
+        });
+    }
+    Ok(())
 }
 
-fn handle_post_handshake_message(envelope: Envelope) -> Result<()> {
+async fn handle_post_handshake_message(
+    ui: &mut UiState,
+    envelope: Envelope,
+    emit_runtime: bool,
+) -> Result<()> {
     match envelope.payload {
         ControlMessage::ChatMessage(message) => {
-            emit_runtime_event(RuntimeEvent::ChatReceived { text: message.text });
+            let text = message.text;
+            if emit_runtime {
+                emit_runtime_event(RuntimeEvent::ChatReceived { text: text.clone() });
+            }
+            let speaker = ui.peer_name.clone();
+            ui.chat(&speaker, &text);
+            Ok(())
+        }
+        ControlMessage::Offer(offer) if offer.kind == TransferKind::File => {
+            ui.pending_offer = Some(offer.clone());
+            ui.upsert_transfer(TransferUi {
+                id: offer.transfer_id.clone(),
+                state: TransferStateUi::AwaitingDecision,
+                bytes_done: 0,
+                bytes_total: offer.size,
+            });
+            ui.system(format!(
+                "incoming file offer: {} ({} bytes). /accept or /reject",
+                offer.name,
+                offer.size.unwrap_or(0)
+            ));
+            Ok(())
+        }
+        ControlMessage::Complete(complete) => {
+            ui.mark_transfer_completed(&complete.transfer_id);
+            ui.system(format!("transfer {} complete", complete.transfer_id));
+            Ok(())
+        }
+        ControlMessage::Reject(reject) => {
+            ui.mark_transfer_rejected(&reject.transfer_id);
+            ui.system(format!(
+                "transfer {} rejected{}",
+                reject.transfer_id,
+                reject
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            ));
             Ok(())
         }
         other => bail!("unexpected control message after handshake: {:?}", other),
     }
+}
+
+async fn send_file(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    path: &Path,
+    ui: &mut UiState,
+) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .await
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("failed to derive file name from {}", path.display()))?;
+    let transfer_id = format!("t{}", next_message_id());
+    let offer = Offer {
+        transfer_id: transfer_id.clone(),
+        kind: TransferKind::File,
+        name: file_name.clone(),
+        size: Some(metadata.len()),
+        mime: None,
+        item_count: None,
+        compression: None,
+        path_hint: Some(file_name.clone()),
+    };
+
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Offer(offer.clone()),
+        ),
+    )
+    .await?;
+    ui.upsert_transfer(TransferUi {
+        id: transfer_id.clone(),
+        state: TransferStateUi::Pending,
+        bytes_done: 0,
+        bytes_total: Some(metadata.len()),
+    });
+    ui.system(format!("offered file {}", file_name));
+    ui.render();
+
+    loop {
+        let envelope = read_envelope(recv)
+            .await?
+            .context("peer closed control stream while file offer was pending")?;
+        match envelope.payload {
+            ControlMessage::Accept(Accept {
+                transfer_id: accepted,
+            }) if accepted == transfer_id => {
+                break;
+            }
+            ControlMessage::ChatMessage(message) => {
+                let text = message.text;
+                let speaker = ui.peer_name.clone();
+                ui.chat(&speaker, &text);
+            }
+            ControlMessage::Complete(complete) => {
+                ui.mark_transfer_completed(&complete.transfer_id);
+                ui.system(format!("transfer {} complete", complete.transfer_id));
+            }
+            ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
+                ui.mark_transfer_rejected(&reject.transfer_id);
+                ui.system(format!(
+                    "transfer {} rejected{}",
+                    reject.transfer_id,
+                    reject
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ));
+                ui.render();
+                return Ok(());
+            }
+            other => bail!(
+                "unexpected control message while waiting for file accept: {:?}",
+                other
+            ),
+        }
+        ui.render();
+    }
+
+    let (mut data_send, _) = connection.open_data_stream().await?;
+    write_data_header(
+        &mut data_send,
+        &DataStreamHeader {
+            transfer_id: transfer_id.clone(),
+            kind: TransferKind::File,
+        },
+    )
+    .await?;
+    ui.mark_transfer_streaming(&transfer_id);
+    ui.render();
+
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        data_send
+            .write_all(&buffer[..bytes_read])
+            .await
+            .context("failed to stream file bytes")?;
+        bytes_done += bytes_read as u64;
+        ui.update_transfer_progress(&transfer_id, bytes_done, Some(metadata.len()));
+        ui.render();
+    }
+    data_send.finish().context("failed to finish data stream")?;
+
+    ui.mark_transfer_completed(&transfer_id);
+    ui.system(format!("sent file {}", file_name));
+    ui.render();
+    Ok(())
+}
+
+async fn accept_pending_offer(
+    session_id: &str,
+    connection: &IrohConnection,
+    send: &mut SendStream,
+    download_dir: &Path,
+    offer: Offer,
+    ui: &mut UiState,
+) -> Result<()> {
+    let file_name = offer.name.clone();
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Accept(Accept {
+                transfer_id: offer.transfer_id.clone(),
+            }),
+        ),
+    )
+    .await?;
+    ui.mark_transfer_streaming(&offer.transfer_id);
+    ui.system(format!("accepting file {}", file_name));
+    ui.render();
+
+    fs::create_dir_all(download_dir)
+        .await
+        .with_context(|| format!("failed to create {}", download_dir.display()))?;
+    let target_path = download_dir.join(&file_name);
+    let (_, mut data_recv) = connection.accept_data_stream().await?;
+    let header = read_data_header(&mut data_recv)
+        .await?
+        .context("peer closed data stream before sending a header")?;
+    if header.transfer_id != offer.transfer_id || header.kind != TransferKind::File {
+        bail!(
+            "received unexpected data stream header for transfer {}",
+            offer.transfer_id
+        );
+    }
+
+    let mut output = File::create(&target_path)
+        .await
+        .with_context(|| format!("failed to create {}", target_path.display()))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_done = 0_u64;
+    loop {
+        match data_recv.read(&mut buffer).await {
+            Ok(Some(bytes_read)) => {
+                output
+                    .write_all(&buffer[..bytes_read])
+                    .await
+                    .with_context(|| format!("failed to write {}", target_path.display()))?;
+                bytes_done += bytes_read as u64;
+                ui.update_transfer_progress(&offer.transfer_id, bytes_done, offer.size);
+                ui.render();
+            }
+            Ok(None) => break,
+            Err(error) => return Err(error).context("failed to read incoming file stream"),
+        }
+    }
+
+    write_envelope(
+        send,
+        &Envelope::new(
+            session_id,
+            next_message_id(),
+            ControlMessage::Complete(Complete {
+                transfer_id: offer.transfer_id.clone(),
+                digest: None,
+            }),
+        ),
+    )
+    .await?;
+    ui.mark_transfer_completed(&offer.transfer_id);
+    ui.system(format!("received file {}", target_path.display()));
+    ui.render();
+    Ok(())
 }
 
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()> {
@@ -389,18 +824,40 @@ async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()
     Ok(())
 }
 
+async fn write_data_header(send: &mut SendStream, header: &DataStreamHeader) -> Result<()> {
+    let bytes = encode_frame(header)?;
+    send.write_all(&bytes)
+        .await
+        .context("failed to write data header bytes")?;
+    send.flush()
+        .await
+        .context("failed to flush data header bytes")?;
+    Ok(())
+}
+
 async fn read_envelope(recv: &mut RecvStream) -> Result<Option<Envelope>> {
+    read_framed_message(recv, "envelope").await
+}
+
+async fn read_data_header(recv: &mut RecvStream) -> Result<Option<DataStreamHeader>> {
+    read_framed_message(recv, "data header").await
+}
+
+async fn read_framed_message<T>(recv: &mut RecvStream, label: &str) -> Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
     let mut prefix = [0_u8; 4];
     match recv.read_exact(&mut prefix).await {
         Ok(_) => {}
         Err(ReadExactError::FinishedEarly(0)) => return Ok(None),
         Err(ReadExactError::FinishedEarly(bytes_read)) => {
-            bail!("peer closed control stream mid-frame after {bytes_read} bytes")
+            bail!("peer closed {label} mid-frame after {bytes_read} bytes")
         }
         Err(ReadExactError::ReadError(ReadError::ClosedStream))
         | Err(ReadExactError::ReadError(ReadError::ConnectionLost(_))) => return Ok(None),
         Err(ReadExactError::ReadError(error)) => {
-            return Err(error).context("failed to read envelope prefix")
+            return Err(error).with_context(|| format!("failed to read {label} prefix"))
         }
     }
 
@@ -410,7 +867,7 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Option<Envelope>> {
     frame.resize(4 + payload_len, 0);
     recv.read_exact(&mut frame[4..])
         .await
-        .context("failed to read envelope payload")?;
+        .with_context(|| format!("failed to read {label} payload"))?;
     Ok(Some(decode_frame(&frame)?))
 }
 
@@ -453,9 +910,18 @@ fn emit_runtime_event(event: RuntimeEvent) {
 
 impl SessionConfig {
     fn from_args(_role: Role, args: SessionArgs) -> Self {
+        let stream_id = args
+            .stream_id
+            .or_else(|| std::env::var("SKYFFLA_STREAM_ID").ok())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                eprintln!("missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID");
+                std::process::exit(2);
+            });
         Self {
-            stream_id: args.stream_id,
+            stream_id,
             rendezvous_server: args.server,
+            download_dir: args.download_dir,
             peer_name: args.name.unwrap_or_else(default_peer_name),
             outgoing_message: args.message,
         }
@@ -466,4 +932,413 @@ fn default_peer_name() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "skyffla-peer".into())
+}
+
+impl UiState {
+    fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Self {
+        Self {
+            stream_id: stream_id.to_string(),
+            peer_name: peer_name.to_string(),
+            local_name: local_name.to_string(),
+            events: Vec::new(),
+            transfers: Vec::new(),
+            pending_offer: None,
+            input_buffer: String::new(),
+            cursor_index: 0,
+            input_history: Vec::new(),
+            history_index: None,
+            draft_buffer: None,
+            rendered_event_lines: 0,
+            rendered_width: None,
+            next_event_row: 0,
+        }
+    }
+
+    fn system(&mut self, message: String) {
+        self.push_event(message);
+    }
+
+    fn chat(&mut self, speaker: &str, text: &str) {
+        self.push_event(format!("{speaker}: {text}"));
+    }
+
+    fn upsert_transfer(&mut self, transfer: TransferUi) {
+        if let Some(existing) = self.transfers.iter_mut().find(|t| t.id == transfer.id) {
+            *existing = transfer;
+        } else {
+            self.transfers.push(transfer);
+        }
+    }
+
+    fn mark_transfer_streaming(&mut self, transfer_id: &str) {
+        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.state = TransferStateUi::Streaming;
+        }
+    }
+
+    fn mark_transfer_completed(&mut self, transfer_id: &str) {
+        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.state = TransferStateUi::Completed;
+        }
+    }
+
+    fn mark_transfer_rejected(&mut self, transfer_id: &str) {
+        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.state = TransferStateUi::Rejected;
+        }
+    }
+
+    fn update_transfer_progress(&mut self, transfer_id: &str, done: u64, total: Option<u64>) {
+        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.bytes_done = done;
+            if total.is_some() {
+                transfer.bytes_total = total;
+            }
+            if transfer.state == TransferStateUi::Pending
+                || transfer.state == TransferStateUi::AwaitingDecision
+            {
+                transfer.state = TransferStateUi::Streaming;
+            }
+        }
+    }
+
+    fn render(&mut self) {
+        const SHOVEL_ART: &[&str] = &[
+            r"   ===       skyffla.com",
+            r"    |",
+            r"    |        moving your bits, seamless and secure!",
+            r"  __|__",
+            r"  \   /",
+            r"   \_/",
+        ];
+        let width = terminal_width();
+        let height = terminal_height();
+        let divider = "-".repeat(width);
+        let prompt_row = height.saturating_sub(1) as u16;
+        let (visible_input, cursor_col) = self.prompt_window(width);
+        let mut stdout = std::io::stdout();
+
+        if self.rendered_width != Some(width) {
+            self.rendered_width = Some(width);
+            self.rendered_event_lines = 0;
+            let _ = queue!(stdout, MoveTo(0, 0), Clear(ClearType::All));
+            let _ = queue!(
+                stdout,
+                MoveTo(0, 0),
+                Clear(ClearType::CurrentLine),
+                Print(clip_line(&divider, width))
+            );
+            for (index, line) in SHOVEL_ART.iter().enumerate() {
+                let _ = queue!(
+                    stdout,
+                    MoveTo(0, index as u16 + 1),
+                    Clear(ClearType::CurrentLine),
+                    Print(clip_line(line, width))
+                );
+            }
+            let _ = queue!(
+                stdout,
+                MoveTo(0, SHOVEL_ART.len() as u16 + 1),
+                Clear(ClearType::CurrentLine),
+                Print(clip_line(&divider, width))
+            );
+            let _ = write!(stdout, "\x1b[1;{}r", prompt_row);
+            self.next_event_row = SHOVEL_ART.len() as u16 + 2;
+        }
+
+        let event_lines = if self.events.is_empty() {
+            vec!["[--:--:--] waiting for events".to_string()]
+        } else {
+            self.render_event_lines(width)
+        };
+        for line in event_lines.iter().skip(self.rendered_event_lines) {
+            if self.next_event_row >= prompt_row {
+                let _ = queue!(stdout, ScrollUp(1));
+                self.next_event_row = prompt_row.saturating_sub(1);
+            }
+            let _ = queue!(
+                stdout,
+                MoveTo(0, self.next_event_row),
+                Clear(ClearType::CurrentLine),
+                Print(clip_line(line, width))
+            );
+            self.next_event_row = self.next_event_row.saturating_add(1);
+        }
+        self.rendered_event_lines = event_lines.len();
+
+        let _ = queue!(
+            stdout,
+            MoveTo(0, prompt_row),
+            Clear(ClearType::CurrentLine),
+            Print(format!("> {visible_input}")),
+            MoveTo(cursor_col as u16, prompt_row),
+            Show
+        );
+        let _ = stdout.flush();
+    }
+
+    fn render_event_lines(&self, width: usize) -> Vec<String> {
+        self.events
+            .iter()
+            .flat_map(|event| {
+                wrap_prefixed_lines(&format!("[{}] ", event.timestamp), &event.text, width)
+            })
+            .collect()
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent) -> Option<String> {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Some("/quit".to_string());
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor_index = 0;
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor_index = self.input_buffer.len();
+            }
+            KeyCode::Enter => {
+                let submitted = self.input_buffer.trim().to_string();
+                self.history_index = None;
+                self.draft_buffer = None;
+                self.cursor_index = 0;
+                let previous = std::mem::take(&mut self.input_buffer);
+                if !submitted.is_empty() {
+                    self.input_history.push(previous);
+                    return Some(submitted);
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_index = None;
+                self.draft_buffer = None;
+                self.input_buffer.insert(self.cursor_index, c);
+                self.cursor_index += c.len_utf8();
+            }
+            KeyCode::Backspace => {
+                if self.cursor_index > 0 {
+                    let previous = previous_boundary(&self.input_buffer, self.cursor_index);
+                    self.input_buffer.drain(previous..self.cursor_index);
+                    self.cursor_index = previous;
+                    self.history_index = None;
+                    self.draft_buffer = None;
+                }
+            }
+            KeyCode::Delete => {
+                if self.cursor_index < self.input_buffer.len() {
+                    let next = next_boundary(&self.input_buffer, self.cursor_index);
+                    self.input_buffer.drain(self.cursor_index..next);
+                    self.history_index = None;
+                    self.draft_buffer = None;
+                }
+            }
+            KeyCode::Left => {
+                if self.cursor_index > 0 {
+                    self.cursor_index = previous_boundary(&self.input_buffer, self.cursor_index);
+                }
+            }
+            KeyCode::Right => {
+                if self.cursor_index < self.input_buffer.len() {
+                    self.cursor_index = next_boundary(&self.input_buffer, self.cursor_index);
+                }
+            }
+            KeyCode::Up => self.history_up(),
+            KeyCode::Down => self.history_down(),
+            KeyCode::Home => self.cursor_index = 0,
+            KeyCode::End => self.cursor_index = self.input_buffer.len(),
+            KeyCode::Char('d')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.input_buffer.is_empty() =>
+            {
+                return Some("/quit".to_string());
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    fn push_event(&mut self, text: String) {
+        self.events.push(EventLine {
+            timestamp: compact_timestamp(),
+            text,
+        });
+    }
+
+    fn history_up(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+
+        let next_index = match self.history_index {
+            Some(0) => 0,
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.draft_buffer = Some(self.input_buffer.clone());
+                self.input_history.len() - 1
+            }
+        };
+        self.history_index = Some(next_index);
+        self.input_buffer = self.input_history[next_index].clone();
+        self.cursor_index = self.input_buffer.len();
+    }
+
+    fn history_down(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+
+        if index + 1 < self.input_history.len() {
+            let next_index = index + 1;
+            self.history_index = Some(next_index);
+            self.input_buffer = self.input_history[next_index].clone();
+        } else {
+            self.history_index = None;
+            self.input_buffer = self.draft_buffer.take().unwrap_or_default();
+        }
+        self.cursor_index = self.input_buffer.len();
+    }
+
+    fn prompt_window(&self, width: usize) -> (String, usize) {
+        let prompt_space = width.saturating_sub(2).max(1);
+        let buffer_chars: Vec<char> = self.input_buffer.chars().collect();
+        let cursor_chars = self.input_buffer[..self.cursor_index].chars().count();
+
+        if buffer_chars.len() <= prompt_space {
+            return (self.input_buffer.clone(), 2 + cursor_chars);
+        }
+
+        let mut start = cursor_chars.saturating_sub(prompt_space.saturating_sub(1));
+        if start + prompt_space > buffer_chars.len() {
+            start = buffer_chars.len().saturating_sub(prompt_space);
+        }
+        let end = (start + prompt_space).min(buffer_chars.len());
+        let visible: String = buffer_chars[start..end].iter().collect();
+        let cursor_col = 2 + cursor_chars.saturating_sub(start);
+        (visible, cursor_col)
+    }
+}
+
+fn parse_user_input(input: &str) -> UserInput {
+    let trimmed = input.trim();
+    match trimmed {
+        "q" => return UserInput::Quit,
+        "y" => return UserInput::Accept,
+        "n" => return UserInput::Reject,
+        _ => {}
+    }
+    if trimmed == "/quit" {
+        UserInput::Quit
+    } else if trimmed == "/help" {
+        UserInput::Help
+    } else if trimmed == "/accept" {
+        UserInput::Accept
+    } else if trimmed == "/reject" {
+        UserInput::Reject
+    } else if let Some(path) = trimmed.strip_prefix("/send ") {
+        UserInput::SendFile(PathBuf::from(path.trim()))
+    } else {
+        UserInput::Chat(trimmed.to_string())
+    }
+}
+
+fn help_lines() -> &'static [&'static str] {
+    &[
+        "commands:",
+        "/help  show this help",
+        "/send <path>  offer a file",
+        "/accept  accept the pending file offer",
+        "/reject  reject the pending file offer",
+        "/quit  close the session",
+        "shortcuts: q quit, y accept, n reject, ctrl+a line start, ctrl+e line end",
+    ]
+}
+
+fn wrap_prefixed_lines(prefix: &str, text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![prefix.to_string()];
+    }
+
+    let available = width.saturating_sub(prefix.len()).max(8);
+    let indent = " ".repeat(prefix.len());
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let next_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + 1 + word.len()
+        };
+
+        if next_len > available && !current.is_empty() {
+            if lines.is_empty() {
+                lines.push(format!("{prefix}{current}"));
+            } else {
+                lines.push(format!("{indent}{current}"));
+            }
+            current.clear();
+        }
+
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+
+    if current.is_empty() {
+        lines.push(prefix.to_string());
+    } else if lines.is_empty() {
+        lines.push(format!("{prefix}{current}"));
+    } else {
+        lines.push(format!("{indent}{current}"));
+    }
+
+    lines
+}
+
+fn terminal_width() -> usize {
+    terminal_size()
+        .map(|(cols, _)| cols as usize)
+        .ok()
+        .filter(|cols| *cols >= 20)
+        .unwrap_or(72)
+}
+
+fn terminal_height() -> usize {
+    terminal_size()
+        .map(|(_, rows)| rows as usize)
+        .ok()
+        .filter(|rows| *rows >= 8)
+        .unwrap_or(24)
+}
+
+fn previous_boundary(text: &str, index: usize) -> usize {
+    text[..index]
+        .char_indices()
+        .next_back()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_boundary(text: &str, index: usize) -> usize {
+    text[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| index + offset)
+        .unwrap_or(text.len())
+}
+
+fn compact_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let secs = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+fn clip_line(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
 }

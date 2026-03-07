@@ -217,6 +217,12 @@ pub struct ErrorMessage {
     pub transfer_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataStreamHeader {
+    pub transfer_id: String,
+    pub kind: TransferKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     MessageTypeMismatch {
