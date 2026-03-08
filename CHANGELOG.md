@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-08
+
 - Improved Linux release compatibility for Homebrew installs on Debian 12 / Ubuntu 22.04 class systems by lowering the glibc build baseline.
 - Restored macOS and Linux ARM release artifacts after validating the Linux x86_64 Homebrew path end to end.
 - Simplified the README around install, usage, and local development only.
