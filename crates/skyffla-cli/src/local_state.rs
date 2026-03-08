@@ -20,7 +20,7 @@ pub struct LocalState {
     pub known_peers: HashMap<String, KnownPeerRecord>,
 }
 
-pub fn local_state_dir_path() -> Option<PathBuf> {
+fn local_state_dir_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla"))
 }
 
