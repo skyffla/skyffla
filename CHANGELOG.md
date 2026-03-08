@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Make `cut-release.sh` wait for the current `main` commit's `CI` run to finish instead of failing fast while the workflow is still queued or running.
+
 ## [0.1.7] - 2026-03-08
 
 - Log rendezvous register/resolve/delete requests in a countable format for ops tracking.

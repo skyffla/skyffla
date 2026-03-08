@@ -58,23 +58,79 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
-REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
-CI_RUN_ID="$(
-  gh run list \
-    -R "${REPO_SLUG}" \
-    --workflow ci.yml \
-    --branch main \
-    --commit "${HEAD_SHA}" \
-    --json databaseId,status,conclusion \
-    --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId' \
-    -L 10 \
-    | head -n 1
-)"
-
-if [[ -z "${CI_RUN_ID}" ]]; then
-  echo "no successful CI run found for ${HEAD_SHA} on main; push main and wait for CI to pass before releasing" >&2
+ORIGIN_MAIN_SHA="$(git rev-parse --verify refs/remotes/origin/main 2>/dev/null || true)"
+if [[ -z "${ORIGIN_MAIN_SHA}" ]]; then
+  echo "origin/main is missing locally; fetch origin before cutting a release" >&2
   exit 1
 fi
+
+if [[ "${HEAD_SHA}" != "${ORIGIN_MAIN_SHA}" ]]; then
+  echo "HEAD (${HEAD_SHA}) does not match origin/main (${ORIGIN_MAIN_SHA}); push main and wait for CI before releasing" >&2
+  exit 1
+fi
+
+REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
+CI_POLL_INTERVAL="${SKYFFLA_RELEASE_CI_POLL_INTERVAL:-10}"
+CI_TIMEOUT_SECONDS="${SKYFFLA_RELEASE_CI_TIMEOUT:-1800}"
+
+if [[ ! "${CI_POLL_INTERVAL}" =~ ^[0-9]+$ || "${CI_POLL_INTERVAL}" -le 0 ]]; then
+  echo "SKYFFLA_RELEASE_CI_POLL_INTERVAL must be a positive integer" >&2
+  exit 1
+fi
+
+if [[ ! "${CI_TIMEOUT_SECONDS}" =~ ^[0-9]+$ || "${CI_TIMEOUT_SECONDS}" -le 0 ]]; then
+  echo "SKYFFLA_RELEASE_CI_TIMEOUT must be a positive integer" >&2
+  exit 1
+fi
+
+CI_DEADLINE="$(( $(date +%s) + CI_TIMEOUT_SECONDS ))"
+LAST_CI_STATE=""
+
+while :; do
+  CI_RUN_LINE="$(
+    gh run list \
+      -R "${REPO_SLUG}" \
+      --workflow ci.yml \
+      --branch main \
+      --commit "${HEAD_SHA}" \
+      --json databaseId,status,conclusion \
+      --jq 'map(select(.databaseId != null))[0] | if . then [.databaseId, .status, (.conclusion // "")] | @tsv else empty end' \
+      -L 10
+  )"
+
+  if [[ -z "${CI_RUN_LINE}" ]]; then
+    CI_STATE="missing"
+
+    if [[ "${CI_STATE}" != "${LAST_CI_STATE}" ]]; then
+      echo "waiting for CI to start for ${HEAD_SHA} on main..." >&2
+      LAST_CI_STATE="${CI_STATE}"
+    fi
+  else
+    IFS=$'\t' read -r CI_RUN_ID CI_STATUS CI_CONCLUSION <<<"${CI_RUN_LINE}"
+    CI_STATE="${CI_RUN_ID}:${CI_STATUS}:${CI_CONCLUSION}"
+
+    if [[ "${CI_STATE}" != "${LAST_CI_STATE}" ]]; then
+      echo "CI run ${CI_RUN_ID} status: ${CI_STATUS}${CI_CONCLUSION:+ (${CI_CONCLUSION})}" >&2
+      LAST_CI_STATE="${CI_STATE}"
+    fi
+
+    if [[ "${CI_STATUS}" == "completed" ]]; then
+      if [[ "${CI_CONCLUSION}" == "success" ]]; then
+        break
+      fi
+
+      echo "CI run ${CI_RUN_ID} finished with conclusion: ${CI_CONCLUSION}" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "$(date +%s)" -ge "${CI_DEADLINE}" ]]; then
+    echo "timed out after ${CI_TIMEOUT_SECONDS}s waiting for CI on ${HEAD_SHA}" >&2
+    exit 1
+  fi
+
+  sleep "${CI_POLL_INTERVAL}"
+done
 
 TODAY="$(date +%F)"
 
