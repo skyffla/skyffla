@@ -49,8 +49,7 @@ fi
 TODAY="$(date +%F)"
 
 if ! grep -q '^## \[Unreleased\]$' CHANGELOG.md; then
-  echo "CHANGELOG.md is missing an [Unreleased] section" >&2
-  exit 1
+  perl -0pi -e 's/(The format is based on Keep a Changelog and the project aims to follow Semantic Versioning\.\n)/${1}\n## [Unreleased]\n/s' CHANGELOG.md
 fi
 
 CURRENT_VERSION="$(

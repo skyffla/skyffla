@@ -4,10 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and the project aims to follow Semantic Versioning.
 
+## [Unreleased]
+
 ## [0.1.5] - 2026-03-08
 
-- Make join claim missing streams
-- Restore terminal state on exit
+- Make `join` claim missing streams so the first peer waits and the next peer connects.
+- Restore terminal state more cleanly on exit from the interactive UI.
+- Refine the README examples and harden the release helper when `## [Unreleased]` is missing.
 
 ## [0.1.4] - 2026-03-08
 
