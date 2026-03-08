@@ -5,10 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crossterm::queue;
+use crossterm::{execute, queue};
 use crossterm::style::Print;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType, ScrollUp,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType,
+    EnterAlternateScreen, LeaveAlternateScreen, ScrollUp,
 };
 use skyffla_protocol::Offer;
 
@@ -76,8 +77,8 @@ impl TerminalUiGuard {
     pub(crate) fn activate() -> Result<Self> {
         enable_raw_mode().context("failed to enable raw mode")?;
         let mut stdout = std::io::stdout();
-        write!(stdout, "\x1b[?1049h")?;
-        stdout.flush().context("failed to initialize terminal UI")?;
+        execute!(stdout, EnterAlternateScreen, Clear(ClearType::All))
+            .context("failed to initialize terminal UI")?;
         Ok(Self)
     }
 }
@@ -86,7 +87,9 @@ impl Drop for TerminalUiGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\x1b[?25h\x1b[?1049l");
+        let _ = write!(stdout, "\x1b[r");
+        let _ = execute!(stdout, Show, LeaveAlternateScreen);
+        let _ = write!(stdout, "\r");
         let _ = stdout.flush();
     }
 }
