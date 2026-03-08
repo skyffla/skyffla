@@ -206,11 +206,12 @@ impl UiState {
         const SHOVEL_ART: &[&str] = &[
             r"   ===       skyffla.com",
             r"    |",
-            r"    |        moving your bits, seamless and secure!",
+            r"    |        - moving your bits, seamless and secure!",
             r"  __|__",
             r"  \   /",
             r"   \_/",
         ];
+        const SHOVEL_TOP_ROW: u16 = 2;
         let width = terminal_width();
         let height = terminal_height();
         let divider = "-".repeat(width);
@@ -231,19 +232,19 @@ impl UiState {
             for (index, line) in SHOVEL_ART.iter().enumerate() {
                 let _ = queue!(
                     stdout,
-                    MoveTo(0, index as u16 + 1),
+                    MoveTo(0, SHOVEL_TOP_ROW + index as u16),
                     Clear(ClearType::CurrentLine),
                     Print(clip_line(line, width))
                 );
             }
             let _ = queue!(
                 stdout,
-                MoveTo(0, SHOVEL_ART.len() as u16 + 1),
+                MoveTo(0, SHOVEL_TOP_ROW + SHOVEL_ART.len() as u16 + 1),
                 Clear(ClearType::CurrentLine),
                 Print(clip_line(&divider, width))
             );
             let _ = write!(stdout, "\x1b[1;{}r", prompt_row);
-            self.next_event_row = SHOVEL_ART.len() as u16 + 2;
+            self.next_event_row = SHOVEL_TOP_ROW + SHOVEL_ART.len() as u16 + 2;
         }
 
         let event_lines = if self.events.is_empty() {
