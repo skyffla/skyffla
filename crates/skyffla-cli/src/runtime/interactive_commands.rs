@@ -7,6 +7,7 @@ use skyffla_protocol::{ControlMessage, Envelope, Reject};
 use skyffla_transport::IrohConnection;
 use tokio::sync::mpsc;
 
+use crate::accept_policy::AutoAcceptPolicy;
 use crate::local_state::update_local_state;
 use crate::net::framing::{next_message_id, send_transfer_error, write_envelope};
 use crate::runtime::handshake::send_chat_message;
@@ -135,20 +136,22 @@ pub(crate) async fn handle_user_input(
         UserInput::AutoAccept(enabled) => {
             match enabled {
                 Some(enabled) => {
-                    ui.auto_accept_enabled = enabled;
+                    ui.auto_accept_policy = if enabled {
+                        AutoAcceptPolicy::files_and_clipboard()
+                    } else {
+                        AutoAcceptPolicy::none()
+                    };
+                    ui.auto_accept_source = "interactive override".to_string();
                     update_local_state(&ui.state_path, |state| {
-                        state.auto_accept_enabled = enabled;
+                        state.auto_accept_policy = ui.auto_accept_policy.clone();
                     });
                     ui.system(format!(
-                        "auto-accept {} for files and clipboard",
+                        "persisted auto-accept default {} for file and clipboard offers",
                         if enabled { "enabled" } else { "disabled" }
                     ));
                 }
                 None => {
-                    ui.system(format!(
-                        "auto-accept is {} for files and clipboard",
-                        if ui.auto_accept_enabled { "on" } else { "off" }
-                    ));
+                    ui.system(ui.auto_accept_status_line());
                 }
             }
             Ok(true)

@@ -28,13 +28,15 @@ What exists now:
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
 - `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, tar-based folder transfer, and explicit text clipboard transfer
 - `skyffla host --stdio` and `skyffla join --stdio` for pipeline-style byte transport with optional JSON events on `stderr`
-- unit tests for protocol, session, rendezvous domain logic, storage, and HTTP handlers
+- persisted local state in `~/.skyffla/state.json` for command history, known peers, and default auto-accept policy
+- per-run acceptance overrides via `--auto-accept` and `--reject-all`
+- unit and integration tests for protocol, session, rendezvous, transport, and CLI stdio smoke paths
 
 What does not exist yet:
 
 - richer key-driven TUI navigation beyond the current command-based flow
 - persistent transfer history or resumable transfers
-- non-interactive acceptance flags outside the current `stdio` path
+- packaging and release automation
 
 ## Repository Layout
 
@@ -241,6 +243,20 @@ Current supported flags:
 - `--message <text>` to use a one-shot non-interactive chat send after connect
 - `--stdio` to disable the TUI and stream payload bytes over the session
 - `--json` to emit machine-readable session events on `stderr`
+- `--auto-accept <kinds>` to override acceptance policy for this run only
+- `--reject-all` to reject all incoming interactive offers for this run only
+
+Accepted values for `--auto-accept`:
+
+- `file`
+- `folder`
+- `clipboard`
+
+Example:
+
+```sh
+cargo run -p skyffla -- join demo-room --server http://127.0.0.1:18080 --auto-accept file,clipboard
+```
 
 Default behavior without `--message`:
 
@@ -297,8 +313,17 @@ Clipboard transfer example after connect:
 
 Clipboard transfer currently supports text only and writes to the local clipboard only after explicit acceptance.
 
-Planned next CLI additions:
-- non-interactive acceptance flags for non-stdio workflows
+Auto-accept behavior:
+
+- `/autoaccept on` persists a default policy for `file` and `clipboard`
+- `/autoaccept off` clears that persisted default
+- `folder` is never enabled by `/autoaccept`; use `--auto-accept folder` for a one-run override
+- the effective policy is reported at startup
+- precedence is:
+  1. interactive `/autoaccept` changes during the current session
+  2. CLI flags like `--auto-accept` or `--reject-all`
+  3. persisted defaults from `~/.skyffla/state.json`
+  4. manual acceptance
 
 Current `stdio` example:
 
@@ -327,6 +352,7 @@ Current `stdio` behavior:
 - joiner writes payload bytes to stdout
 - JSON session/progress events are written to stderr when `--json` is enabled
 - clipboard features are not available in `--stdio` mode
+- interactive offer acceptance policy flags do not affect `--stdio`; stdio remains its own non-interactive transfer path
 
 Current rendezvous server:
 
@@ -398,7 +424,8 @@ Current tests cover:
 - HTTP endpoint behavior and rate limiting
 - `iroh` bootstrap ticket round trips
 - end-to-end native `iroh` control-stream exchange between two local peers
-- build validation for the minimal `host`/`join` CLI path
+- CLI config, trust-state, event-shaping, and rendezvous URL unit tests
+- binary-level `skyffla --stdio` host/join smoke testing
 - manual smoke-test validation for interactive chat and clean `/quit` shutdown
 - manual smoke-test validation for `/send` plus `/accept`/`/reject`, transfer progress, and downloaded file contents
 

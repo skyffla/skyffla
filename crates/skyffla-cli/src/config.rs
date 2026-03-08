@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 
+use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+use crate::local_state::{load_local_state, local_state_file_path};
+
 #[derive(Parser)]
 #[command(name = "skyffla")]
 #[command(about = "Minimal Skyffla peer CLI", long_about = None)]
@@ -36,6 +39,10 @@ pub(crate) struct SessionArgs {
     pub(crate) stdio: bool,
     #[arg(long)]
     pub(crate) json: bool,
+    #[arg(long, value_enum, value_delimiter = ',', conflicts_with = "reject_all")]
+    pub(crate) auto_accept: Vec<AutoAcceptTarget>,
+    #[arg(long, conflicts_with = "auto_accept")]
+    pub(crate) reject_all: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +60,8 @@ pub(crate) struct SessionConfig {
     pub(crate) outgoing_message: Option<String>,
     pub(crate) stdio: bool,
     pub(crate) json_events: bool,
+    pub(crate) auto_accept_policy: AutoAcceptPolicy,
+    pub(crate) auto_accept_source: &'static str,
 }
 
 impl SessionConfig {
@@ -66,6 +75,12 @@ impl SessionConfig {
                 eprintln!("missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID");
                 std::process::exit(2);
             });
+        let stored_state = load_local_state(&local_state_file_path());
+        let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
+            &stored_state.auto_accept_policy,
+            &args.auto_accept,
+            args.reject_all,
+        );
         Self {
             role,
             stream_id,
@@ -79,6 +94,8 @@ impl SessionConfig {
             outgoing_message: args.message,
             stdio: args.stdio,
             json_events: args.json,
+            auto_accept_policy,
+            auto_accept_source,
         }
     }
 }
@@ -109,9 +126,33 @@ fn validate_stdio_message_flags(stdio: bool, message: Option<&str>) -> Result<()
     Ok(())
 }
 
+fn resolve_auto_accept_policy(
+    persisted: &AutoAcceptPolicy,
+    cli_targets: &[AutoAcceptTarget],
+    reject_all: bool,
+) -> (AutoAcceptPolicy, &'static str) {
+    if reject_all {
+        return (AutoAcceptPolicy::none(), "cli override");
+    }
+    if !cli_targets.is_empty() {
+        return (
+            AutoAcceptPolicy::from_targets(cli_targets),
+            "cli override",
+        );
+    }
+    if !persisted.is_empty() {
+        return (persisted.clone(), "local state");
+    }
+    (AutoAcceptPolicy::none(), "default")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{resolve_peer_name, resolve_stream_id, validate_stdio_message_flags};
+    use super::{
+        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id,
+        validate_stdio_message_flags,
+    };
+    use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
     #[test]
     fn explicit_stream_id_wins_over_environment() {
@@ -147,5 +188,40 @@ mod tests {
         assert!(validate_stdio_message_flags(true, Some("hello")).is_err());
         assert!(validate_stdio_message_flags(false, Some("hello")).is_ok());
         assert!(validate_stdio_message_flags(true, None).is_ok());
+    }
+
+    #[test]
+    fn cli_auto_accept_overrides_persisted_policy() {
+        let persisted = AutoAcceptPolicy::files_and_clipboard();
+        let (policy, source) =
+            resolve_auto_accept_policy(&persisted, &[AutoAcceptTarget::Folder], false);
+
+        assert_eq!(
+            policy,
+            AutoAcceptPolicy {
+                file: false,
+                folder: true,
+                clipboard: false,
+            }
+        );
+        assert_eq!(source, "cli override");
+    }
+
+    #[test]
+    fn reject_all_disables_any_persisted_acceptance() {
+        let persisted = AutoAcceptPolicy::files_and_clipboard();
+        let (policy, source) = resolve_auto_accept_policy(&persisted, &[], true);
+
+        assert_eq!(policy, AutoAcceptPolicy::none());
+        assert_eq!(source, "cli override");
+    }
+
+    #[test]
+    fn persisted_policy_is_used_when_no_cli_override_exists() {
+        let persisted = AutoAcceptPolicy::files_and_clipboard();
+        let (policy, source) = resolve_auto_accept_policy(&persisted, &[], false);
+
+        assert_eq!(policy, persisted);
+        assert_eq!(source, "local state");
     }
 }

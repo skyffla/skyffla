@@ -47,10 +47,7 @@ pub(crate) async fn run_interactive_chat_loop(
 
     let mut send_open = true;
     ui.system("interactive session ready; use /help for commands".to_string());
-    ui.system(format!(
-        "auto-accept is {} for files and clipboard",
-        if ui.auto_accept_enabled { "on" } else { "off" }
-    ));
+    ui.system(ui.auto_accept_status_line());
     ui.render();
 
     let shutdown_signal = wait_for_shutdown_signal();

@@ -72,6 +72,8 @@ pub(crate) async fn run_connected_session(
         &session_id,
         &config.peer_name,
         &transport.endpoint().id().to_string(),
+        config.auto_accept_policy.clone(),
+        config.auto_accept_source,
     );
     ui.peer_name = peer.peer_name.clone();
     ui.system(format!(

@@ -12,6 +12,7 @@ use crossterm::terminal::{
 };
 use skyffla_protocol::Offer;
 
+use crate::accept_policy::AutoAcceptPolicy;
 use crate::local_state::{load_local_state, local_state_file_path, update_local_state};
 
 pub(crate) enum UserInput {
@@ -53,7 +54,8 @@ pub(crate) struct UiState {
     pub(crate) stream_id: String,
     pub(crate) peer_name: String,
     pub(crate) local_name: String,
-    pub(crate) auto_accept_enabled: bool,
+    pub(crate) auto_accept_policy: AutoAcceptPolicy,
+    pub(crate) auto_accept_source: String,
     events: Vec<EventLine>,
     pub(crate) transfers: Vec<TransferUi>,
     pub(crate) pending_offer: Option<Offer>,
@@ -90,14 +92,21 @@ impl Drop for TerminalUiGuard {
 }
 
 impl UiState {
-    pub(crate) fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Self {
+    pub(crate) fn new(
+        stream_id: &str,
+        local_name: &str,
+        peer_name: &str,
+        auto_accept_policy: AutoAcceptPolicy,
+        auto_accept_source: &str,
+    ) -> Self {
         let state_path = local_state_file_path();
         let state = load_local_state(&state_path);
         Self {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
-            auto_accept_enabled: state.auto_accept_enabled,
+            auto_accept_policy,
+            auto_accept_source: auto_accept_source.to_string(),
             events: Vec::new(),
             transfers: Vec::new(),
             pending_offer: None,
@@ -266,6 +275,14 @@ impl UiState {
             Show
         );
         let _ = stdout.flush();
+    }
+
+    pub(crate) fn auto_accept_status_line(&self) -> String {
+        format!(
+            "auto-accept effective: {} ({})",
+            self.auto_accept_policy.describe(),
+            self.auto_accept_source
+        )
     }
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> Option<String> {
@@ -472,7 +489,7 @@ pub(crate) fn help_lines() -> &'static [&'static str] {
         "/accept  accept the pending file offer",
         "/reject  reject the pending file offer",
         "/cancel [id]  cancel an active transfer",
-        "/autoaccept on|off  auto-accept incoming files and clipboard",
+        "/autoaccept on|off  set the persisted default for file and clipboard offers",
         "/quit  close the session",
         "shortcuts: q quit, y accept, n reject, ctrl+c close",
         "editing: up/down history, ctrl+a line start, ctrl+e line end, ctrl+k kill to end",

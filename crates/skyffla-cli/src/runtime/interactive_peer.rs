@@ -57,8 +57,7 @@ pub(crate) async fn handle_interactive_envelope(
                 bytes_done: 0,
                 bytes_total: offer.size,
             });
-            let should_auto_accept = ui.auto_accept_enabled
-                && matches!(offer.kind, TransferKind::File | TransferKind::Clipboard);
+            let should_auto_accept = ui.auto_accept_policy.allows_kind(&offer.kind);
             if should_auto_accept {
                 ui.system(format!(
                     "auto-accepting {} {}{}",

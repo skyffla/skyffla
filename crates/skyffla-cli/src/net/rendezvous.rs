@@ -65,6 +65,7 @@ fn stream_url(config: &SessionConfig) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::accept_policy::AutoAcceptPolicy;
     use crate::config::{Role, SessionConfig};
 
     use super::stream_url;
@@ -80,6 +81,8 @@ mod tests {
             outgoing_message: None,
             stdio: false,
             json_events: false,
+            auto_accept_policy: AutoAcceptPolicy::none(),
+            auto_accept_source: "default",
         };
 
         assert_eq!(stream_url(&config), "http://127.0.0.1:8080/v1/streams/room");

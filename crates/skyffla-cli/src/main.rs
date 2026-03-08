@@ -1,3 +1,4 @@
+mod accept_policy;
 mod app;
 mod config;
 mod local_state;
