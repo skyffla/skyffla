@@ -47,7 +47,7 @@ printf 'hello\n' | skyffla host demo --stdio
 skyffla join demo --stdio
 ```
 
-The CLI defaults to the public rendezvous at `http://34.73.17.206:8080`.
+The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080`.
 
 Override it for self-hosting with `--server` or `SKYFFLA_RENDEZVOUS_URL`:
 

@@ -15,4 +15,4 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 - Re-enabled release artifacts for macOS and Linux ARM while keeping Linux builds on the older Ubuntu 22.04 glibc baseline.
 - Rewrote the README to focus on Brew installation, core CLI usage, and local development setup.
-- Set the default client rendezvous URL to the hosted server at `34.73.17.206:8080`.
+- Set the default client rendezvous URL to the hosted server at `rendezvous.skyffla.com:8080`.

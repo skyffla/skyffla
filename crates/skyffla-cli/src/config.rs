@@ -7,7 +7,7 @@ use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 use crate::cli_error::CliError;
 use crate::local_state::{load_local_state, local_state_file_path};
 
-pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://34.73.17.206:8080";
+pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
 
 #[derive(Parser)]
 #[command(name = "skyffla")]
