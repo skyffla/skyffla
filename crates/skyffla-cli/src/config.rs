@@ -7,6 +7,8 @@ use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 use crate::cli_error::CliError;
 use crate::local_state::{load_local_state, local_state_file_path};
 
+pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://34.73.17.206:8080";
+
 #[derive(Parser)]
 #[command(name = "skyffla")]
 #[command(about = "Minimal Skyffla peer CLI", long_about = None)]
@@ -27,7 +29,7 @@ pub(crate) struct SessionArgs {
     #[arg(
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
-        default_value = "http://127.0.0.1:8080"
+        default_value = DEFAULT_RENDEZVOUS_URL
     )]
     pub(crate) server: String,
     #[arg(long, default_value = ".")]

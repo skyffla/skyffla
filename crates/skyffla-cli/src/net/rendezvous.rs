@@ -66,7 +66,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::accept_policy::AutoAcceptPolicy;
-    use crate::config::{Role, SessionConfig};
+    use crate::config::{Role, SessionConfig, DEFAULT_RENDEZVOUS_URL};
 
     use super::stream_url;
 
@@ -75,7 +75,7 @@ mod tests {
         let config = SessionConfig {
             role: Role::Host,
             stream_id: "room".into(),
-            rendezvous_server: "http://127.0.0.1:8080/".into(),
+            rendezvous_server: format!("{DEFAULT_RENDEZVOUS_URL}/"),
             download_dir: PathBuf::from("."),
             peer_name: "peer".into(),
             outgoing_message: None,
@@ -85,6 +85,9 @@ mod tests {
             auto_accept_source: "default",
         };
 
-        assert_eq!(stream_url(&config), "http://127.0.0.1:8080/v1/streams/room");
+        assert_eq!(
+            stream_url(&config),
+            format!("{DEFAULT_RENDEZVOUS_URL}/v1/streams/room")
+        );
     }
 }
