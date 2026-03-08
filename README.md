@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Terminal-first peer communication in Rust with a separate rendezvous service.
+  CLI-first peer communication in Rust with a separate rendezvous service.
 </p>
 
 ## Install
@@ -54,6 +54,21 @@ printf 'hello\n' | skyffla join demo --stdio
 
 ```sh
 skyffla join demo --stdio
+```
+
+In `--stdio` mode, transferred bytes go to `stdout`. Status, progress, and errors go to `stderr`.
+
+Capture only the payload:
+
+```sh
+skyffla join demo --stdio > received.txt
+```
+
+Keep the data stream clean in pipelines:
+
+```sh
+printf 'hello\n' | skyffla join demo --stdio 2>sender.log
+skyffla join demo --stdio 2>receiver.log | cat
 ```
 
 The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080`.

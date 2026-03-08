@@ -4,7 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and the project aims to follow Semantic Versioning.
 
-## [Unreleased]
+## [0.1.5] - 2026-03-08
+
+- Make join claim missing streams
+- Restore terminal state on exit
 
 ## [0.1.4] - 2026-03-08
 
