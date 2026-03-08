@@ -46,6 +46,35 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "${CURRENT_BRANCH}" != "main" ]]; then
+  echo "releases must be cut from main (current branch: ${CURRENT_BRANCH})" >&2
+  exit 1
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "gh CLI is required to verify CI status before releasing" >&2
+  exit 1
+fi
+
+HEAD_SHA="$(git rev-parse HEAD)"
+REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\\.git$##')"
+CI_RUN_ID="$(
+  gh api \
+    "repos/${REPO_SLUG}/actions/workflows/ci.yml/runs" \
+    -f branch=main \
+    -f event=push \
+    -f head_sha="${HEAD_SHA}" \
+    -f per_page=20 \
+    --jq '.workflow_runs[] | select(.status == "completed" and .conclusion == "success") | .id' \
+    | head -n 1
+)"
+
+if [[ -z "${CI_RUN_ID}" ]]; then
+  echo "no successful CI run found for ${HEAD_SHA} on main; push main and wait for CI to pass before releasing" >&2
+  exit 1
+fi
+
 TODAY="$(date +%F)"
 
 if ! grep -q '^## \[Unreleased\]$' CHANGELOG.md; then

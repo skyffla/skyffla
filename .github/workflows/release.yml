@@ -120,7 +120,7 @@ jobs:
           ../scripts/release/render-homebrew-formula.sh \
             "Skyffla" \
             "skyffla" \
-            "Terminal-native peer communication tool" \
+            "CLI FIRST P2P FOR THE AGENTIC ERA" \
             "${version}" \
             "${{ github.repository_owner }}" \
             "${{ github.event.repository.name }}" \
