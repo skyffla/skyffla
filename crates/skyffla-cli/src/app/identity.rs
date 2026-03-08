@@ -12,7 +12,7 @@ pub(crate) struct LocalIdentity {
 pub(crate) fn load_or_create_identity(
     state_path: &Option<std::path::PathBuf>,
 ) -> Result<LocalIdentity> {
-    let mut state = load_local_state(state_path);
+    let mut state = load_local_state(state_path)?;
 
     if let Some(secret_hex) = state.local_identity_secret_hex.as_deref() {
         if let Some(identity) = parse_identity(secret_hex) {
@@ -22,7 +22,7 @@ pub(crate) fn load_or_create_identity(
 
     let signing_key = SigningKey::generate(&mut OsRng);
     state.local_identity_secret_hex = Some(hex::encode(signing_key.to_bytes()));
-    save_local_state(state_path, &state);
+    save_local_state(state_path, &state)?;
     Ok(identity_from_signing_key(&signing_key))
 }
 

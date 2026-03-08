@@ -57,7 +57,7 @@ pub(crate) async fn run_connected_session(
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))?;
-    let peer_trust = remember_peer(&peer);
+    let peer_trust = remember_peer(&peer).map_err(|error| CliError::local_io(error.to_string()))?;
 
     sink.emit_runtime_event(state_changed_event(
         session
@@ -88,7 +88,8 @@ pub(crate) async fn run_connected_session(
         &transport.endpoint().id().to_string(),
         config.auto_accept_policy.clone(),
         config.auto_accept_source,
-    );
+    )
+    .map_err(|error| CliError::local_io(error.to_string()))?;
     ui.peer_name = peer.peer_name.clone();
     ui.system(format!(
         "session stream={} you={} peer={}",

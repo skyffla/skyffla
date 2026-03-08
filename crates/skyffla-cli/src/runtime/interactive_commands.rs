@@ -142,13 +142,18 @@ pub(crate) async fn handle_user_input(
                         AutoAcceptPolicy::none()
                     };
                     ui.auto_accept_source = "interactive override".to_string();
-                    update_local_state(&ui.state_path, |state| {
+                    if let Err(error) = update_local_state(&ui.state_path, |state| {
                         state.auto_accept_policy = ui.auto_accept_policy.clone();
-                    });
-                    ui.system(format!(
-                        "persisted auto-accept default {} for file and clipboard offers",
-                        if enabled { "enabled" } else { "disabled" }
-                    ));
+                    }) {
+                        ui.system(format!(
+                            "failed to persist auto-accept preference: {error:#}"
+                        ));
+                    } else {
+                        ui.system(format!(
+                            "persisted auto-accept default {} for file and clipboard offers",
+                            if enabled { "enabled" } else { "disabled" }
+                        ));
+                    }
                 }
                 None => {
                     ui.system(ui.auto_accept_status_line());

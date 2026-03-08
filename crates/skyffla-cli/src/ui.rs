@@ -101,10 +101,10 @@ impl UiState {
         peer_name: &str,
         auto_accept_policy: AutoAcceptPolicy,
         auto_accept_source: &str,
-    ) -> Self {
+    ) -> Result<Self> {
         let state_path = local_state_file_path();
-        let state = load_local_state(&state_path);
-        Self {
+        let state = load_local_state(&state_path)?;
+        Ok(Self {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
@@ -122,7 +122,7 @@ impl UiState {
             rendered_event_lines: 0,
             rendered_width: None,
             next_event_row: 0,
-        }
+        })
     }
 
     pub(crate) fn system(&mut self, message: String) {
@@ -390,9 +390,11 @@ impl UiState {
             let overflow = self.input_history.len() - 500;
             self.input_history.drain(0..overflow);
         }
-        update_local_state(&self.state_path, |state| {
+        if let Err(error) = update_local_state(&self.state_path, |state| {
             state.history = self.input_history.clone();
-        });
+        }) {
+            self.system(format!("failed to persist command history: {error:#}"));
+        }
     }
 
     fn history_up(&mut self) {

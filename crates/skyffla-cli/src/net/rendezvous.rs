@@ -70,14 +70,24 @@ pub(crate) async fn resolve_stream(
 }
 
 pub(crate) async fn delete_stream(client: &Client, config: &SessionConfig) -> Result<()> {
-    client
+    let response = client
         .delete(stream_url(config))
         .send()
         .await
-        .context("failed to delete stream from rendezvous server")?
+        .context("failed to delete stream from rendezvous server")?;
+
+    if is_delete_success(response.status()) {
+        return Ok(());
+    }
+
+    response
         .error_for_status()
         .context("rendezvous server rejected stream deletion")?;
     Ok(())
+}
+
+fn is_delete_success(status: StatusCode) -> bool {
+    status.is_success() || status == StatusCode::NOT_FOUND
 }
 
 fn stream_url(config: &SessionConfig) -> String {
@@ -117,7 +127,9 @@ mod tests {
     use crate::accept_policy::AutoAcceptPolicy;
     use crate::config::{Role, SessionConfig, DEFAULT_RENDEZVOUS_URL};
 
-    use super::{stream_url, RendezvousErrorResponse};
+    use reqwest::StatusCode;
+
+    use super::{is_delete_success, stream_url, RendezvousErrorResponse};
 
     #[test]
     fn stream_url_trims_trailing_slash_from_server() {
@@ -148,5 +160,12 @@ mod tests {
         .expect("rendezvous error response should deserialize");
 
         assert_eq!(body.message, "stream demo is already hosted");
+    }
+
+    #[test]
+    fn delete_treats_missing_stream_as_success() {
+        assert!(is_delete_success(StatusCode::NO_CONTENT));
+        assert!(is_delete_success(StatusCode::NOT_FOUND));
+        assert!(!is_delete_success(StatusCode::INTERNAL_SERVER_ERROR));
     }
 }

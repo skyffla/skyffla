@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Result;
 use skyffla_session::SessionPeer;
 
 use crate::local_state::{
@@ -14,14 +15,14 @@ pub(crate) struct PeerTrustStatus {
     pub(crate) message: String,
 }
 
-pub(crate) fn remember_peer(peer: &SessionPeer) -> Option<PeerTrustStatus> {
+pub(crate) fn remember_peer(peer: &SessionPeer) -> Result<Option<PeerTrustStatus>> {
     let now = unix_now();
-    let mut state = load_local_state(&local_state_file_path());
+    let mut state = load_local_state(&local_state_file_path())?;
     let status = apply_peer_trust(&mut state, peer, now);
     if status.is_some() {
-        save_local_state(&local_state_file_path(), &state);
+        save_local_state(&local_state_file_path(), &state)?;
     }
-    status
+    Ok(status)
 }
 
 pub(crate) fn short_fingerprint(raw: &str) -> Option<String> {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::accept_policy::AutoAcceptPolicy;
@@ -46,40 +47,58 @@ fn legacy_known_peers_file_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".skyffla_known_peers.json"))
 }
 
-pub fn load_local_state(path: &Option<PathBuf>) -> LocalState {
+pub fn load_local_state(path: &Option<PathBuf>) -> Result<LocalState> {
     let Some(path) = path else {
-        return LocalState::default();
+        return Ok(LocalState::default());
     };
 
     match std::fs::read_to_string(path) {
-        Ok(contents) => normalize_local_state(serde_json::from_str(&contents).unwrap_or_default()),
-        Err(_) => migrate_legacy_local_state(),
+        Ok(contents) => {
+            let state = serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse local state file {}", path.display()))?;
+            Ok(normalize_local_state(state))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            migrate_legacy_local_state(path)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read local state file {}", path.display())),
     }
 }
 
-pub fn update_local_state(path: &Option<PathBuf>, update: impl FnOnce(&mut LocalState)) {
+pub fn update_local_state(
+    path: &Option<PathBuf>,
+    update: impl FnOnce(&mut LocalState),
+) -> Result<()> {
     let Some(path) = path else {
-        return;
+        return Ok(());
     };
 
-    let mut state = load_local_state(&Some(path.clone()));
+    let mut state = load_local_state(&Some(path.clone()))?;
     update(&mut state);
-    save_local_state(&Some(path.clone()), &state);
+    save_local_state(&Some(path.clone()), &state)
 }
 
-pub fn save_local_state(path: &Option<PathBuf>, state: &LocalState) {
+pub fn save_local_state(path: &Option<PathBuf>, state: &LocalState) -> Result<()> {
     let Some(path) = path else {
-        return;
+        return Ok(());
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create local state directory {}",
+                parent.display()
+            )
+        })?;
     }
-    if let Ok(contents) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, contents);
-    }
+
+    let contents =
+        serde_json::to_string_pretty(state).context("failed to serialize local state")?;
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write local state file {}", path.display()))
 }
 
-fn migrate_legacy_local_state() -> LocalState {
+fn migrate_legacy_local_state(path: &PathBuf) -> Result<LocalState> {
     let history = legacy_history_file_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|contents| {
@@ -113,8 +132,8 @@ fn migrate_legacy_local_state() -> LocalState {
         auto_accept_enabled: false,
         known_peers,
     };
-    save_local_state(&local_state_file_path(), &state);
-    state
+    save_local_state(&Some(path.clone()), &state)?;
+    Ok(state)
 }
 
 fn normalize_local_state(mut state: LocalState) -> LocalState {
@@ -127,7 +146,7 @@ fn normalize_local_state(mut state: LocalState) -> LocalState {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_local_state, LocalState};
+    use super::{load_local_state, normalize_local_state, LocalState};
     use crate::accept_policy::AutoAcceptPolicy;
 
     #[test]
@@ -159,5 +178,24 @@ mod tests {
 
         assert_eq!(state.auto_accept_policy, policy);
         assert!(!state.auto_accept_enabled);
+    }
+
+    #[test]
+    fn invalid_json_is_reported_instead_of_resetting_state() {
+        let path = std::env::temp_dir().join(format!(
+            "skyffla-state-invalid-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, "{invalid json").expect("invalid file should be written");
+
+        let error = load_local_state(&Some(path.clone())).expect_err("invalid json should fail");
+        assert!(error
+            .to_string()
+            .contains("failed to parse local state file"));
+
+        let _ = std::fs::remove_file(path);
     }
 }

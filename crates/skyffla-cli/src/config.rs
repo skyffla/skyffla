@@ -79,7 +79,9 @@ impl SessionConfig {
                     "missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID",
                 )
             })?;
-        let stored_state = load_local_state(&local_state_file_path());
+        validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
+        let stored_state = load_local_state(&local_state_file_path())
+            .map_err(|error| CliError::local_io(error.to_string()))?;
         let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
             &stored_state.auto_accept_policy,
             &args.auto_accept,
@@ -147,11 +149,25 @@ fn resolve_auto_accept_policy(
     (AutoAcceptPolicy::none(), "default")
 }
 
+fn validate_stream_id(stream_id: &str) -> Result<()> {
+    if stream_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "invalid stream id {:?}: use only ASCII letters, digits, '-' or '_'",
+        stream_id
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id,
-        validate_stdio_message_flags,
+        validate_stdio_message_flags, validate_stream_id,
     };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
@@ -189,6 +205,15 @@ mod tests {
         assert!(validate_stdio_message_flags(true, Some("hello")).is_err());
         assert!(validate_stdio_message_flags(false, Some("hello")).is_ok());
         assert!(validate_stdio_message_flags(true, None).is_ok());
+    }
+
+    #[test]
+    fn stream_id_rejects_special_characters() {
+        assert!(validate_stream_id("copper-731").is_ok());
+        assert!(validate_stream_id("copper_731").is_ok());
+        assert!(validate_stream_id("copper/731").is_err());
+        assert!(validate_stream_id("copper 731").is_err());
+        assert!(validate_stream_id("copper?731").is_err());
     }
 
     #[test]
