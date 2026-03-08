@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-03-08
+
 - Require a green `CI` run on the current `main` commit before `cut-release.sh` will cut a release.
 - Fix a `--stdio` completion race in the join-or-create flow that could fail on Linux CI after payload transfer.
 
