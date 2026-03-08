@@ -60,13 +60,14 @@ fi
 HEAD_SHA="$(git rev-parse HEAD)"
 REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\\.git$##')"
 CI_RUN_ID="$(
-  gh api \
-    "repos/${REPO_SLUG}/actions/workflows/ci.yml/runs" \
-    -f branch=main \
-    -f event=push \
-    -f head_sha="${HEAD_SHA}" \
-    -f per_page=20 \
-    --jq '.workflow_runs[] | select(.status == "completed" and .conclusion == "success") | .id' \
+  gh run list \
+    -R "${REPO_SLUG}" \
+    --workflow ci.yml \
+    --branch main \
+    --commit "${HEAD_SHA}" \
+    --json databaseId,status,conclusion \
+    --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId' \
+    -L 10 \
     | head -n 1
 )"
 
