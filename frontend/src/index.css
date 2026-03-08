@@ -1,0 +1,33 @@
+html {
+  background: #daa520;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.35), transparent 52%),
+    radial-gradient(circle at 86% 10%, rgba(255, 255, 255, 0.18), transparent 44%),
+    linear-gradient(140deg, #f2cf6e 0%, #daa520 56%, #9d6700 100%);
+  color: #2c1a00;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+a,
+img {
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
