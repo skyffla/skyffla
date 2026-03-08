@@ -7,6 +7,7 @@ use skyffla_protocol::{
 };
 use skyffla_transport::IrohConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{timeout, Duration};
 
 use crate::app::sink::{digest_json, EventSink};
 use crate::cli_error::CliError;
@@ -15,6 +16,8 @@ use crate::net::framing::{
     next_message_id, read_data_header, read_envelope, write_data_header, write_envelope,
 };
 use crate::transfers::finalize_sha256_digest;
+
+const CONTROL_STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(crate) async fn run_stdio_session(
     config: &SessionConfig,
@@ -162,6 +165,7 @@ async fn run_stdio_sender(
             })?;
         match envelope.payload {
             ControlMessage::Complete(complete) if complete.transfer_id == transfer_id => {
+                let _ = send.finish();
                 sink.emit_json_event(json!({
                     "event": "complete",
                     "transfer_id": transfer_id,
@@ -311,6 +315,7 @@ async fn run_stdio_receiver(
     send.finish()
         .context("failed to finish control stream after stdio completion")
         .map_err(|error| CliError::transport(error.to_string()))?;
+    let _ = timeout(CONTROL_STREAM_DRAIN_TIMEOUT, send.stopped()).await;
     sink.emit_json_event(json!({
         "event": "complete",
         "transfer_id": offer.transfer_id,
