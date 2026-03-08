@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.rate_limit_requests,
             config.rate_limit_window_seconds,
         )),
+        trust_proxy_headers: config.trust_proxy_headers,
     });
 
     let listener = TcpListener::bind(config.listen_addr).await?;
@@ -30,7 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "skyffla-rendezvous listening on {} using database {}",
         config.listen_addr, config.database_path
     );
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -57,6 +62,7 @@ struct Config {
     cleanup_interval_seconds: u64,
     rate_limit_requests: usize,
     rate_limit_window_seconds: u64,
+    trust_proxy_headers: bool,
 }
 
 impl Config {
@@ -81,6 +87,10 @@ impl Config {
             .map(|value| value.parse())
             .transpose()?
             .unwrap_or(60);
+        let trust_proxy_headers = env::var("SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS")
+            .ok()
+            .map(|value| parse_bool_env(&value))
+            .unwrap_or(false);
 
         Ok(Self {
             listen_addr,
@@ -88,6 +98,14 @@ impl Config {
             cleanup_interval_seconds,
             rate_limit_requests,
             rate_limit_window_seconds,
+            trust_proxy_headers,
         })
     }
+}
+
+fn parse_bool_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }

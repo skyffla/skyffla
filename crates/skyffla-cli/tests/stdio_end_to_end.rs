@@ -34,10 +34,14 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
         let app = build_router(AppState {
             store: Arc::new(InMemoryStreamStore::new()),
             rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
+            trust_proxy_headers: false,
         });
-        axum::serve(listener, app)
-            .await
-            .expect("rendezvous server should stay healthy during test");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("rendezvous server should stay healthy during test");
     });
 
     let home_dir = fresh_test_dir("skyffla-cli-stdio");
@@ -165,10 +169,14 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         let app = build_router(AppState {
             store: Arc::new(InMemoryStreamStore::new()),
             rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
+            trust_proxy_headers: false,
         });
-        axum::serve(listener, app)
-            .await
-            .expect("rendezvous server should stay healthy during test");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("rendezvous server should stay healthy during test");
     });
 
     let home_dir = fresh_test_dir("skyffla-cli-stdio-missing");

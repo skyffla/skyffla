@@ -31,44 +31,46 @@ brew install skyffla-rendezvous
 Join a session, or create it if nobody is there yet:
 
 ```sh
-skyffla join demo
+skyffla join copper-731
 ```
 
 The first peer waits. The next peer connects with the same command:
 
 ```sh
-skyffla join demo
+skyffla join copper-731
 ```
 
 Use explicit host mode when you want deterministic automation:
 
 ```sh
-skyffla host demo
+skyffla host copper-731
 ```
 
 Pipe bytes over stdio:
 
 ```sh
-printf 'hello\n' | skyffla join demo --stdio
+printf 'hello\n' | skyffla join copper-731 --stdio
 ```
 
 ```sh
-skyffla join demo --stdio
+skyffla join copper-731 --stdio
 ```
+
+Treat the stream ID as a short-lived shared secret. Avoid very short or easy-to-guess IDs; use something less obvious, like `copper-731` instead of `demo`.
 
 In `--stdio` mode, transferred bytes go to `stdout`. Status, progress, and errors go to `stderr`.
 
 Capture only the payload:
 
 ```sh
-skyffla join demo --stdio > received.txt
+skyffla join copper-731 --stdio > received.txt
 ```
 
 Keep the data stream clean in pipelines:
 
 ```sh
-printf 'hello\n' | skyffla join demo --stdio 2>sender.log
-skyffla join demo --stdio 2>receiver.log | cat
+printf 'hello\n' | skyffla join copper-731 --stdio 2>sender.log
+skyffla join copper-731 --stdio 2>receiver.log | cat
 ```
 
 The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080`.
@@ -76,7 +78,7 @@ The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080
 Override it for self-hosting with `--server` or `SKYFFLA_RENDEZVOUS_URL`:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla join demo
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla join copper-731
 ```
 
 Run your own rendezvous server:
@@ -84,6 +86,10 @@ Run your own rendezvous server:
 ```sh
 skyffla-rendezvous
 ```
+
+`skyffla-rendezvous` ignores `X-Forwarded-For` by default. Only set
+`SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS=true` when it is behind a trusted reverse
+proxy that you control.
 
 ## Local Dev
 
@@ -110,5 +116,5 @@ cargo run -p skyffla-rendezvous
 ```
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- join demo
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- join copper-731
 ```

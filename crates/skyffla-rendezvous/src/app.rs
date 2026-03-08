@@ -1,9 +1,10 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr};
+use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
+use axum::http::{request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -16,6 +17,7 @@ use crate::{unix_timestamp_seconds, PutStreamRequest};
 pub struct AppState {
     pub store: SharedStreamStore,
     pub rate_limiter: Arc<IpRateLimiter>,
+    pub trust_proxy_headers: bool,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -36,13 +38,12 @@ async fn put_stream(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
     headers: HeaderMap,
+    MaybeConnectInfo(peer_addr): MaybeConnectInfo,
     Json(request): Json<PutStreamRequest>,
 ) -> Result<Json<crate::PutStreamResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
-    let client_ip = client_ip_from_headers(&headers);
-    state
-        .rate_limiter
-        .check(client_ip, now_epoch_seconds)?;
+    let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
+    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
@@ -56,12 +57,11 @@ async fn get_stream(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
     headers: HeaderMap,
+    MaybeConnectInfo(peer_addr): MaybeConnectInfo,
 ) -> Result<Json<crate::GetStreamResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
-    let client_ip = client_ip_from_headers(&headers);
-    state
-        .rate_limiter
-        .check(client_ip, now_epoch_seconds)?;
+    let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
+    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
@@ -85,39 +85,74 @@ async fn delete_stream(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
     headers: HeaderMap,
+    MaybeConnectInfo(peer_addr): MaybeConnectInfo,
 ) -> Result<StatusCode, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
-    let client_ip = client_ip_from_headers(&headers);
-    state
-        .rate_limiter
-        .check(client_ip, now_epoch_seconds)?;
+    let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
+    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
-    state
-        .store
-        .delete(&stream_id)
-        .map_err(|error| {
-            let api_error = ApiError::from_store(error);
-            log_request(
-                "delete",
-                &stream_id,
-                client_ip,
-                api_error.status,
-                api_error.code,
-            );
-            api_error
-        })?;
-    log_request("delete", &stream_id, client_ip, StatusCode::NO_CONTENT, "ok");
+    state.store.delete(&stream_id).map_err(|error| {
+        let api_error = ApiError::from_store(error);
+        log_request(
+            "delete",
+            &stream_id,
+            client_ip,
+            api_error.status,
+            api_error.code,
+        );
+        api_error
+    })?;
+    log_request(
+        "delete",
+        &stream_id,
+        client_ip,
+        StatusCode::NO_CONTENT,
+        "ok",
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn client_ip_from_headers(headers: &HeaderMap) -> IpAddr {
+fn client_ip_from_request(
+    headers: &HeaderMap,
+    peer_addr: Option<SocketAddr>,
+    trust_proxy_headers: bool,
+) -> IpAddr {
+    if trust_proxy_headers {
+        if let Some(forwarded_ip) = forwarded_ip_from_headers(headers) {
+            return forwarded_ip;
+        }
+    }
+
+    peer_addr
+        .map(|addr| addr.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+fn forwarded_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next())
         .map(str::trim)
         .and_then(|value| value.parse().ok())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+struct MaybeConnectInfo(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for MaybeConnectInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
 }
 
 fn log_request(
@@ -284,16 +319,17 @@ mod tests {
     use super::*;
     use crate::store::InMemoryStreamStore;
 
-    fn test_app(rate_limit: usize) -> Router {
+    fn test_app(rate_limit: usize, trust_proxy_headers: bool) -> Router {
         build_router(AppState {
             store: Arc::new(InMemoryStreamStore::new()),
             rate_limiter: Arc::new(IpRateLimiter::new(rate_limit, 60)),
+            trust_proxy_headers,
         })
     }
 
     #[tokio::test]
     async fn put_then_get_stream_via_http() {
-        let app = test_app(10);
+        let app = test_app(10, false);
 
         let put_response = app
             .clone()
@@ -342,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn conflicting_stream_returns_conflict() {
-        let app = test_app(10);
+        let app = test_app(10, false);
 
         let first_body = serde_json::to_vec(&crate::PutStreamRequest {
             ticket: "ticket-a".into(),
@@ -385,7 +421,37 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_returns_too_many_requests() {
-        let app = test_app(1);
+        let app = test_app(1, false);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/missing")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/missing")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn ignores_forwarded_for_headers_by_default() {
+        let app = test_app(1, false);
 
         let first = app
             .clone()
@@ -406,12 +472,44 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/v1/streams/missing")
-                    .header("x-forwarded-for", "203.0.113.10")
+                    .header("x-forwarded-for", "203.0.113.11")
                     .body(Body::empty())
                     .expect("request should build"),
             )
             .await
             .expect("request should succeed");
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn trusts_forwarded_for_headers_when_enabled() {
+        let app = test_app(1, true);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/missing")
+                    .header("x-forwarded-for", "203.0.113.10")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/streams/missing")
+                    .header("x-forwarded-for", "203.0.113.11")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(second.status(), StatusCode::NOT_FOUND);
     }
 }

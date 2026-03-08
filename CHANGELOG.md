@@ -8,6 +8,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 - Log rendezvous register/resolve/delete requests in a countable format for ops tracking.
 - Add a local helper to summarize daily resolve counts from the VM service logs.
+- Stop trusting `X-Forwarded-For` in `skyffla-rendezvous` unless explicitly configured for a trusted reverse proxy.
+- Clarify the README around less-guessable stream IDs and the safe proxy-header default for self-hosting.
 
 ## [0.1.6] - 2026-03-08
 
