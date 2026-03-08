@@ -8,39 +8,8 @@ on:
 permissions:
   contents: write
 
-env:
-  HOMEBREW_TAP_REPO: homebrew-skyffla
-
 jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Validate tag matches workspace version
-        id: version
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          workspace_version="$(python3 - <<'PY'
-          import tomllib
-          with open("Cargo.toml", "rb") as fh:
-              data = tomllib.load(fh)
-          print(data["workspace"]["package"]["version"])
-          PY
-          )"
-
-          if [[ "${tag_version}" != "${workspace_version}" ]]; then
-            echo "tag version ${tag_version} does not match workspace version ${workspace_version}" >&2
-            exit 1
-          fi
-
-          echo "version=${tag_version}" >> "${GITHUB_OUTPUT}"
-
   build:
-    needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -66,9 +35,10 @@ jobs:
 
       - name: Package release archive
         run: |
+          version="${GITHUB_REF_NAME#v}"
           chmod +x scripts/release/package-release.sh
           scripts/release/package-release.sh \
-            "${{ needs.validate.outputs.version }}" \
+            "${version}" \
             "${{ matrix.target }}" \
             target/release \
             dist
@@ -81,9 +51,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs:
-      - validate
-      - build
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -112,9 +80,7 @@ jobs:
           fi
 
   update-homebrew-tap:
-    needs:
-      - validate
-      - publish
+    needs: publish
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source repository
@@ -132,58 +98,61 @@ jobs:
         id: checksums
         working-directory: dist
         run: |
-          echo "darwin_arm64=$(sha256sum skyffla-v${{ needs.validate.outputs.version }}-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "darwin_x86_64=$(sha256sum skyffla-v${{ needs.validate.outputs.version }}-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "linux_x86_64=$(sha256sum skyffla-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "linux_arm64=$(sha256sum skyffla-v${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          version="${GITHUB_REF_NAME#v}"
+          echo "darwin_arm64=$(sha256sum "skyffla-v${version}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "darwin_x86_64=$(sha256sum "skyffla-v${version}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "linux_x86_64=$(sha256sum "skyffla-v${version}-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "linux_arm64=$(sha256sum "skyffla-v${version}-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
 
       - name: Check out Homebrew tap repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/${{ env.HOMEBREW_TAP_REPO }}
+          repository: jonaslindblom/homebrew-skyffla
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: homebrew-tap
 
-      - name: Render formula
+      - name: Render formulae
         working-directory: homebrew-tap
         run: |
+          version="${GITHUB_REF_NAME#v}"
           mkdir -p Formula
           chmod +x ../scripts/release/render-homebrew-formula.sh
           ../scripts/release/render-homebrew-formula.sh \
             "Skyffla" \
             "skyffla" \
             "Terminal-native peer communication tool" \
-            "${{ needs.validate.outputs.version }}" \
-            "${{ github.repository_owner }}" \
-            "${{ github.event.repository.name }}" \
+            "${version}" \
+            "jonaslindblom" \
+            "skyfflacli" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_arm64 }}" \
-            > "Formula/skyffla.rb"
+            > Formula/skyffla.rb
           ../scripts/release/render-homebrew-formula.sh \
             "SkyfflaRendezvous" \
             "skyffla-rendezvous" \
             "Skyffla rendezvous server" \
-            "${{ needs.validate.outputs.version }}" \
-            "${{ github.repository_owner }}" \
-            "${{ github.event.repository.name }}" \
+            "${version}" \
+            "jonaslindblom" \
+            "skyfflacli" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_arm64 }}" \
-            > "Formula/skyffla-rendezvous.rb"
+            > Formula/skyffla-rendezvous.rb
 
-      - name: Commit and push formula update
+      - name: Commit and push formula updates
         working-directory: homebrew-tap
         run: |
+          version="${GITHUB_REF_NAME#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "Formula/skyffla.rb" "Formula/skyffla-rendezvous.rb"
+          git add Formula/skyffla.rb Formula/skyffla-rendezvous.rb
 
           if git diff --cached --quiet; then
             exit 0
           fi
 
-          git commit -m "Update Skyffla formulae to v${{ needs.validate.outputs.version }}"
+          git commit -m "Update Skyffla formulae to v${version}"
           git push
