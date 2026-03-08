@@ -58,7 +58,7 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
-REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\\.git$##')"
+REPO_SLUG="$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')"
 CI_RUN_ID="$(
   gh run list \
     -R "${REPO_SLUG}" \
