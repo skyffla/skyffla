@@ -4,3 +4,5 @@
 *.db-shm
 *.db-wal
 IMPLEMENTATION_PLAN.md
+DEPLOYMENT_BREW_PLAN.local.md
+scripts/local/

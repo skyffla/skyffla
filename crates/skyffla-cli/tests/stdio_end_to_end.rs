@@ -262,7 +262,10 @@ async fn wait_for_server_ready(server_url: &str) -> Result<()> {
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("rendezvous server was not ready within {:?}", SERVER_READY_TIMEOUT);
+            anyhow::bail!(
+                "rendezvous server was not ready within {:?}",
+                SERVER_READY_TIMEOUT
+            );
         }
         sleep(Duration::from_millis(50)).await;
     }

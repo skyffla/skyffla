@@ -1,8 +1,16 @@
 [package]
 name = "skyffla-rendezvous"
+description = "Skyffla rendezvous server"
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+rust-version.workspace = true
 version.workspace = true
+keywords = ["networking", "server", "rendezvous", "p2p"]
+categories = ["network-programming"]
 
 [dependencies]
 axum = "0.8"

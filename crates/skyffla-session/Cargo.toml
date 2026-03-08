@@ -1,8 +1,16 @@
 [package]
 name = "skyffla-session"
+description = "Session state machine for Skyffla"
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+rust-version.workspace = true
 version.workspace = true
+keywords = ["networking", "session", "state-machine"]
+categories = ["network-programming"]
 
 [dependencies]
 skyffla-protocol = { path = "../skyffla-protocol" }
