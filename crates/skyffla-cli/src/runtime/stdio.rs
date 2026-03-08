@@ -308,6 +308,9 @@ async fn run_stdio_receiver(
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))?;
+    send.finish()
+        .context("failed to finish control stream after stdio completion")
+        .map_err(|error| CliError::transport(error.to_string()))?;
     sink.emit_json_event(json!({
         "event": "complete",
         "transfer_id": offer.transfer_id,

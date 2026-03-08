@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Require a green `CI` run on the current `main` commit before `cut-release.sh` will cut a release.
+- Fix a `--stdio` completion race in the join-or-create flow that could fail on Linux CI after payload transfer.
+
 ## [0.1.5] - 2026-03-08
 
 - Make `join` claim missing streams so the first peer waits and the next peer connects.
