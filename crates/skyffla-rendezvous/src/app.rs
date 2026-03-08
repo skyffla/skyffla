@@ -39,14 +39,16 @@ async fn put_stream(
     Json(request): Json<PutStreamRequest>,
 ) -> Result<Json<crate::PutStreamResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
+    let client_ip = client_ip_from_headers(&headers);
     state
         .rate_limiter
-        .check(client_ip_from_headers(&headers), now_epoch_seconds)?;
+        .check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
         .put(&stream_id, request, now_epoch_seconds)
         .map_err(ApiError::from_store)?;
+    log_request("register", &stream_id, client_ip, StatusCode::OK, "ok");
     Ok(Json(response))
 }
 
@@ -56,14 +58,26 @@ async fn get_stream(
     headers: HeaderMap,
 ) -> Result<Json<crate::GetStreamResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
+    let client_ip = client_ip_from_headers(&headers);
     state
         .rate_limiter
-        .check(client_ip_from_headers(&headers), now_epoch_seconds)?;
+        .check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
         .get(&stream_id, now_epoch_seconds)
-        .map_err(ApiError::from_store)?;
+        .map_err(|error| {
+            let api_error = ApiError::from_store(error);
+            log_request(
+                "resolve",
+                &stream_id,
+                client_ip,
+                api_error.status,
+                api_error.code,
+            );
+            api_error
+        })?;
+    log_request("resolve", &stream_id, client_ip, StatusCode::OK, "ok");
     Ok(Json(response))
 }
 
@@ -73,14 +87,26 @@ async fn delete_stream(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
+    let client_ip = client_ip_from_headers(&headers);
     state
         .rate_limiter
-        .check(client_ip_from_headers(&headers), now_epoch_seconds)?;
+        .check(client_ip, now_epoch_seconds)?;
 
     state
         .store
         .delete(&stream_id)
-        .map_err(ApiError::from_store)?;
+        .map_err(|error| {
+            let api_error = ApiError::from_store(error);
+            log_request(
+                "delete",
+                &stream_id,
+                client_ip,
+                api_error.status,
+                api_error.code,
+            );
+            api_error
+        })?;
+    log_request("delete", &stream_id, client_ip, StatusCode::NO_CONTENT, "ok");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -92,6 +118,23 @@ fn client_ip_from_headers(headers: &HeaderMap) -> IpAddr {
         .map(str::trim)
         .and_then(|value| value.parse().ok())
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+fn log_request(
+    operation: &str,
+    stream_id: &str,
+    client_ip: IpAddr,
+    status: StatusCode,
+    outcome: &str,
+) {
+    println!(
+        "request op={} stream_id={} client_ip={} status={} outcome={}",
+        operation,
+        stream_id,
+        client_ip,
+        status.as_u16(),
+        outcome
+    );
 }
 
 #[derive(Debug)]

@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Log rendezvous register/resolve/delete requests in a countable format for ops tracking.
+- Add a local helper to summarize daily resolve counts from the VM service logs.
+
 ## [0.1.6] - 2026-03-08
 
 - Require a green `CI` run on the current `main` commit before `cut-release.sh` will cut a release.
