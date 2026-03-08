@@ -28,7 +28,7 @@ What exists now:
 - initial `iroh` transport wrapper with endpoint bootstrap tickets and bidirectional streams
 - `skyffla host` and `skyffla join` commands with rendezvous lookup, `Hello/HelloAck`, interactive full-screen terminal UI, text chat, file transfer, tar-based folder transfer, and explicit text clipboard transfer
 - `skyffla host --stdio` and `skyffla join --stdio` for pipeline-style byte transport with optional JSON events on `stderr`
-- persisted local state in `~/.skyffla/state.json` for command history, known peers, and default auto-accept policy
+- persisted local state in `~/.skyffla/state.json` for command history, known peers, default auto-accept policy, and the local identity key
 - per-run acceptance overrides via `--auto-accept` and `--reject-all`
 - unit and integration tests for protocol, session, rendezvous, transport, and CLI stdio smoke paths
 
@@ -241,6 +241,7 @@ Peer/session protocol:
 - binary framed control messages
 - CBOR-encoded payloads
 - explicit transfer lifecycle messages
+- stable peer fingerprint exchanged during handshake from a persisted local identity key
 
 Transport direction:
 
@@ -349,6 +350,13 @@ Auto-accept behavior:
   3. persisted defaults from `~/.skyffla/state.json`
   4. manual acceptance
 
+Identity behavior:
+
+- each local client now creates and persists a long-lived identity key in `~/.skyffla/state.json`
+- the handshake advertises a stable fingerprint derived from that key
+- known-peer tracking uses that stable fingerprint instead of a transport-ephemeral identifier
+- the interactive session event stream reports local and peer identity fingerprints when a session starts
+
 Current `stdio` example:
 
 Terminal 1:
@@ -377,6 +385,33 @@ Current `stdio` behavior:
 - JSON session/progress events are written to stderr when `--json` is enabled
 - clipboard features are not available in `--stdio` mode
 - interactive offer acceptance policy flags do not affect `--stdio`; stdio remains its own non-interactive transfer path
+
+Automation contract for `--stdio --json`:
+
+- payload bytes are written only to `stdout`
+- machine-readable events are written only to `stderr`
+- terminal UI is disabled
+- on failure, a final JSON error event is written to `stderr`
+- exit codes are stable and can be consumed by scripts and agents
+
+Stable exit codes:
+
+- `0`: success
+- `2`: usage/configuration error
+- `10`: rendezvous error
+- `11`: transport/connectivity error
+- `12`: protocol/negotiation error
+- `20`: transfer rejected
+- `21`: transfer cancelled
+- `22`: peer-reported error
+- `23`: local I/O error
+- `1`: other runtime error
+
+Typical JSON error shape:
+
+```json
+{"event":"error","code":"rendezvous_error","message":"...","exit_code":10}
+```
 
 Current rendezvous server:
 
@@ -450,6 +485,7 @@ Current tests cover:
 - end-to-end native `iroh` control-stream exchange between two local peers
 - CLI config, trust-state, event-shaping, and rendezvous URL unit tests
 - binary-level `skyffla --stdio` host/join smoke testing
+- stdio JSON error and exit-code contract for missing-stream automation flow
 - manual smoke-test validation for interactive chat and clean `/quit` shutdown
 - manual smoke-test validation for `/send` plus `/accept`/`/reject`, transfer progress, and downloaded file contents
 

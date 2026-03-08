@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use serde_json::json;
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -9,6 +9,7 @@ use skyffla_transport::IrohConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::app::sink::{digest_json, EventSink};
+use crate::cli_error::CliError;
 use crate::config::{Role, SessionConfig};
 use crate::net::framing::{
     next_message_id, read_data_header, read_envelope, write_data_header, write_envelope,
@@ -22,7 +23,7 @@ pub(crate) async fn run_stdio_session(
     connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
-) -> Result<()> {
+) -> Result<(), CliError> {
     match config.role {
         Role::Host => run_stdio_sender(sink, session_id, connection, send, recv).await,
         Role::Join => run_stdio_receiver(sink, session_id, connection, send, recv).await,
@@ -35,7 +36,7 @@ async fn run_stdio_sender(
     connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
-) -> Result<()> {
+) -> Result<(), CliError> {
     let transfer_id = format!("t{}", next_message_id());
     let offer = Offer {
         transfer_id: transfer_id.clone(),
@@ -51,7 +52,8 @@ async fn run_stdio_sender(
         send,
         &Envelope::new(session_id, next_message_id(), ControlMessage::Offer(offer)),
     )
-    .await?;
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
     sink.emit_json_event(json!({
         "event": "offer",
         "transfer_id": transfer_id,
@@ -61,8 +63,11 @@ async fn run_stdio_sender(
 
     loop {
         let envelope = read_envelope(recv)
-            .await?
-            .context("peer closed control stream while stdio offer was pending")?;
+            .await
+            .map_err(|error| CliError::protocol(error.to_string()))?
+            .ok_or_else(|| {
+                CliError::protocol("peer closed control stream while stdio offer was pending")
+            })?;
         match envelope.payload {
             ControlMessage::Accept(Accept {
                 transfer_id: accepted,
@@ -70,36 +75,44 @@ async fn run_stdio_sender(
                 break;
             }
             ControlMessage::Reject(reject) if reject.transfer_id == transfer_id => {
-                bail!(
+                return Err(CliError::rejected(format!(
                     "stdio transfer rejected{}",
                     reject
                         .reason
                         .as_deref()
                         .map(|reason| format!(" ({reason})"))
                         .unwrap_or_default()
-                );
+                )));
             }
             ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
-                bail!(
+                return Err(CliError::cancelled(format!(
                     "stdio transfer cancelled{}",
                     cancel
                         .reason
                         .as_deref()
                         .map(|reason| format!(" ({reason})"))
                         .unwrap_or_default()
-                );
+                )));
             }
             ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
-                bail!("stdio transfer error {}: {}", error.code, error.message);
+                return Err(CliError::peer(format!(
+                    "stdio transfer error {}: {}",
+                    error.code, error.message
+                )));
             }
-            other => bail!(
-                "unexpected control message while waiting for stdio accept: {:?}",
-                other
-            ),
+            other => {
+                return Err(CliError::protocol(format!(
+                    "unexpected control message while waiting for stdio accept: {:?}",
+                    other
+                )))
+            }
         }
     }
 
-    let (mut data_send, _) = connection.open_data_stream().await?;
+    let (mut data_send, _) = connection
+        .open_data_stream()
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
     write_data_header(
         &mut data_send,
         &DataStreamHeader {
@@ -107,7 +120,8 @@ async fn run_stdio_sender(
             kind: TransferKind::Stdio,
         },
     )
-    .await?;
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
 
     let mut stdin = tokio::io::stdin();
     let mut buffer = vec![0_u8; 64 * 1024];
@@ -116,14 +130,16 @@ async fn run_stdio_sender(
         let bytes_read = stdin
             .read(&mut buffer)
             .await
-            .context("failed to read stdin for stdio transfer")?;
+            .context("failed to read stdin for stdio transfer")
+            .map_err(|error| CliError::local_io(error.to_string()))?;
         if bytes_read == 0 {
             break;
         }
         data_send
             .write_all(&buffer[..bytes_read])
             .await
-            .context("failed to write stdio payload bytes")?;
+            .context("failed to write stdio payload bytes")
+            .map_err(|error| CliError::transport(error.to_string()))?;
         bytes_done += bytes_read as u64;
         sink.emit_json_event(json!({
             "event": "progress",
@@ -134,12 +150,16 @@ async fn run_stdio_sender(
     }
     data_send
         .finish()
-        .context("failed to finish stdio data stream")?;
+        .context("failed to finish stdio data stream")
+        .map_err(|error| CliError::transport(error.to_string()))?;
 
     loop {
         let envelope = read_envelope(recv)
-            .await?
-            .context("peer closed control stream before stdio completion")?;
+            .await
+            .map_err(|error| CliError::protocol(error.to_string()))?
+            .ok_or_else(|| {
+                CliError::protocol("peer closed control stream before stdio completion")
+            })?;
         match envelope.payload {
             ControlMessage::Complete(complete) if complete.transfer_id == transfer_id => {
                 sink.emit_json_event(json!({
@@ -150,22 +170,27 @@ async fn run_stdio_sender(
                 return Ok(());
             }
             ControlMessage::Cancel(cancel) if cancel.transfer_id == transfer_id => {
-                bail!(
+                return Err(CliError::cancelled(format!(
                     "stdio transfer cancelled{}",
                     cancel
                         .reason
                         .as_deref()
                         .map(|reason| format!(" ({reason})"))
                         .unwrap_or_default()
-                );
+                )));
             }
             ControlMessage::Error(error) if error.transfer_id.as_deref() == Some(&transfer_id) => {
-                bail!("stdio transfer error {}: {}", error.code, error.message);
+                return Err(CliError::peer(format!(
+                    "stdio transfer error {}: {}",
+                    error.code, error.message
+                )));
             }
-            other => bail!(
-                "unexpected control message while waiting for stdio complete: {:?}",
-                other
-            ),
+            other => {
+                return Err(CliError::protocol(format!(
+                    "unexpected control message while waiting for stdio complete: {:?}",
+                    other
+                )))
+            }
         }
     }
 }
@@ -176,15 +201,26 @@ async fn run_stdio_receiver(
     connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
-) -> Result<()> {
+) -> Result<(), CliError> {
     let offer = loop {
         let envelope = read_envelope(recv)
-            .await?
-            .context("peer closed control stream before stdio offer")?;
+            .await
+            .map_err(|error| CliError::protocol(error.to_string()))?
+            .ok_or_else(|| CliError::protocol("peer closed control stream before stdio offer"))?;
         match envelope.payload {
             ControlMessage::Offer(offer) if offer.kind == TransferKind::Stdio => break offer,
-            ControlMessage::Error(error) => bail!("peer error {}: {}", error.code, error.message),
-            other => bail!("expected stdio offer, got {:?}", other),
+            ControlMessage::Error(error) => {
+                return Err(CliError::peer(format!(
+                    "peer error {}: {}",
+                    error.code, error.message
+                )))
+            }
+            other => {
+                return Err(CliError::protocol(format!(
+                    "expected stdio offer, got {:?}",
+                    other
+                )))
+            }
         }
     };
 
@@ -204,14 +240,23 @@ async fn run_stdio_receiver(
             }),
         ),
     )
-    .await?;
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
 
-    let (_, mut data_recv) = connection.accept_data_stream().await?;
+    let (_, mut data_recv) = connection
+        .accept_data_stream()
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
     let header = read_data_header(&mut data_recv)
-        .await?
-        .context("peer closed data stream before sending a stdio header")?;
+        .await
+        .map_err(|error| CliError::protocol(error.to_string()))?
+        .ok_or_else(|| {
+            CliError::protocol("peer closed data stream before sending a stdio header")
+        })?;
     if header.transfer_id != offer.transfer_id || header.kind != TransferKind::Stdio {
-        bail!("received unexpected stdio data stream header");
+        return Err(CliError::protocol(
+            "received unexpected stdio data stream header",
+        ));
     }
 
     let mut stdout = tokio::io::stdout();
@@ -224,8 +269,13 @@ async fn run_stdio_receiver(
                 stdout
                     .write_all(&buffer[..bytes_read])
                     .await
-                    .context("failed to write stdio payload to stdout")?;
-                stdout.flush().await.context("failed to flush stdout")?;
+                    .context("failed to write stdio payload to stdout")
+                    .map_err(|error| CliError::local_io(error.to_string()))?;
+                stdout
+                    .flush()
+                    .await
+                    .context("failed to flush stdout")
+                    .map_err(|error| CliError::local_io(error.to_string()))?;
                 hasher.update(&buffer[..bytes_read]);
                 bytes_done += bytes_read as u64;
                 sink.emit_json_event(json!({
@@ -236,7 +286,11 @@ async fn run_stdio_receiver(
                 }));
             }
             Ok(None) => break,
-            Err(error) => return Err(error).context("failed reading stdio payload stream"),
+            Err(error) => {
+                return Err(CliError::transport(format!(
+                    "failed reading stdio payload stream: {error}"
+                )))
+            }
         }
     }
 
@@ -252,7 +306,8 @@ async fn run_stdio_receiver(
             }),
         ),
     )
-    .await?;
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
     sink.emit_json_event(json!({
         "event": "complete",
         "transfer_id": offer.transfer_id,

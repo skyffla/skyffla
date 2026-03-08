@@ -1,11 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_session::{state_changed_event, RuntimeEvent, SessionEvent, SessionMachine};
 use skyffla_transport::{IrohConnection, IrohTransport};
 
+use crate::app::identity::load_or_create_identity;
 use crate::app::sink::EventSink;
 use crate::app::trust::{remember_peer, short_fingerprint};
+use crate::cli_error::CliError;
 use crate::config::SessionConfig;
+use crate::local_state::local_state_file_path;
 use crate::net::framing::read_envelope;
 use crate::runtime::handshake::{exchange_hello, handle_post_handshake_message, send_chat_message};
 use crate::runtime::interactive::run_interactive_chat_loop;
@@ -19,23 +22,32 @@ pub(crate) async fn run_connected_session(
     transport: &IrohTransport,
     connection: IrohConnection,
     is_host: bool,
-) -> Result<()> {
+) -> Result<(), CliError> {
     let session_id = config.stream_id.clone();
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::PeerConnected {
                 session_id: session_id.clone(),
             })
-            .context("failed to record peer connection")?,
+            .context("failed to record peer connection")
+            .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
 
     let (mut send, mut recv): (SendStream, RecvStream) = if is_host {
-        connection.accept_control_stream().await?
+        connection
+            .accept_control_stream()
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?
     } else {
-        connection.open_control_stream().await?
+        connection
+            .open_control_stream()
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?
     };
 
-    let local_fingerprint = short_fingerprint(&transport.endpoint().id().to_string());
+    let identity = load_or_create_identity(&local_state_file_path())
+        .map_err(|error| CliError::local_io(error.to_string()))?;
+    let local_fingerprint = Some(identity.fingerprint.clone());
     let peer = exchange_hello(
         config,
         &session_id,
@@ -43,7 +55,8 @@ pub(crate) async fn run_connected_session(
         &mut recv,
         local_fingerprint.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
     let peer_trust = remember_peer(&peer);
 
     sink.emit_runtime_event(state_changed_event(
@@ -52,7 +65,8 @@ pub(crate) async fn run_connected_session(
                 session_id: session_id.clone(),
                 stdio: config.stdio,
             })
-            .context("failed to record negotiated state")?,
+            .context("failed to record negotiated state")
+            .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
     sink.emit_runtime_event(RuntimeEvent::HandshakeCompleted { peer: peer.clone() });
     if let Some(trust) = peer_trust.as_ref() {
@@ -80,6 +94,14 @@ pub(crate) async fn run_connected_session(
         "session stream={} you={} peer={}",
         ui.stream_id, ui.local_name, ui.peer_name
     ));
+    ui.system(format!(
+        "identity you={} peer={}",
+        short_fingerprint(&identity.fingerprint).unwrap_or_else(|| "unknown".to_string()),
+        peer.peer_fingerprint
+            .as_deref()
+            .and_then(short_fingerprint)
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
     ui.system(format!("connected to {}", ui.peer_name));
     ui.system(format!(
         "connection {} remote={}",
@@ -94,13 +116,21 @@ pub(crate) async fn run_connected_session(
     }
 
     if let Some(message) = &config.outgoing_message {
-        send_chat_message(&session_id, &mut send, message, None, Some(sink)).await?;
+        send_chat_message(&session_id, &mut send, message, None, Some(sink))
+            .await
+            .map_err(|error| CliError::protocol(error.to_string()))?;
         ui.chat("you", message);
         send.finish()
-            .context("failed to finish control stream send side")?;
+            .context("failed to finish control stream send side")
+            .map_err(|error| CliError::transport(error.to_string()))?;
 
-        while let Some(envelope) = read_envelope(&mut recv).await? {
-            handle_post_handshake_message(&mut ui, envelope, Some(sink)).await?;
+        while let Some(envelope) = read_envelope(&mut recv)
+            .await
+            .map_err(|error| CliError::protocol(error.to_string()))?
+        {
+            handle_post_handshake_message(&mut ui, envelope, Some(sink))
+                .await
+                .map_err(|error| CliError::protocol(error.to_string()))?;
         }
     } else if config.stdio {
         run_stdio_session(config, sink, &session_id, &connection, &mut send, &mut recv).await?;
@@ -113,18 +143,21 @@ pub(crate) async fn run_connected_session(
             &mut recv,
             &mut ui,
         )
-        .await?;
+        .await
+        .map_err(|error| CliError::runtime(error.to_string()))?;
     }
 
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::CloseRequested)
-            .context("failed to enter closing state")?,
+            .context("failed to enter closing state")
+            .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::Closed)
-            .context("failed to enter closed state")?,
+            .context("failed to enter closed state")
+            .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
 
     Ok(())

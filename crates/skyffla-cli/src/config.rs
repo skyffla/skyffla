@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+use crate::cli_error::CliError;
 use crate::local_state::{load_local_state, local_state_file_path};
 
 #[derive(Parser)]
@@ -65,23 +66,22 @@ pub(crate) struct SessionConfig {
 }
 
 impl SessionConfig {
-    pub(crate) fn from_args(role: Role, args: SessionArgs) -> Self {
-        validate_stdio_message_flags(args.stdio, args.message.as_deref()).unwrap_or_else(|error| {
-            eprintln!("{error}");
-            std::process::exit(2);
-        });
+    pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
+        validate_stdio_message_flags(args.stdio, args.message.as_deref())
+            .map_err(|error| CliError::usage(error.to_string()))?;
         let stream_id = resolve_stream_id(args.stream_id, std::env::var("SKYFFLA_STREAM_ID").ok())
-            .unwrap_or_else(|| {
-                eprintln!("missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID");
-                std::process::exit(2);
-            });
+            .ok_or_else(|| {
+                CliError::usage(
+                    "missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID",
+                )
+            })?;
         let stored_state = load_local_state(&local_state_file_path());
         let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
             &stored_state.auto_accept_policy,
             &args.auto_accept,
             args.reject_all,
         );
-        Self {
+        Ok(Self {
             role,
             stream_id,
             rendezvous_server: args.server,
@@ -96,7 +96,7 @@ impl SessionConfig {
             json_events: args.json,
             auto_accept_policy,
             auto_accept_source,
-        }
+        })
     }
 }
 
@@ -135,10 +135,7 @@ fn resolve_auto_accept_policy(
         return (AutoAcceptPolicy::none(), "cli override");
     }
     if !cli_targets.is_empty() {
-        return (
-            AutoAcceptPolicy::from_targets(cli_targets),
-            "cli override",
-        );
+        return (AutoAcceptPolicy::from_targets(cli_targets), "cli override");
     }
     if !persisted.is_empty() {
         return (persisted.clone(), "local state");
