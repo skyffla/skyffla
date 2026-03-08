@@ -123,7 +123,7 @@ jobs:
             "Terminal-native peer communication tool" \
             "${version}" \
             "${{ github.repository_owner }}" \
-            "skyfflacli" \
+            "${{ github.event.repository.name }}" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \
@@ -135,7 +135,7 @@ jobs:
             "Skyffla rendezvous server" \
             "${version}" \
             "${{ github.repository_owner }}" \
-            "skyfflacli" \
+            "${{ github.event.repository.name }}" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \

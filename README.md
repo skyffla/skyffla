@@ -1,4 +1,4 @@
-# Skyffla CLI
+# Skyffla
 
 Skyffla is a terminal-native peer communication tool built in Rust.
 
@@ -41,7 +41,7 @@ What does not exist yet:
 ## Repository Layout
 
 ```text
-skyfflacli/
+skyffla/
   Cargo.toml
   README.md
   IMPLEMENTATION_PLAN.md
@@ -114,7 +114,7 @@ Clone the repo and enter it:
 
 ```sh
 git clone <repo-url>
-cd skyfflacli
+cd skyffla
 ```
 
 If Rust is not already installed, follow the install steps above.
