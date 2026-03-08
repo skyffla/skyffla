@@ -134,6 +134,30 @@ cargo fmt
 cargo clippy --workspace --all-targets
 ```
 
+## VS Code Setup
+
+The repo now includes workspace defaults for VS Code in `.vscode/settings.json` and recommended extensions in `.vscode/extensions.json`.
+
+Recommended extensions:
+
+- `rust-lang.rust-analyzer`
+- `vadimcn.vscode-lldb`
+- `tamasfe.even-better-toml`
+
+Included workspace behavior:
+
+- Rust format-on-save
+- TOML format-on-save
+- `clippy` as the rust-analyzer check command
+- `target/` excluded from file/search views
+
+The repo also pins the Rust toolchain in `rust-toolchain.toml` to `1.94.0` with:
+
+- `rustfmt`
+- `clippy`
+
+After opening the workspace in VS Code, install the recommended extensions when prompted.
+
 ## Daily Workflow
 
 Typical developer loop:
@@ -226,7 +250,7 @@ Transport direction:
 
 ## Important Documents
 
-- Product and delivery plan: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
+- Product and delivery plan: `IMPLEMENTATION_PLAN.md`
 
 ## Current Commands
 
