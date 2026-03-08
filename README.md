@@ -1,26 +1,29 @@
-# Skyffla
+<p align="center">
+  <img src="assets/readme-hero.svg" alt="Skyffla" width="100%" />
+</p>
 
-Terminal-first peer communication with a separate rendezvous service.
+<p align="center">
+  Terminal-first peer communication in Rust with a separate rendezvous service.
+</p>
 
 ## Install
+
+Add the tap once:
+
+```sh
+brew tap skyffla/skyffla
+```
 
 Install the CLI:
 
 ```sh
-brew install skyffla/skyffla/skyffla
+brew install skyffla
 ```
 
 Install the rendezvous server:
 
 ```sh
-brew install skyffla/skyffla/skyffla-rendezvous
-```
-
-Install both if you want to run the full stack yourself:
-
-```sh
-brew install skyffla/skyffla/skyffla
-brew install skyffla/skyffla/skyffla-rendezvous
+brew install skyffla-rendezvous
 ```
 
 ## Use
