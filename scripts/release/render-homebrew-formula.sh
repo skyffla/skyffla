@@ -8,12 +8,11 @@ Usage:
   scripts/release/render-homebrew-formula.sh \
     <formula-class> <binary-name> <description> \
     <version> <github-owner> <source-repo> \
-    <darwin-arm64-sha256> <darwin-x86_64-sha256> \
-    <linux-x86_64-sha256> <linux-arm64-sha256>
+    <linux-x86_64-sha256>
 EOF
 }
 
-if [[ $# -ne 10 ]]; then
+if [[ $# -ne 7 ]]; then
   usage >&2
   exit 1
 fi
@@ -24,10 +23,7 @@ DESCRIPTION="$3"
 VERSION="$4"
 GITHUB_OWNER="$5"
 SOURCE_REPO="$6"
-DARWIN_ARM64_SHA="$7"
-DARWIN_X86_64_SHA="$8"
-LINUX_X86_64_SHA="$9"
-LINUX_ARM64_SHA="${10}"
+LINUX_X86_64_SHA="$7"
 TAG="v${VERSION}"
 ASSET_PREFIX="https://github.com/${GITHUB_OWNER}/${SOURCE_REPO}/releases/download/${TAG}"
 
@@ -38,22 +34,11 @@ class ${FORMULA_CLASS} < Formula
   version "${VERSION}"
   license "MIT"
 
-  if OS.mac?
-    if Hardware::CPU.arm?
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-aarch64-apple-darwin.tar.gz"
-      sha256 "${DARWIN_ARM64_SHA}"
-    else
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-x86_64-apple-darwin.tar.gz"
-      sha256 "${DARWIN_X86_64_SHA}"
-    end
-  elsif OS.linux?
-    if Hardware::CPU.arm?
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "${LINUX_ARM64_SHA}"
-    else
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "${LINUX_X86_64_SHA}"
-    end
+  if OS.linux? && Hardware::CPU.intel?
+    url "${ASSET_PREFIX}/skyffla-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+    sha256 "${LINUX_X86_64_SHA}"
+  else
+    odie "This formula currently ships x86_64 Linux artifacts only."
   end
 
   def install

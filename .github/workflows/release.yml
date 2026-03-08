@@ -10,21 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Build Linux artifacts on an older glibc baseline so they run on
-          # Debian 12 / Ubuntu 22.04 class systems through Homebrew.
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
+    runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -41,14 +27,14 @@ jobs:
           chmod +x scripts/release/package-release.sh
           scripts/release/package-release.sh \
             "${version}" \
-            "${{ matrix.target }}" \
+            "x86_64-unknown-linux-gnu" \
             target/release \
             dist
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: x86_64-unknown-linux-gnu
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -101,10 +87,7 @@ jobs:
         working-directory: dist
         run: |
           version="${GITHUB_REF_NAME#v}"
-          echo "darwin_arm64=$(sha256sum "skyffla-v${version}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "darwin_x86_64=$(sha256sum "skyffla-v${version}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "linux_x86_64=$(sha256sum "skyffla-v${version}-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "linux_arm64=$(sha256sum "skyffla-v${version}-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
 
       - name: Check out Homebrew tap repository
         uses: actions/checkout@v4
@@ -126,10 +109,7 @@ jobs:
             "${version}" \
             "${{ github.repository_owner }}" \
             "${{ github.event.repository.name }}" \
-            "${{ steps.checksums.outputs.darwin_arm64 }}" \
-            "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \
-            "${{ steps.checksums.outputs.linux_arm64 }}" \
             > Formula/skyffla.rb
           ../scripts/release/render-homebrew-formula.sh \
             "SkyfflaRendezvous" \
@@ -138,10 +118,7 @@ jobs:
             "${version}" \
             "${{ github.repository_owner }}" \
             "${{ github.event.repository.name }}" \
-            "${{ steps.checksums.outputs.darwin_arm64 }}" \
-            "${{ steps.checksums.outputs.darwin_x86_64 }}" \
             "${{ steps.checksums.outputs.linux_x86_64 }}" \
-            "${{ steps.checksums.outputs.linux_arm64 }}" \
             > Formula/skyffla-rendezvous.rb
 
       - name: Commit and push formula updates

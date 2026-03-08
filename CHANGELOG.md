@@ -7,7 +7,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 ## [Unreleased]
 
 - Improved Linux release compatibility for Homebrew installs on Debian 12 / Ubuntu 22.04 class systems by lowering the glibc build baseline.
+- Temporarily narrowed the Homebrew release matrix to `x86_64 Linux` while validating the first end-to-end public install flow.
 
-## [0.1.1] - 2026-03-08
+## [0.1.2] - 2026-03-08
 
-- Rebuilt Linux release artifacts on Ubuntu 22.04 runners so the Brew-installed binaries work on Debian 12.
+- Rebuilt Linux release artifacts on Ubuntu 22.04 and limited the Brew release to `x86_64 Linux` so the first public install path works on Debian 12.
