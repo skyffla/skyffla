@@ -11,9 +11,6 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-homepage = "https://github.com/jonaslindblom/skyfflacli"
-documentation = "https://github.com/jonaslindblom/skyfflacli#readme"
-repository = "https://github.com/jonaslindblom/skyfflacli"
 rust-version = "1.94"
 version = "0.1.0"
 

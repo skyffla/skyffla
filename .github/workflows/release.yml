@@ -107,7 +107,7 @@ jobs:
       - name: Check out Homebrew tap repository
         uses: actions/checkout@v4
         with:
-          repository: jonaslindblom/homebrew-skyffla
+          repository: ${{ github.repository_owner }}/homebrew-skyffla
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: homebrew-tap
 
@@ -122,7 +122,7 @@ jobs:
             "skyffla" \
             "Terminal-native peer communication tool" \
             "${version}" \
-            "jonaslindblom" \
+            "${{ github.repository_owner }}" \
             "skyfflacli" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \
@@ -134,7 +134,7 @@ jobs:
             "skyffla-rendezvous" \
             "Skyffla rendezvous server" \
             "${version}" \
-            "jonaslindblom" \
+            "${{ github.repository_owner }}" \
             "skyfflacli" \
             "${{ steps.checksums.outputs.darwin_arm64 }}" \
             "${{ steps.checksums.outputs.darwin_x86_64 }}" \

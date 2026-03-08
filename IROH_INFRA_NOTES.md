@@ -18,9 +18,9 @@ In this repo today:
 
 Relevant local code:
 
-- [crates/skyffla-rendezvous/src/main.rs](/Users/jonas/projects/skyfflacli-explore/crates/skyffla-rendezvous/src/main.rs)
-- [crates/skyffla-cli/src/main.rs](/Users/jonas/projects/skyfflacli-explore/crates/skyffla-cli/src/main.rs)
-- [crates/skyffla-transport/src/lib.rs](/Users/jonas/projects/skyfflacli-explore/crates/skyffla-transport/src/lib.rs)
+- `crates/skyffla-rendezvous/src/main.rs`
+- `crates/skyffla-cli/src/main.rs`
+- `crates/skyffla-transport/src/lib.rs`
 
 ## Small self-hosted setup
 

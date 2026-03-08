@@ -2,11 +2,8 @@
 name = "skyffla"
 description = "Terminal-native peer communication tool"
 edition.workspace = true
-homepage.workspace = true
 license.workspace = true
-documentation.workspace = true
 readme = "../../README.md"
-repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 keywords = ["terminal", "p2p", "chat", "file-transfer"]

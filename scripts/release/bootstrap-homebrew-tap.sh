@@ -8,7 +8,7 @@ Usage:
   scripts/release/bootstrap-homebrew-tap.sh <github-owner> [tap-suffix]
 
 Example:
-  scripts/release/bootstrap-homebrew-tap.sh jonaslindblom skyffla
+  scripts/release/bootstrap-homebrew-tap.sh your-github-user skyffla
 EOF
 }
 

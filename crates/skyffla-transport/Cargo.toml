@@ -2,11 +2,8 @@
 name = "skyffla-transport"
 description = "Transport abstraction and iroh integration for Skyffla"
 edition.workspace = true
-homepage.workspace = true
 license.workspace = true
-documentation.workspace = true
 readme = "../../README.md"
-repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 keywords = ["networking", "transport", "iroh"]
