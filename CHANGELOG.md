@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-03-09
+
 - Make `cut-release.sh` wait for the current `main` commit's `CI` run to finish instead of failing fast while the workflow is still queued or running.
 - Fail fast on unreadable or corrupted local state instead of silently rotating the local identity or forgetting trust records.
 - Treat rendezvous stream deletion as idempotent when the stream has already expired on the server.
