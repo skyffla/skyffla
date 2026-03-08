@@ -17,7 +17,7 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
+async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(error) if is_socket_permission_error(&error) => return Ok(()),
@@ -52,7 +52,7 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
     wait_for_server_ready(&server_url).await?;
 
     let mut host = Command::new(bin);
-    host.arg("host")
+    host.arg("join")
         .arg(&room)
         .arg("--server")
         .arg(&server_url)
@@ -134,12 +134,21 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         join_stderr.contains("\"event\":\"offer\""),
         "join stderr did not contain offer event:\n{join_stderr}"
     );
+    let host_stderr = String::from_utf8_lossy(&host_output.stderr);
+    assert!(
+        host_stderr.contains("\"state\":\"Hosting"),
+        "first join stderr did not contain hosting state:\n{host_stderr}"
+    );
+    assert!(
+        host_stderr.contains("\"event\":\"waiting\""),
+        "first join stderr did not contain waiting event:\n{host_stderr}"
+    );
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_join_missing_stream_emits_json_error_and_exit_code() -> Result<()> {
+async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(error) if is_socket_permission_error(&error) => return Ok(()),
@@ -172,6 +181,31 @@ async fn stdio_join_missing_stream_emits_json_error_and_exit_code() -> Result<()
 
     wait_for_server_ready(&server_url).await?;
 
+    let mut host = Command::new(bin);
+    host.arg("host")
+        .arg(&room)
+        .arg("--server")
+        .arg(&server_url)
+        .arg("--name")
+        .arg("host")
+        .arg("--stdio")
+        .arg("--json")
+        .env("HOME", &home_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut host = host.spawn().context("failed to spawn host process")?;
+
+    let payload = b"hello from integration test\nsecond line\n";
+    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
+    host_stdin
+        .write_all(payload)
+        .await
+        .context("failed to write stdio payload into host stdin")?;
+    drop(host_stdin);
+
+    wait_for_stream_ready(&server_url, &room).await?;
+
     let mut join = Command::new(bin);
     join.arg("join")
         .arg(&room)
@@ -187,26 +221,48 @@ async fn stdio_join_missing_stream_emits_json_error_and_exit_code() -> Result<()
         .stderr(Stdio::piped());
     let join = join.spawn().context("failed to spawn join process")?;
 
-    let join_output = tokio::time::timeout(PROCESS_TIMEOUT, async {
-        tokio::time::timeout(CONNECT_TIMEOUT, join.wait_with_output())
+    let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
+        .await
+        .context("join process watchdog timed out")?
+        .context("join process failed while waiting for output")?;
+    if !join_output.status.success() {
+        let _ = host.kill().await;
+        let host_output = host
+            .wait_with_output()
             .await
-            .context("join rendezvous failure timed out")?
-            .context("join process failed while waiting for output")
-    })
-    .await
-    .context("join process watchdog timed out")??;
+            .context("host process failed while collecting failure output")?;
+        server.abort();
+        anyhow::bail!(
+            "join failed:\nstdout={}\nstderr={}\nhost stdout={}\nhost stderr={}",
+            String::from_utf8_lossy(&join_output.stdout),
+            String::from_utf8_lossy(&join_output.stderr),
+            String::from_utf8_lossy(&host_output.stdout),
+            String::from_utf8_lossy(&host_output.stderr)
+        );
+    }
+    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
+        .await
+        .context("host process watchdog timed out")?
+        .context("host process failed while waiting for output")?;
 
     server.abort();
 
-    assert_eq!(join_output.status.code(), Some(10));
+    assert!(
+        host_output.status.success(),
+        "host failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&host_output.stdout),
+        String::from_utf8_lossy(&host_output.stderr)
+    );
+    assert!(join_output.status.success());
+    assert_eq!(join_output.stdout, payload);
     let join_stderr = String::from_utf8_lossy(&join_output.stderr);
     assert!(
-        join_stderr.contains("\"event\":\"error\""),
-        "join stderr did not contain error event:\n{join_stderr}"
+        join_stderr.contains("\"event\":\"complete\""),
+        "join stderr did not contain complete event:\n{join_stderr}"
     );
     assert!(
-        join_stderr.contains("\"code\":\"rendezvous_error\""),
-        "join stderr did not contain rendezvous error code:\n{join_stderr}"
+        join_stderr.contains("\"event\":\"offer\""),
+        "join stderr did not contain offer event:\n{join_stderr}"
     );
 
     Ok(())

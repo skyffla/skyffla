@@ -1,5 +1,8 @@
+use std::fmt;
+
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
 use skyffla_protocol::Capabilities;
 use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
 use skyffla_transport::PeerTicket;
@@ -10,8 +13,8 @@ pub(crate) async fn register_stream(
     client: &Client,
     config: &SessionConfig,
     ticket: &PeerTicket,
-) -> Result<()> {
-    client
+) -> std::result::Result<(), RegisterStreamError> {
+    let response = client
         .put(stream_url(config))
         .json(&PutStreamRequest {
             ticket: ticket.encoded.clone(),
@@ -20,26 +23,50 @@ pub(crate) async fn register_stream(
         })
         .send()
         .await
-        .context("failed to register stream with rendezvous server")?
+        .context("failed to register stream with rendezvous server")
+        .map_err(RegisterStreamError::Other)?;
+
+    if response.status() == StatusCode::CONFLICT {
+        let message = response
+            .json::<RendezvousErrorResponse>()
+            .await
+            .ok()
+            .map(|body| body.message)
+            .unwrap_or_else(|| format!("stream {} is already hosted", config.stream_id));
+        return Err(RegisterStreamError::AlreadyHosted {
+            stream_id: config.stream_id.clone(),
+            message,
+        });
+    }
+
+    response
         .error_for_status()
-        .context("rendezvous server rejected stream registration")?;
+        .context("rendezvous server rejected stream registration")
+        .map_err(RegisterStreamError::Other)?;
     Ok(())
 }
 
 pub(crate) async fn resolve_stream(
     client: &Client,
     config: &SessionConfig,
-) -> Result<GetStreamResponse> {
-    client
+) -> Result<Option<GetStreamResponse>> {
+    let response = client
         .get(stream_url(config))
         .send()
         .await
-        .context("failed to resolve stream from rendezvous server")?
+        .context("failed to resolve stream from rendezvous server")?;
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    let stream = response
         .error_for_status()
         .context("rendezvous server rejected stream lookup")?
         .json()
         .await
-        .context("failed to decode rendezvous lookup response")
+        .context("failed to decode rendezvous lookup response")?;
+    Ok(Some(stream))
 }
 
 pub(crate) async fn delete_stream(client: &Client, config: &SessionConfig) -> Result<()> {
@@ -61,6 +88,28 @@ fn stream_url(config: &SessionConfig) -> String {
     )
 }
 
+#[derive(Debug)]
+pub(crate) enum RegisterStreamError {
+    AlreadyHosted { stream_id: String, message: String },
+    Other(anyhow::Error),
+}
+
+impl fmt::Display for RegisterStreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyHosted { message, .. } => message.fmt(f),
+            Self::Other(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RegisterStreamError {}
+
+#[derive(Debug, Deserialize)]
+struct RendezvousErrorResponse {
+    message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -68,7 +117,7 @@ mod tests {
     use crate::accept_policy::AutoAcceptPolicy;
     use crate::config::{Role, SessionConfig, DEFAULT_RENDEZVOUS_URL};
 
-    use super::stream_url;
+    use super::{stream_url, RendezvousErrorResponse};
 
     #[test]
     fn stream_url_trims_trailing_slash_from_server() {
@@ -89,5 +138,15 @@ mod tests {
             stream_url(&config),
             format!("{DEFAULT_RENDEZVOUS_URL}/v1/streams/room")
         );
+    }
+
+    #[test]
+    fn rendezvous_error_response_deserializes_message() {
+        let body = serde_json::from_str::<RendezvousErrorResponse>(
+            r#"{"error":"stream_already_exists","message":"stream demo is already hosted"}"#,
+        )
+        .expect("rendezvous error response should deserialize");
+
+        assert_eq!(body.message, "stream demo is already hosted");
     }
 }

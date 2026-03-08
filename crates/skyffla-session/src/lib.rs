@@ -93,6 +93,9 @@ impl SessionMachine {
             (SessionState::Idle, SessionEvent::HostRequested { stream_id }) => {
                 SessionState::Hosting { stream_id }
             }
+            (SessionState::Joining { .. }, SessionEvent::HostRequested { stream_id }) => {
+                SessionState::Hosting { stream_id }
+            }
             (SessionState::Idle, SessionEvent::JoinRequested { stream_id }) => {
                 SessionState::Joining { stream_id }
             }
@@ -290,6 +293,28 @@ mod tests {
             result,
             Err(SessionError::InvalidTransition { .. })
         ));
+    }
+
+    #[test]
+    fn state_machine_allows_join_to_promote_into_hosting() {
+        let mut machine = SessionMachine::new();
+        machine
+            .transition(SessionEvent::JoinRequested {
+                stream_id: "demo".into(),
+            })
+            .expect("join should be accepted");
+        machine
+            .transition(SessionEvent::HostRequested {
+                stream_id: "demo".into(),
+            })
+            .expect("join should be able to claim the stream");
+
+        assert_eq!(
+            machine.state(),
+            &SessionState::Hosting {
+                stream_id: "demo".into()
+            }
+        );
     }
 
     #[test]

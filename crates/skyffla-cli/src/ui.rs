@@ -5,12 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crossterm::{execute, queue};
 use crossterm::style::Print;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType,
     EnterAlternateScreen, LeaveAlternateScreen, ScrollUp,
 };
+use crossterm::{execute, queue};
 use skyffla_protocol::Offer;
 
 use crate::accept_policy::AutoAcceptPolicy;

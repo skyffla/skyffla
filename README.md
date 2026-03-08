@@ -28,22 +28,28 @@ brew install skyffla-rendezvous
 
 ## Use
 
-Host a session:
-
-```sh
-skyffla host demo
-```
-
-Join a session:
+Join a session, or create it if nobody is there yet:
 
 ```sh
 skyffla join demo
 ```
 
+The first peer waits. The next peer connects with the same command:
+
+```sh
+skyffla join demo
+```
+
+Use explicit host mode when you want deterministic automation:
+
+```sh
+skyffla host demo
+```
+
 Pipe bytes over stdio:
 
 ```sh
-printf 'hello\n' | skyffla host demo --stdio
+printf 'hello\n' | skyffla join demo --stdio
 ```
 
 ```sh
@@ -55,7 +61,7 @@ The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080
 Override it for self-hosting with `--server` or `SKYFFLA_RENDEZVOUS_URL`:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla host demo
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla join demo
 ```
 
 Run your own rendezvous server:
@@ -89,5 +95,5 @@ cargo run -p skyffla-rendezvous
 ```
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- host demo
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- join demo
 ```

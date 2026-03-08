@@ -19,7 +19,9 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    #[command(about = "Explicitly host a stream and wait for a peer")]
     Host(SessionArgs),
+    #[command(about = "Join a stream, or create it if nobody is hosting yet")]
     Join(SessionArgs),
 }
 
