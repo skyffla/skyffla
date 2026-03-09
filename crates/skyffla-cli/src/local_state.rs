@@ -21,6 +21,8 @@ pub struct LocalState {
     pub auto_accept_policy: AutoAcceptPolicy,
     #[serde(default)]
     pub local_identity_secret_hex: Option<String>,
+    #[serde(default)]
+    pub local_mode_enabled: bool,
     #[serde(skip_serializing, default)]
     pub auto_accept_enabled: bool,
     #[serde(default)]
@@ -129,6 +131,7 @@ fn migrate_legacy_local_state(path: &PathBuf) -> Result<LocalState> {
             AutoAcceptPolicy::none()
         },
         local_identity_secret_hex: None,
+        local_mode_enabled: false,
         auto_accept_enabled: false,
         known_peers,
     };

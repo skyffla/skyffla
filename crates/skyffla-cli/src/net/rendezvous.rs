@@ -142,6 +142,7 @@ mod tests {
             outgoing_message: None,
             stdio: false,
             json_events: false,
+            local_mode: false,
             auto_accept_policy: AutoAcceptPolicy::none(),
             auto_accept_source: "default",
         };
