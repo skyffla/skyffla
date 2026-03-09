@@ -26,6 +26,8 @@ Install the rendezvous server:
 brew install skyffla-rendezvous
 ```
 
+Only install this if you want to run your own rendezvous service; the CLI uses the public default at `http://rendezvous.skyffla.com`.
+
 ## Use
 
 Join a session, or create it if nobody is there yet:
