@@ -7,14 +7,15 @@ use tokio::process::Command;
 mod support;
 
 use support::{
-    assert_local_mode_stderr, fresh_test_dir, local_discovery_available, unique_room_name,
-    PROCESS_TIMEOUT,
+    acquire_local_discovery_test_guard, assert_local_mode_stderr, fresh_test_dir,
+    local_discovery_available, unique_room_name, PROCESS_TIMEOUT,
 };
 
 const SIMULTANEOUS_JOIN_RACE_ITERATIONS: usize = 5;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_local_simultaneous_join_elects_single_host_without_rendezvous() -> Result<()> {
+    let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {
         return Ok(());
     }

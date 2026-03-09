@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,22 @@ pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
         Err(error) if is_transport_permission_error(&error) => None,
         Err(error) => panic!("iroh bind should succeed: {error}"),
     }
+}
+
+pub struct LocalDiscoveryTestGuard(File);
+
+pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
+    let lock_path = std::env::temp_dir().join("skyffla-local-discovery-tests.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open local discovery test lock {lock_path:?}"))?;
+    file.lock()
+        .with_context(|| format!("failed to lock local discovery test lock {lock_path:?}"))?;
+    Ok(LocalDiscoveryTestGuard(file))
 }
 
 pub async fn local_discovery_available() -> Result<bool> {
@@ -44,6 +61,12 @@ pub async fn local_discovery_available() -> Result<bool> {
     transport.endpoint().address_lookup().add(mdns);
     transport.close().await;
     Ok(true)
+}
+
+impl Drop for LocalDiscoveryTestGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 pub fn assert_local_mode_stderr(stderr: &[u8]) {
