@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 use crate::cli_error::CliError;
-use crate::local_state::{load_local_state, local_state_file_path, update_local_state};
+use crate::local_state::{load_local_state, local_state_file_path};
 
 pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
 
@@ -44,10 +44,8 @@ pub(crate) struct SessionArgs {
     pub(crate) stdio: bool,
     #[arg(long)]
     pub(crate) json: bool,
-    #[arg(long, conflicts_with = "no_local")]
+    #[arg(long)]
     pub(crate) local: bool,
-    #[arg(long, conflicts_with = "local")]
-    pub(crate) no_local: bool,
     #[arg(long, value_enum, value_delimiter = ',', conflicts_with = "reject_all")]
     pub(crate) auto_accept: Vec<AutoAcceptTarget>,
     #[arg(long, conflicts_with = "auto_accept")]
@@ -88,14 +86,6 @@ impl SessionConfig {
         let state_path = local_state_file_path();
         let stored_state =
             load_local_state(&state_path).map_err(|error| CliError::local_io(error.to_string()))?;
-        let (local_mode, local_mode_override) =
-            resolve_local_mode(stored_state.local_mode_enabled, args.local, args.no_local);
-        if let Some(local_mode_enabled) = local_mode_override {
-            update_local_state(&state_path, |state| {
-                state.local_mode_enabled = local_mode_enabled;
-            })
-            .map_err(|error| CliError::local_io(error.to_string()))?;
-        }
         let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
             &stored_state.auto_accept_policy,
             &args.auto_accept,
@@ -114,7 +104,7 @@ impl SessionConfig {
             outgoing_message: args.message,
             stdio: args.stdio,
             json_events: args.json,
-            local_mode,
+            local_mode: args.local,
             auto_accept_policy,
             auto_accept_source,
         })
@@ -164,20 +154,6 @@ fn resolve_auto_accept_policy(
     (AutoAcceptPolicy::none(), "default")
 }
 
-fn resolve_local_mode(
-    persisted: bool,
-    cli_local: bool,
-    cli_no_local: bool,
-) -> (bool, Option<bool>) {
-    if cli_local {
-        return (true, Some(true));
-    }
-    if cli_no_local {
-        return (false, Some(false));
-    }
-    (persisted, None)
-}
-
 fn validate_stream_id(stream_id: &str) -> Result<()> {
     if stream_id
         .chars()
@@ -195,7 +171,7 @@ fn validate_stream_id(stream_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_auto_accept_policy, resolve_local_mode, resolve_peer_name, resolve_stream_id,
+        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id,
         validate_stdio_message_flags, validate_stream_id,
     };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
@@ -278,21 +254,5 @@ mod tests {
 
         assert_eq!(policy, persisted);
         assert_eq!(source, "local state");
-    }
-
-    #[test]
-    fn cli_local_mode_overrides_and_persists_enabled_state() {
-        assert_eq!(resolve_local_mode(false, true, false), (true, Some(true)));
-    }
-
-    #[test]
-    fn cli_no_local_overrides_and_persists_disabled_state() {
-        assert_eq!(resolve_local_mode(true, false, true), (false, Some(false)));
-    }
-
-    #[test]
-    fn persisted_local_mode_is_used_when_no_cli_override_exists() {
-        assert_eq!(resolve_local_mode(true, false, false), (true, None));
-        assert_eq!(resolve_local_mode(false, false, false), (false, None));
     }
 }
