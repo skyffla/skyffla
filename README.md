@@ -82,7 +82,7 @@ skyffla join copper-731 --stdio
 
 Treat the stream ID as a short-lived shared secret. Avoid very short or easy-to-guess IDs; use something less obvious, like `copper-731` instead of `demo`.
 
-In `--stdio` mode, transferred bytes go to `stdout`. Status, progress, and errors go to `stderr`.
+In `--stdio` mode, local `stdin` streams to the peer and peer bytes stream to local `stdout`. Status, progress, and errors go to `stderr`.
 
 Capture only the payload:
 
@@ -95,6 +95,32 @@ Keep the data stream clean in pipelines:
 ```sh
 printf 'hello\n' | skyffla join copper-731 --stdio 2>sender.log
 skyffla join copper-731 --stdio 2>receiver.log | cat
+```
+
+`--stdio` is full duplex, so both peers can also send bytes in the same session.
+
+For a simple two-terminal bridge, run this in terminal A:
+
+```sh
+cat | skyffla host copper-731 --stdio
+```
+
+Run this in terminal B:
+
+```sh
+cat | skyffla join copper-731 --stdio
+```
+
+Type a line in either terminal and press Enter to send it to the other side. Press `Ctrl-D` to close only your send side; the peer can keep sending until it also reaches EOF.
+
+Use the same pattern on one LAN without rendezvous:
+
+```sh
+cat | skyffla host copper-731 --local --stdio
+```
+
+```sh
+cat | skyffla join copper-731 --local --stdio
 ```
 
 The CLI defaults to the public rendezvous at `http://rendezvous.skyffla.com:8080`.

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
+use skyffla_protocol::SessionMode;
 
 use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 use crate::cli_error::CliError;
@@ -108,6 +109,16 @@ impl SessionConfig {
             auto_accept_policy,
             auto_accept_source,
         })
+    }
+
+    pub(crate) fn session_mode(&self) -> SessionMode {
+        if self.stdio {
+            SessionMode::Stdio
+        } else if self.outgoing_message.is_some() {
+            SessionMode::Message
+        } else {
+            SessionMode::Interactive
+        }
     }
 }
 

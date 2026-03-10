@@ -1,16 +1,22 @@
+#![allow(dead_code)]
+
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use iroh::address_lookup::MdnsAddressLookup;
+use skyffla_rendezvous::app::{build_router, AppState, IpRateLimiter};
+use skyffla_rendezvous::store::InMemoryStreamStore;
 use skyffla_transport::{IrohTransport, TransportError};
+use tokio::net::TcpListener;
+use tokio::time::sleep;
 
-#[allow(dead_code)]
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
-#[allow(dead_code)]
+pub const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_millis(500);
-#[allow(dead_code)]
 pub const LOCAL_JOIN_PROMOTION_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
@@ -22,6 +28,11 @@ pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
 }
 
 pub struct LocalDiscoveryTestGuard(File);
+
+pub struct TestServer {
+    pub url: String,
+    task: tokio::task::JoinHandle<()>,
+}
 
 pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
     let lock_path = std::env::temp_dir().join("skyffla-local-discovery-tests.lock");
@@ -69,6 +80,43 @@ impl Drop for LocalDiscoveryTestGuard {
     }
 }
 
+impl TestServer {
+    pub async fn spawn() -> Result<Option<Self>> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if is_socket_permission_error(&error) => return Ok(None),
+            Err(error) => return Err(error).context("failed to bind rendezvous test listener"),
+        };
+        let Some(probe) = bind_transport_or_skip().await else {
+            return Ok(None);
+        };
+        probe.close().await;
+        let addr = listener
+            .local_addr()
+            .context("failed to read rendezvous test listener addr")?;
+        let task = tokio::spawn(async move {
+            let app = build_router(AppState {
+                store: Arc::new(InMemoryStreamStore::new()),
+                rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
+                trust_proxy_headers: false,
+            });
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("rendezvous server should stay healthy during test");
+        });
+        let url = format!("http://{addr}");
+        wait_for_server_ready(&url).await?;
+        Ok(Some(Self { url, task }))
+    }
+
+    pub fn abort(self) {
+        self.task.abort();
+    }
+}
+
 pub fn assert_local_mode_stderr(stderr: &[u8]) {
     let stderr = String::from_utf8_lossy(stderr);
     assert!(
@@ -78,6 +126,26 @@ pub fn assert_local_mode_stderr(stderr: &[u8]) {
     assert!(
         !stderr.contains("127.0.0.1:9"),
         "local mode unexpectedly referenced server URL:\n{stderr}"
+    );
+}
+
+pub fn assert_stdio_json_stderr(stderr: &[u8]) {
+    let stderr = String::from_utf8_lossy(stderr);
+    assert!(
+        stderr.contains("\"event\":\"machine_open\""),
+        "stderr did not contain machine_open event:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("\"event\":\"stdin_eof\""),
+        "stderr did not contain stdin_eof event:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("\"event\":\"remote_eof\""),
+        "stderr did not contain remote_eof event:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("\"event\":\"machine_closed\""),
+        "stderr did not contain machine_closed event:\n{stderr}"
     );
 }
 
@@ -97,11 +165,57 @@ pub fn unique_room_name() -> String {
     format!("local-room-{nonce}")
 }
 
+pub async fn wait_for_server_ready(server_url: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let health_url = format!("{server_url}/health");
+    let deadline = tokio::time::Instant::now() + SERVER_READY_TIMEOUT;
+
+    loop {
+        if let Ok(response) = client.get(&health_url).send().await {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "rendezvous server was not ready within {:?}",
+                SERVER_READY_TIMEOUT
+            );
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub async fn wait_for_stream_ready(server_url: &str, room: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let stream_url = format!("{server_url}/v1/streams/{room}");
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+
+    loop {
+        if let Ok(response) = client.get(&stream_url).send().await {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("stream {room} was not registered within {:?}", CONNECT_TIMEOUT);
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn is_transport_permission_error(error: &TransportError) -> bool {
     matches!(error, TransportError::EndpointBind(bind_error) if {
         let message = bind_error.to_string();
         message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
     })
+}
+
+fn is_socket_permission_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrNotAvailable
+    ) || error.to_string().contains("Operation not permitted")
 }
 
 fn is_mdns_permission_error(message: &str) -> bool {

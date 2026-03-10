@@ -17,6 +17,14 @@ pub enum TransportCapability {
     WebsocketRelay,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Interactive,
+    Message,
+    Stdio,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Capabilities {
     pub chat: bool,
@@ -132,6 +140,7 @@ pub struct Hello {
     pub peer_fingerprint: Option<String>,
     pub capabilities: Capabilities,
     pub transport_capabilities: Vec<TransportCapability>,
+    pub session_mode: SessionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
