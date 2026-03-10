@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-10
+
+- Add `--local` LAN mode with mDNS discovery so peers on the same network can connect without rendezvous.
+- Let `join --local` elect a host automatically when both peers start in join-or-create mode.
+- Harden local state writes and add end-to-end coverage for the local discovery flow.
+
 ## [0.1.8] - 2026-03-09
 
 - Make `cut-release.sh` wait for the current `main` commit's `CI` run to finish instead of failing fast while the workflow is still queued or running.
