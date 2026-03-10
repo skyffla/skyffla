@@ -3,7 +3,7 @@ use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 
-use crate::local_state::{load_local_state, save_local_state};
+use crate::local_state::update_local_state;
 
 pub(crate) struct LocalIdentity {
     pub(crate) fingerprint: String,
@@ -12,18 +12,17 @@ pub(crate) struct LocalIdentity {
 pub(crate) fn load_or_create_identity(
     state_path: &Option<std::path::PathBuf>,
 ) -> Result<LocalIdentity> {
-    let mut state = load_local_state(state_path)?;
-
-    if let Some(secret_hex) = state.local_identity_secret_hex.as_deref() {
-        if let Some(identity) = parse_identity(secret_hex) {
-            return Ok(identity);
+    update_local_state(state_path, |state| {
+        if let Some(secret_hex) = state.local_identity_secret_hex.as_deref() {
+            if let Some(identity) = parse_identity(secret_hex) {
+                return identity;
+            }
         }
-    }
 
-    let signing_key = SigningKey::generate(&mut OsRng);
-    state.local_identity_secret_hex = Some(hex::encode(signing_key.to_bytes()));
-    save_local_state(state_path, &state)?;
-    Ok(identity_from_signing_key(&signing_key))
+        let signing_key = SigningKey::generate(&mut OsRng);
+        state.local_identity_secret_hex = Some(hex::encode(signing_key.to_bytes()));
+        identity_from_signing_key(&signing_key)
+    })
 }
 
 fn parse_identity(secret_hex: &str) -> Option<LocalIdentity> {

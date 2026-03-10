@@ -3,9 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use skyffla_session::SessionPeer;
 
-use crate::local_state::{
-    load_local_state, local_state_file_path, save_local_state, KnownPeerRecord, LocalState,
-};
+use crate::local_state::{local_state_file_path, update_local_state, KnownPeerRecord, LocalState};
 
 pub(crate) struct PeerTrustStatus {
     pub(crate) status: &'static str,
@@ -17,12 +15,9 @@ pub(crate) struct PeerTrustStatus {
 
 pub(crate) fn remember_peer(peer: &SessionPeer) -> Result<Option<PeerTrustStatus>> {
     let now = unix_now();
-    let mut state = load_local_state(&local_state_file_path())?;
-    let status = apply_peer_trust(&mut state, peer, now);
-    if status.is_some() {
-        save_local_state(&local_state_file_path(), &state)?;
-    }
-    Ok(status)
+    update_local_state(&local_state_file_path(), |state| {
+        apply_peer_trust(state, peer, now)
+    })
 }
 
 pub(crate) fn short_fingerprint(raw: &str) -> Option<String> {

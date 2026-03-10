@@ -1,7 +1,8 @@
 use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
 use skyffla_protocol::TransportCapability;
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
@@ -56,16 +57,26 @@ pub trait PeerTransport {
 #[derive(Debug, Clone)]
 pub struct IrohTransport {
     endpoint: Endpoint,
+    options: TransportOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TransportOptions {
+    pub local_only: bool,
 }
 
 impl IrohTransport {
     pub async fn bind() -> Result<Self, TransportError> {
-        let endpoint = Endpoint::builder()
-            .alpns(vec![SKYFFLA_ALPN.to_vec()])
-            .bind()
-            .await
-            .map_err(TransportError::EndpointBind)?;
-        Ok(Self { endpoint })
+        Self::bind_with_options(TransportOptions::default()).await
+    }
+
+    pub async fn bind_with_options(options: TransportOptions) -> Result<Self, TransportError> {
+        let mut builder = Endpoint::builder().alpns(vec![SKYFFLA_ALPN.to_vec()]);
+        if options.local_only {
+            builder = builder.relay_mode(RelayMode::Disabled);
+        }
+        let endpoint = builder.bind().await.map_err(TransportError::EndpointBind)?;
+        Ok(Self { endpoint, options })
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -73,7 +84,10 @@ impl IrohTransport {
     }
 
     pub fn local_ticket(&self) -> Result<PeerTicket, TransportError> {
-        let addr = self.endpoint.addr();
+        let addr = filter_endpoint_addr(self.endpoint.addr(), self.options.local_only);
+        if self.options.local_only && addr.addrs.is_empty() {
+            return Err(TransportError::NoLocalAddresses);
+        }
         PeerTicket::from_endpoint_addr(&addr)
     }
 
@@ -88,13 +102,43 @@ impl IrohTransport {
     }
 
     pub async fn connect(&self, ticket: &PeerTicket) -> Result<IrohConnection, TransportError> {
-        let endpoint_addr = ticket.to_endpoint_addr()?;
+        let endpoint_addr =
+            filter_endpoint_addr(ticket.to_endpoint_addr()?, self.options.local_only);
+        if self.options.local_only && endpoint_addr.addrs.is_empty() {
+            return Err(TransportError::NoLocalAddresses);
+        }
         let connection = self
             .endpoint
             .connect(endpoint_addr, SKYFFLA_ALPN)
             .await
             .map_err(TransportError::Connect)?;
         Ok(IrohConnection { connection })
+    }
+
+    pub async fn enforce_connection_policy(
+        &self,
+        connection: &IrohConnection,
+    ) -> Result<(), TransportError> {
+        if !self.options.local_only {
+            return Ok(());
+        }
+
+        let status = self.connection_status(connection).await;
+        if status.mode != TransportMode::Direct {
+            return Err(TransportError::LocalModeRequiresDirectConnection { mode: status.mode });
+        }
+
+        let remote_addr = status
+            .remote_addr
+            .ok_or(TransportError::MissingRemoteAddrForLocalMode)?;
+        let remote_addr: SocketAddr = remote_addr
+            .parse()
+            .map_err(|_| TransportError::InvalidRemoteAddrForLocalMode(remote_addr.clone()))?;
+        if !is_local_ip(remote_addr.ip()) {
+            return Err(TransportError::NonLocalPeerAddr(remote_addr));
+        }
+
+        Ok(())
     }
 
     pub async fn connection_status(&self, connection: &IrohConnection) -> ConnectionStatus {
@@ -194,6 +238,11 @@ pub enum TransportError {
     AcceptBi(iroh::endpoint::ConnectionError),
     TicketEncode(serde_json::Error),
     TicketDecode(serde_json::Error),
+    NoLocalAddresses,
+    LocalModeRequiresDirectConnection { mode: TransportMode },
+    MissingRemoteAddrForLocalMode,
+    InvalidRemoteAddrForLocalMode(String),
+    NonLocalPeerAddr(SocketAddr),
 }
 
 impl fmt::Display for TransportError {
@@ -207,6 +256,28 @@ impl fmt::Display for TransportError {
             Self::AcceptBi(error) => write!(f, "failed to accept bidirectional stream: {error}"),
             Self::TicketEncode(error) => write!(f, "failed to encode peer ticket: {error}"),
             Self::TicketDecode(error) => write!(f, "failed to decode peer ticket: {error}"),
+            Self::NoLocalAddresses => write!(
+                f,
+                "local mode requires a peer ticket with at least one local-network address"
+            ),
+            Self::LocalModeRequiresDirectConnection { mode } => {
+                write!(f, "local mode requires a direct p2p connection, got {mode}")
+            }
+            Self::MissingRemoteAddrForLocalMode => {
+                write!(
+                    f,
+                    "local mode could not determine the peer's remote address"
+                )
+            }
+            Self::InvalidRemoteAddrForLocalMode(addr) => {
+                write!(
+                    f,
+                    "local mode could not parse the peer remote address {addr}"
+                )
+            }
+            Self::NonLocalPeerAddr(addr) => {
+                write!(f, "local mode rejected non-local peer address {addr}")
+            }
         }
     }
 }
@@ -221,13 +292,51 @@ impl std::error::Error for TransportError {
             Self::AcceptBi(error) => Some(error),
             Self::TicketEncode(error) => Some(error),
             Self::TicketDecode(error) => Some(error),
-            Self::EndpointClosed => None,
+            Self::EndpointClosed
+            | Self::NoLocalAddresses
+            | Self::LocalModeRequiresDirectConnection { .. }
+            | Self::MissingRemoteAddrForLocalMode
+            | Self::InvalidRemoteAddrForLocalMode(_)
+            | Self::NonLocalPeerAddr(_) => None,
+        }
+    }
+}
+
+fn filter_endpoint_addr(mut addr: EndpointAddr, local_only: bool) -> EndpointAddr {
+    if !local_only {
+        return addr;
+    }
+    addr.addrs.retain(|transport_addr| match transport_addr {
+        TransportAddr::Ip(socket_addr) => is_local_ip(socket_addr.ip()),
+        TransportAddr::Relay(_) => false,
+        _ => false,
+    });
+    addr
+}
+
+fn is_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.octets()[0] == 100 && (ip.octets()[1] & 0b1100_0000) == 0b0100_0000
+                || ip.octets()[0] == 169 && ip.octets()[1] == 254
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+
     use super::*;
 
     async fn bind_or_skip() -> Option<IrohTransport> {
@@ -327,5 +436,53 @@ mod tests {
         accept_task.await.expect("accept task should join");
         host.close().await;
         joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn local_mode_ticket_filter_keeps_only_local_ips() {
+        let Some(transport) = bind_or_skip().await else {
+            return;
+        };
+        let endpoint_addr = EndpointAddr::from_parts(
+            transport.endpoint().id(),
+            [
+                TransportAddr::Ip("192.168.1.20:7777".parse().unwrap()),
+                TransportAddr::Ip("8.8.8.8:7777".parse().unwrap()),
+                TransportAddr::Ip(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    7777,
+                    0,
+                    0,
+                ))),
+                TransportAddr::Relay("https://relay.example.com".parse().unwrap()),
+            ],
+        );
+
+        let filtered = filter_endpoint_addr(endpoint_addr, true);
+        assert_eq!(filtered.addrs.len(), 2);
+        assert!(filtered
+            .addrs
+            .contains(&TransportAddr::Ip("192.168.1.20:7777".parse().unwrap())));
+        assert!(filtered
+            .addrs
+            .contains(&TransportAddr::Ip(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::LOCALHOST,
+                7777,
+                0,
+                0
+            )))));
+
+        transport.close().await;
+    }
+
+    #[test]
+    fn local_ip_helper_accepts_private_and_rejects_public_ips() {
+        assert!(is_local_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(is_local_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_local_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_local_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_local_ip(IpAddr::V6(
+            "2606:4700:4700::1111".parse().unwrap()
+        )));
     }
 }
