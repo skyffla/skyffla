@@ -12,3 +12,4 @@ frontend/vite.config.d.ts
 IMPLEMENTATION_PLAN.md
 DEPLOYMENT_BREW_PLAN.local.md
 scripts/local/
+skyfflacli.code-workspace
