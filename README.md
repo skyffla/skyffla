@@ -48,6 +48,28 @@ Use explicit host mode when you want deterministic automation:
 skyffla host copper-731
 ```
 
+Use local discovery on the same LAN without rendezvous. Both peers can use `join --local`:
+
+```sh
+skyffla join copper-731 --local
+```
+
+```sh
+skyffla join copper-731 --local
+```
+
+Use `host --local` when you want one side to advertise explicitly:
+
+```sh
+skyffla host copper-731 --local
+```
+
+```sh
+skyffla join copper-731 --local
+```
+
+`--local` uses mDNS on the local network, only accepts local peers, and only allows direct p2p connections.
+
 Pipe bytes over stdio:
 
 ```sh
