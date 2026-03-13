@@ -29,6 +29,7 @@ pub(crate) async fn exchange_hello(
             peer_fingerprint: local_fingerprint.map(ToOwned::to_owned),
             capabilities: Capabilities::default(),
             transport_capabilities: vec![TransportCapability::NativeDirect],
+            session_mode: config.session_mode(),
         }),
     );
     write_envelope(send, &hello).await?;
@@ -43,6 +44,13 @@ pub(crate) async fn exchange_hello(
                     "protocol version mismatch: local {}, peer {}",
                     PROTOCOL_VERSION,
                     hello.protocol_version
+                );
+            }
+            if hello.session_mode != config.session_mode() {
+                bail!(
+                    "session mode mismatch: local {:?}, peer {:?}",
+                    config.session_mode(),
+                    hello.session_mode
                 );
             }
             SessionPeer {

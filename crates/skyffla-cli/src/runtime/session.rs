@@ -138,7 +138,7 @@ pub(crate) async fn run_connected_session(
                 .map_err(|error| CliError::protocol(error.to_string()))?;
         }
     } else if config.stdio {
-        run_stdio_session(config, sink, &session_id, &connection, &mut send, &mut recv).await?;
+        run_stdio_session(sink, &session_id, &connection, &mut send, &mut recv, is_host).await?;
     } else {
         run_interactive_chat_loop(
             config,

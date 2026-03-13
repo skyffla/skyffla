@@ -49,7 +49,7 @@ async fn run_single_simultaneous_join_race(iteration: usize) -> Result<()> {
         .arg("--stdio")
         .arg("--json")
         .env("HOME", &home_dir)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut first = first.spawn().with_context(|| {
@@ -71,7 +71,7 @@ async fn run_single_simultaneous_join_race(iteration: usize) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut second = second.spawn().with_context(|| {
+    let second = second.spawn().with_context(|| {
         format!("failed to spawn second simultaneous local join process for iteration {iteration}")
     })?;
 
@@ -84,16 +84,6 @@ async fn run_single_simultaneous_join_race(iteration: usize) -> Result<()> {
         .await
         .context("failed to write payload into first simultaneous join stdin")?;
     drop(first_stdin);
-
-    let mut second_stdin = second
-        .stdin
-        .take()
-        .context("second simultaneous join stdin missing")?;
-    second_stdin
-        .write_all(payload)
-        .await
-        .context("failed to write payload into second simultaneous join stdin")?;
-    drop(second_stdin);
 
     let first_output = tokio::time::timeout(PROCESS_TIMEOUT, first.wait_with_output())
         .await
@@ -121,29 +111,18 @@ async fn run_single_simultaneous_join_race(iteration: usize) -> Result<()> {
         String::from_utf8_lossy(&second_output.stderr)
     );
 
-    let first_received = first_output.stdout == payload;
-    let second_received = second_output.stdout == payload;
-    assert_ne!(
-        first_received, second_received,
-        "expected exactly one simultaneous joiner to receive the stdio payload in iteration {iteration}:\nfirst stdout={}\nsecond stdout={}",
+    assert!(
+        first_output.stdout.is_empty(),
+        "sender-side simultaneous join stdout should be empty in iteration {iteration}:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&first_output.stdout),
-        String::from_utf8_lossy(&second_output.stdout)
+        String::from_utf8_lossy(&first_output.stderr)
     );
-
-    if !first_received {
-        assert!(
-            first_output.stdout.is_empty(),
-            "host-side simultaneous join stdout should be empty in iteration {iteration}:\n{}",
-            String::from_utf8_lossy(&first_output.stdout)
-        );
-    }
-    if !second_received {
-        assert!(
-            second_output.stdout.is_empty(),
-            "host-side simultaneous join stdout should be empty in iteration {iteration}:\n{}",
-            String::from_utf8_lossy(&second_output.stdout)
-        );
-    }
+    assert_eq!(
+        second_output.stdout, payload,
+        "receiver-side simultaneous join did not receive the payload in iteration {iteration}:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr)
+    );
 
     assert_local_mode_stderr(&first_output.stderr);
     assert_local_mode_stderr(&second_output.stderr);

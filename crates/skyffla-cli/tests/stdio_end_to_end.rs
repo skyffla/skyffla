@@ -1,48 +1,20 @@
-use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use skyffla_rendezvous::app::{build_router, AppState, IpRateLimiter};
-use skyffla_rendezvous::store::InMemoryStreamStore;
-use skyffla_transport::{IrohTransport, TransportError};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::time::sleep;
 
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
-const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+mod support;
+
+use support::{
+    fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer, PROCESS_TIMEOUT,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(error) if is_socket_permission_error(&error) => return Ok(()),
-        Err(error) => return Err(error).context("failed to bind rendezvous test listener"),
-    };
-    let Some(probe) = bind_transport_or_skip().await else {
+    let Some(server) = TestServer::spawn().await? else {
         return Ok(());
     };
-    probe.close().await;
-    let addr = listener
-        .local_addr()
-        .context("failed to read rendezvous test listener addr")?;
-    let server = tokio::spawn(async move {
-        let app = build_router(AppState {
-            store: Arc::new(InMemoryStreamStore::new()),
-            rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
-            trust_proxy_headers: false,
-        });
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("rendezvous server should stay healthy during test");
-    });
 
     let home_dir = fresh_test_dir("skyffla-cli-stdio");
     std::fs::create_dir_all(&home_dir)
@@ -50,16 +22,13 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
 
     let payload = b"hello from integration test\nsecond line\n";
     let room = unique_room_name();
-    let server_url = format!("http://{addr}");
     let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    wait_for_server_ready(&server_url).await?;
 
     let mut host = Command::new(bin);
     host.arg("join")
         .arg(&room)
         .arg("--server")
-        .arg(&server_url)
+        .arg(&server.url)
         .arg("--name")
         .arg("host")
         .arg("--stdio")
@@ -77,13 +46,13 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
         .context("failed to write stdio payload into host stdin")?;
     drop(host_stdin);
 
-    wait_for_stream_ready(&server_url, &room).await?;
+    wait_for_stream_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
     join.arg("join")
         .arg(&room)
         .arg("--server")
-        .arg(&server_url)
+        .arg(&server.url)
         .arg("--name")
         .arg("join")
         .arg("--stdio")
@@ -131,12 +100,8 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
 
     let join_stderr = String::from_utf8_lossy(&join_output.stderr);
     assert!(
-        join_stderr.contains("\"event\":\"complete\""),
-        "join stderr did not contain complete event:\n{join_stderr}"
-    );
-    assert!(
-        join_stderr.contains("\"event\":\"offer\""),
-        "join stderr did not contain offer event:\n{join_stderr}"
+        join_stderr.contains("\"event\":\"machine_closed\""),
+        "join stderr did not contain machine_closed event:\n{join_stderr}"
     );
     let host_stderr = String::from_utf8_lossy(&host_output.stderr);
     assert!(
@@ -153,47 +118,22 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => listener,
-        Err(error) if is_socket_permission_error(&error) => return Ok(()),
-        Err(error) => return Err(error).context("failed to bind rendezvous test listener"),
-    };
-    let Some(probe) = bind_transport_or_skip().await else {
+    let Some(server) = TestServer::spawn().await? else {
         return Ok(());
     };
-    probe.close().await;
-    let addr = listener
-        .local_addr()
-        .context("failed to read rendezvous test listener addr")?;
-    let server = tokio::spawn(async move {
-        let app = build_router(AppState {
-            store: Arc::new(InMemoryStreamStore::new()),
-            rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
-            trust_proxy_headers: false,
-        });
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("rendezvous server should stay healthy during test");
-    });
 
     let home_dir = fresh_test_dir("skyffla-cli-stdio-missing");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
 
     let room = unique_room_name();
-    let server_url = format!("http://{addr}");
     let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    wait_for_server_ready(&server_url).await?;
 
     let mut host = Command::new(bin);
     host.arg("host")
         .arg(&room)
         .arg("--server")
-        .arg(&server_url)
+        .arg(&server.url)
         .arg("--name")
         .arg("host")
         .arg("--stdio")
@@ -212,13 +152,13 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         .context("failed to write stdio payload into host stdin")?;
     drop(host_stdin);
 
-    wait_for_stream_ready(&server_url, &room).await?;
+    wait_for_stream_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
     join.arg("join")
         .arg(&room)
         .arg("--server")
-        .arg(&server_url)
+        .arg(&server.url)
         .arg("--name")
         .arg("join")
         .arg("--stdio")
@@ -265,93 +205,92 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
     assert_eq!(join_output.stdout, payload);
     let join_stderr = String::from_utf8_lossy(&join_output.stderr);
     assert!(
-        join_stderr.contains("\"event\":\"complete\""),
-        "join stderr did not contain complete event:\n{join_stderr}"
-    );
-    assert!(
-        join_stderr.contains("\"event\":\"offer\""),
-        "join stderr did not contain offer event:\n{join_stderr}"
+        join_stderr.contains("\"event\":\"machine_closed\""),
+        "join stderr did not contain machine_closed event:\n{join_stderr}"
     );
 
     Ok(())
 }
 
-async fn bind_transport_or_skip() -> Option<IrohTransport> {
-    match IrohTransport::bind().await {
-        Ok(transport) => Some(transport),
-        Err(error) if is_transport_permission_error(&error) => None,
-        Err(error) => panic!("iroh bind should succeed: {error}"),
-    }
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_rejects_session_mode_mismatch_during_handshake() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
 
-fn is_socket_permission_error(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrNotAvailable
-    ) || error.to_string().contains("Operation not permitted")
-}
+    let home_dir = fresh_test_dir("skyffla-cli-stdio-mode-mismatch");
+    std::fs::create_dir_all(&home_dir)
+        .with_context(|| format!("failed to create {}", home_dir.display()))?;
 
-fn is_transport_permission_error(error: &TransportError) -> bool {
-    matches!(error, TransportError::EndpointBind(bind_error) if {
-        let message = bind_error.to_string();
-        message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
-    })
-}
+    let room = unique_room_name();
+    let bin = env!("CARGO_BIN_EXE_skyffla");
 
-fn unique_room_name() -> String {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    format!("stdio-room-{nonce}")
-}
+    let mut host = Command::new(bin);
+    host.arg("host")
+        .arg(&room)
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("host")
+        .arg("--stdio")
+        .arg("--json")
+        .env("HOME", &home_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let host = host.spawn().context("failed to spawn stdio host process")?;
 
-fn fresh_test_dir(prefix: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{nonce}"))
-}
+    wait_for_stream_ready(&server.url, &room).await?;
 
-async fn wait_for_server_ready(server_url: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-    let health_url = format!("{server_url}/health");
-    let deadline = tokio::time::Instant::now() + SERVER_READY_TIMEOUT;
+    let mut join = Command::new(bin);
+    join.arg("join")
+        .arg(&room)
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("join")
+        .arg("--message")
+        .arg("hello")
+        .arg("--json")
+        .env("HOME", &home_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let join = join.spawn().context("failed to spawn mismatched join process")?;
 
-    loop {
-        if let Ok(response) = client.get(&health_url).send().await {
-            if response.status().is_success() {
-                return Ok(());
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "rendezvous server was not ready within {:?}",
-                SERVER_READY_TIMEOUT
-            );
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-}
+    let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
+        .await
+        .context("mismatched join process watchdog timed out")?
+        .context("mismatched join process failed while waiting for output")?;
+    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
+        .await
+        .context("stdio host process watchdog timed out")?
+        .context("stdio host process failed while waiting for output")?;
 
-async fn wait_for_stream_ready(server_url: &str, room: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-    let stream_url = format!("{server_url}/v1/streams/{room}");
-    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+    server.abort();
 
-    loop {
-        if let Ok(response) = client.get(&stream_url).send().await {
-            if response.status().is_success() {
-                return Ok(());
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "stream {room} was not registered within {:?}",
-                CONNECT_TIMEOUT
-            );
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
+    assert!(
+        !join_output.status.success(),
+        "mismatched join unexpectedly succeeded:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&join_output.stdout),
+        String::from_utf8_lossy(&join_output.stderr)
+    );
+    assert!(
+        !host_output.status.success(),
+        "stdio host unexpectedly succeeded:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&host_output.stdout),
+        String::from_utf8_lossy(&host_output.stderr)
+    );
+    let join_stderr = String::from_utf8_lossy(&join_output.stderr);
+    let host_stderr = String::from_utf8_lossy(&host_output.stderr);
+    assert!(
+        join_stderr.contains("session mode mismatch"),
+        "mismatched join stderr did not mention session mode mismatch:\n{join_stderr}"
+    );
+    assert!(
+        host_stderr.contains("session mode mismatch"),
+        "stdio host stderr did not mention session mode mismatch:\n{host_stderr}"
+    );
+
+    Ok(())
 }
