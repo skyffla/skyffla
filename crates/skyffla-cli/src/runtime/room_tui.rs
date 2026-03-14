@@ -79,8 +79,8 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                         }
                         Err(error) => ui.system(error.to_string()),
                     }
-                    ui.render();
                 }
+                ui.render();
             }
             maybe_event = backend.stdout_rx.recv() => {
                 match maybe_event {
