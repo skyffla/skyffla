@@ -18,12 +18,90 @@ function GitHubMark() {
   );
 }
 
+function XMark() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="xMark"
+      focusable="false"
+    >
+      <path
+        fill="currentColor"
+        d="M18.9 2H22l-6.77 7.74L23 22h-6.09l-4.77-7.4L5.67 22H2.56l7.24-8.27L1 2h6.24l4.31 6.82L18.9 2Zm-1.07 18h1.69L6.32 3.89H4.5L17.83 20Z"
+      />
+    </svg>
+  );
+}
+
+function CopyIcon({ copied }: { copied: boolean }) {
+  if (copied) {
+    return (
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        className="copyIcon"
+        focusable="false"
+      >
+        <path
+          fill="currentColor"
+          d="M8.25 13.55 4.7 10l-1.4 1.4 4.95 4.95L16.7 7.9l-1.4-1.4-7.05 7.05Z"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      className="copyIcon"
+      focusable="false"
+    >
+      <path
+        fill="currentColor"
+        d="M6 2.5A1.5 1.5 0 0 0 4.5 4v9A1.5 1.5 0 0 0 6 14.5h7A1.5 1.5 0 0 0 14.5 13V4A1.5 1.5 0 0 0 13 2.5H6Zm0 1.5h7v9H6V4Zm-3 3A1.5 1.5 0 0 0 1.5 8.5v8A1.5 1.5 0 0 0 3 18h7.5v-1.5H3v-8h-1.5Z"
+      />
+    </svg>
+  );
+}
+
 function CommandBlock({ lines }: { lines: string[] }) {
+  const [copiedLine, setCopiedLine] = useState<string | null>(null);
+
+  const copyLine = async (line: string) => {
+    try {
+      await navigator.clipboard.writeText(line);
+      setCopiedLine(line);
+      window.setTimeout(() => {
+        setCopiedLine((current) => (current === line ? null : current));
+      }, 1400);
+    } catch {
+      setCopiedLine(null);
+    }
+  };
+
   return (
     <section className="commandBlock">
-      <pre>
-        <code>{lines.join("\n")}</code>
-      </pre>
+      {lines.map((line) => (
+        <div key={line} className="commandLine">
+          <div className="commandText">
+            <span className="commandPrompt" aria-hidden="true">
+              $
+            </span>
+            <code>{line}</code>
+          </div>
+          <button
+            type="button"
+            className={`copyButton ${copiedLine === line ? "is-copied" : ""}`}
+            onClick={() => void copyLine(line)}
+            aria-label={`Copy command: ${line}`}
+            title={copiedLine === line ? "Copied" : "Copy command"}
+          >
+            <CopyIcon copied={copiedLine === line} />
+          </button>
+        </div>
+      ))}
     </section>
   );
 }
@@ -57,19 +135,34 @@ export default function App() {
 
         <p className="subtitle">- moving your bits, seamless and secure!</p>
 
-        <p className="lede">
-          skyffla.com is now a terminal-native application. Head over to GitHub
-          for releases and docs. Browser support will come back later.
-        </p>
+        <ul className="lede" aria-label="intro notes">
+          <li>skyffla is now a terminal-native application written in rust</li>
+          <li>browser support might come back later</li>
+        </ul>
 
         <div className="contentGrid">
-          <div className="messageCard">
-            <h2>Install the CLI</h2>
-            <p>Add the tap once, then install.</p>
+          <section className="messageCard installCard">
+            <div className="installHeader">
+              <h2 className="sectionLabel">Install</h2>
+            </div>
+
             <CommandBlock
-              lines={["brew tap skyffla/skyffla", "brew install skyffla"]}
+              lines={[
+                "brew tap skyffla/skyffla",
+                "brew install skyffla",
+                "skyffla help",
+              ]}
             />
-          </div>
+
+            <p className="sectionLabel installHint">
+              Need Homebrew? macOS/Linux
+            </p>
+            <CommandBlock
+              lines={[
+                '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+              ]}
+            />
+          </section>
         </div>
 
         <div className="actions">
@@ -81,6 +174,15 @@ export default function App() {
           >
             <GitHubMark />
             <span>Open GitHub home</span>
+          </a>
+          <a
+            className="primaryAction secondaryAction"
+            href="https://x.com/skyffla"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <XMark />
+            <span>Follow on X</span>
           </a>
         </div>
       </section>
