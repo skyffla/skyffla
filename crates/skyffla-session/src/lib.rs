@@ -1,3 +1,5 @@
+pub mod room;
+
 use std::collections::BTreeMap;
 use std::fmt;
 

@@ -3638,6 +3638,7 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_cbor",
+ "serde_json",
 ]
 
 [[package]]

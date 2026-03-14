@@ -1,4 +1,5 @@
 mod framing;
+pub mod room;
 
 use std::fmt;
 
