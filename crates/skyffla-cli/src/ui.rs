@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType,
-    EnterAlternateScreen, LeaveAlternateScreen, ScrollUp,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
 use skyffla_protocol::Offer;
@@ -70,9 +70,6 @@ pub(crate) struct UiState {
     history_index: Option<usize>,
     draft_buffer: Option<String>,
     pub(crate) state_path: Option<PathBuf>,
-    rendered_event_lines: usize,
-    rendered_width: Option<usize>,
-    next_event_row: u16,
 }
 
 pub(crate) struct TerminalUiGuard;
@@ -126,9 +123,6 @@ impl UiState {
             history_index: None,
             draft_buffer: None,
             state_path,
-            rendered_event_lines: 0,
-            rendered_width: None,
-            next_event_row: 0,
         })
     }
 
@@ -246,14 +240,12 @@ impl UiState {
         let header_lines = self.header_lines(width);
         let header_start = 1u16;
         let header_end = header_start + header_lines.len() as u16;
+        let event_start = header_end + 1;
+        let event_capacity = prompt_row.saturating_sub(event_start) as usize;
         let mut stdout = std::io::stdout();
 
-        if self.rendered_width != Some(width) {
-            self.rendered_width = Some(width);
-            self.rendered_event_lines = 0;
-            let _ = queue!(stdout, MoveTo(0, 0), Clear(ClearType::All));
-            let _ = write!(stdout, "\x1b[1;{}r", prompt_row);
-        }
+        let _ = queue!(stdout, MoveTo(0, 0), Clear(ClearType::All));
+        let _ = write!(stdout, "\x1b[1;{}r", prompt_row);
 
         let _ = queue!(
             stdout,
@@ -275,27 +267,24 @@ impl UiState {
             Clear(ClearType::CurrentLine),
             Print(clip_line(&divider, width))
         );
-        self.next_event_row = header_end + 1;
 
         let event_lines = if self.events.is_empty() {
             vec!["[--:--:--] waiting for events".to_string()]
         } else {
             self.render_event_lines(width)
         };
-        for line in event_lines.iter().skip(self.rendered_event_lines) {
-            if self.next_event_row >= prompt_row {
-                let _ = queue!(stdout, ScrollUp(1));
-                self.next_event_row = prompt_row.saturating_sub(1);
-            }
+        let visible_start = event_lines.len().saturating_sub(event_capacity);
+        for row in event_start..prompt_row {
+            let _ = queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine));
+        }
+        for (index, line) in event_lines.iter().skip(visible_start).enumerate() {
             let _ = queue!(
                 stdout,
-                MoveTo(0, self.next_event_row),
+                MoveTo(0, event_start + index as u16),
                 Clear(ClearType::CurrentLine),
                 Print(clip_line(line, width))
             );
-            self.next_event_row = self.next_event_row.saturating_add(1);
         }
-        self.rendered_event_lines = event_lines.len();
 
         let _ = queue!(
             stdout,
