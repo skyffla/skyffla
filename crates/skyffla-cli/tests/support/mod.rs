@@ -2,7 +2,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use tokio::time::sleep;
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_millis(500);
+pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_secs(8);
 pub const LOCAL_JOIN_PROMOTION_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
@@ -27,7 +27,10 @@ pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
     }
 }
 
-pub struct LocalDiscoveryTestGuard(File);
+pub struct LocalDiscoveryTestGuard {
+    _process_guard: MutexGuard<'static, ()>,
+    file: File,
+}
 
 pub struct TestServer {
     pub url: String,
@@ -35,6 +38,9 @@ pub struct TestServer {
 }
 
 pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
+    let process_guard = local_discovery_process_guard()
+        .lock()
+        .expect("local discovery test mutex should not be poisoned");
     let lock_path = std::env::temp_dir().join("skyffla-local-discovery-tests.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -45,7 +51,10 @@ pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
         .with_context(|| format!("failed to open local discovery test lock {lock_path:?}"))?;
     file.lock()
         .with_context(|| format!("failed to lock local discovery test lock {lock_path:?}"))?;
-    Ok(LocalDiscoveryTestGuard(file))
+    Ok(LocalDiscoveryTestGuard {
+        _process_guard: process_guard,
+        file,
+    })
 }
 
 pub async fn local_discovery_available() -> Result<bool> {
@@ -76,8 +85,13 @@ pub async fn local_discovery_available() -> Result<bool> {
 
 impl Drop for LocalDiscoveryTestGuard {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = self.file.unlock();
     }
+}
+
+fn local_discovery_process_guard() -> &'static Mutex<()> {
+    static PROCESS_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    PROCESS_GUARD.get_or_init(|| Mutex::new(()))
 }
 
 impl TestServer {

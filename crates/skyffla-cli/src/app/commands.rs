@@ -10,8 +10,7 @@ use crate::app::sink::EventSink;
 use crate::cli_error::CliError;
 use crate::config::{Role, SessionArgs, SessionConfig};
 use crate::net::local_discovery::{
-    enable_local_discovery, resolve_local_join_decision, set_local_announcement, LocalAnnouncement,
-    LocalJoinDecision,
+    enable_local_discovery, resolve_local_join_decision, LocalAnnouncement, LocalJoinDecision,
 };
 use crate::net::rendezvous::{delete_stream, register_stream, resolve_stream, RegisterStreamError};
 use crate::runtime::machine::run_machine_host;
@@ -205,7 +204,7 @@ async fn run_join_local(
                     .context("failed to enter hosting state after local discovery")
                     .map_err(|error| CliError::runtime(error.to_string()))?,
             ));
-            set_local_announcement(
+            let _host_mdns = enable_local_discovery(
                 transport.endpoint(),
                 &config.stream_id,
                 LocalAnnouncement::Host,

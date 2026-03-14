@@ -29,7 +29,6 @@ struct JoinState {
     members: BTreeMap<MemberId, Member>,
     channels: BTreeMap<ChannelId, JoinChannelState>,
     peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
-    pending_host_peer_link: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     local_name: String,
     local_fingerprint: Option<String>,
     local_ticket: String,
@@ -47,14 +46,13 @@ struct ConnectedPeer {
     connection_status: ConnectionStatus,
     authority_send: SendStream,
     authority_recv: RecvStream,
-    peer_send: SendStream,
-    peer_recv: RecvStream,
+    connection: IrohConnection,
 }
 
 #[derive(Debug)]
 struct PeerHandle {
     authority_sender: mpsc::UnboundedSender<AuthorityLinkMessage>,
-    peer_sender: mpsc::UnboundedSender<PeerLinkMessage>,
+    peer_sender: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     member: Member,
     ticket: Option<String>,
 }
@@ -64,6 +62,10 @@ enum HostInput {
     LocalCommand(MachineCommand),
     LocalInputClosed,
     PeerConnected(ConnectedPeer),
+    PeerLinkReady {
+        member_id: MemberId,
+        sender: mpsc::UnboundedSender<PeerLinkMessage>,
+    },
     PeerCommand {
         member_id: MemberId,
         command: MachineCommand,
@@ -96,6 +98,13 @@ enum JoinPeerInput {
     ProtocolError {
         message: String,
     },
+}
+
+#[derive(Debug)]
+enum JoinStdinInput {
+    LocalCommand(MachineCommand),
+    LocalInputClosed,
+    LocalInputError(String),
 }
 
 enum LoopControl {
@@ -136,6 +145,7 @@ pub(crate) async fn run_machine_host(
     );
 
     let mut machine_state_entered = false;
+    let mut local_input_closed = false;
     let mut peers = BTreeMap::<MemberId, PeerHandle>::new();
 
     while let Some(input) = host_rx.recv().await {
@@ -150,6 +160,7 @@ pub(crate) async fn run_machine_host(
                 &mut stdout,
                 &mut peers,
                 &mut machine_state_entered,
+                &mut local_input_closed,
                 input,
             )
             .await?,
@@ -180,11 +191,10 @@ pub(crate) async fn run_machine_join_session(
     local_fingerprint: Option<String>,
     local_ticket: String,
 ) -> Result<(), CliError> {
-    let stdin = tokio::io::stdin();
-    let mut stdin_lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
     let mut input_closed = false;
     let mut peer_closed = false;
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
     let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
     let mut join_state = JoinState {
         self_member: None,
@@ -192,20 +202,10 @@ pub(crate) async fn run_machine_join_session(
         members: BTreeMap::new(),
         channels: BTreeMap::new(),
         peer_links: BTreeMap::new(),
-        pending_host_peer_link: None,
         local_name: config.peer_name.clone(),
         local_fingerprint,
         local_ticket,
     };
-
-    let (host_peer_send, host_peer_recv) = connection
-        .accept_data_stream()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let (host_peer_tx, host_peer_rx) = mpsc::unbounded_channel();
-    join_state.pending_host_peer_link = Some(host_peer_tx.clone());
-    spawn_link_writer(host_peer_send, host_peer_rx, "peer link message");
-    spawn_join_peer_reader(host_peer_recv, member_id_placeholder(), peer_tx.clone(), false);
 
     let accept_handle = spawn_join_accept_loop(
         config,
@@ -214,17 +214,17 @@ pub(crate) async fn run_machine_join_session(
         join_state.local_fingerprint.clone(),
         join_state.local_ticket.clone(),
     );
+    let host_peer_accept_handle = spawn_join_host_peer_accept(connection.clone(), peer_tx.clone());
+    let stdin_handle = spawn_join_stdin_task(stdin_tx);
 
     while !(input_closed && peer_closed) {
         tokio::select! {
-            next_line = stdin_lines.next_line(), if !input_closed => {
-                input_closed = handle_join_stdin_result(
-                    next_line
-                    .context("failed reading machine command from stdin")
-                    .map_err(|error| CliError::local_io(error.to_string()))?,
+            input = stdin_rx.recv(), if !input_closed => {
+                input_closed = handle_join_stdin_input(
+                    input,
                     &mut join_state,
-                    send,
                     &mut stdout,
+                    send,
                 )
                 .await?;
             }
@@ -246,6 +246,8 @@ pub(crate) async fn run_machine_join_session(
     }
 
     accept_handle.abort();
+    host_peer_accept_handle.abort();
+    stdin_handle.abort();
 
     sink.emit_json_event(serde_json::json!({
         "event": "machine_session_closed",
@@ -291,6 +293,7 @@ async fn handle_host_input(
     stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
     machine_state_entered: &mut bool,
+    local_input_closed: &mut bool,
     input: HostInput,
 ) -> Result<LoopControl, CliError> {
     match input {
@@ -310,7 +313,10 @@ async fn handle_host_input(
             }
             Ok(LoopControl::Continue)
         }
-        HostInput::LocalInputClosed => Ok(LoopControl::Break),
+        HostInput::LocalInputClosed => {
+            *local_input_closed = true;
+            Ok(LoopControl::Continue)
+        }
         HostInput::PeerConnected(connected) => {
             handle_host_peer_connected(
                 config,
@@ -325,6 +331,17 @@ async fn handle_host_input(
                 connected,
             )
             .await?;
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PeerLinkReady { member_id, sender } => {
+            if let Some(peer) = peers.get_mut(&member_id) {
+                peer.peer_sender = Some(sender);
+                sink.emit_json_event(serde_json::json!({
+                    "event": "room_link_connected",
+                    "member_id": member_id,
+                    "member_name": peer.member.name,
+                }));
+            }
             Ok(LoopControl::Continue)
         }
         HostInput::PeerCommand { member_id, command } => {
@@ -353,7 +370,11 @@ async fn handle_host_input(
                 deliver_routed_events(host_member, dispatch.to_remaining_members, stdout, peers)
                     .await?;
             }
-            Ok(LoopControl::Continue)
+            if *local_input_closed && peers.is_empty() {
+                Ok(LoopControl::Break)
+            } else {
+                Ok(LoopControl::Continue)
+            }
         }
         HostInput::PeerProtocolError { message } => {
             emit_event(stdout, &local_error("peer_protocol_error", &message)).await?;
@@ -393,12 +414,9 @@ async fn handle_host_peer_connected(
     let (authority_tx, authority_rx) = mpsc::unbounded_channel();
     spawn_link_writer(connected.authority_send, authority_rx, "authority link message");
     spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
-    let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-    spawn_link_writer(connected.peer_send, peer_rx, "peer link message");
-    spawn_host_peer_reader(connected.peer_recv, member_id.clone(), host_tx.clone());
     let peer_handle = PeerHandle {
         authority_sender: authority_tx.clone(),
-        peer_sender: peer_tx.clone(),
+        peer_sender: None,
         member,
         ticket,
     };
@@ -422,26 +440,33 @@ async fn handle_host_peer_connected(
         });
     }
 
+    let host_member_record = room
+        .member(host_member)
+        .cloned()
+        .ok_or_else(|| CliError::runtime("host member missing from room state"))?;
+    spawn_host_peer_link(
+        connected.connection,
+        host_member_record,
+        join_dispatch.member.member_id.clone(),
+        host_tx.clone(),
+    );
+
     Ok(())
 }
 
-async fn handle_join_stdin_result(
-    next_line: Option<String>,
+async fn handle_join_stdin_input(
+    input: Option<JoinStdinInput>,
     join_state: &mut JoinState,
-    authority_send: &mut SendStream,
     stdout: &mut tokio::io::Stdout,
+    authority_send: &mut SendStream,
 ) -> Result<bool, CliError> {
-    match next_line {
-        Some(line) => {
-            if line.trim().is_empty() {
-                return Ok(false);
-            }
+    match input {
+        Some(JoinStdinInput::LocalCommand(command)) => {
             if join_state.self_member.is_none() {
                 emit_event(stdout, &local_error("room_not_ready", "machine room is not ready yet"))
                     .await?;
                 return Ok(false);
             }
-            let command = parse_command(&line)?;
             if let Err(error) =
                 handle_join_command(join_state, authority_send, command.clone(), stdout).await
             {
@@ -457,10 +482,11 @@ async fn handle_join_stdin_result(
             }
             Ok(false)
         }
-        None => {
-            let _ = authority_send.finish();
-            Ok(true)
+        Some(JoinStdinInput::LocalInputError(message)) => {
+            emit_event(stdout, &local_error("input_error", &message)).await?;
+            Ok(false)
         }
+        Some(JoinStdinInput::LocalInputClosed) | None => Ok(true),
     }
 }
 
@@ -475,7 +501,6 @@ async fn handle_join_authority_message(
     match message {
         Some(AuthorityLinkMessage::MachineEvent { event }) => {
             apply_machine_event(join_state, &event);
-            attach_pending_host_peer_link(join_state);
             emit_event(stdout, &event).await?;
             Ok(false)
         }
@@ -612,6 +637,46 @@ fn spawn_host_stdin_task(
     })
 }
 
+fn spawn_join_stdin_task(
+    join_tx: mpsc::UnboundedSender<JoinStdinInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let stdin = tokio::io::stdin();
+        let mut lines = BufReader::new(stdin).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    match parse_command(&line) {
+                        Ok(command) => {
+                            if join_tx.send(JoinStdinInput::LocalCommand(command)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = join_tx
+                                .send(JoinStdinInput::LocalInputError(error.to_string()));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    let _ = join_tx.send(JoinStdinInput::LocalInputClosed);
+                    break;
+                }
+                Err(error) => {
+                    let _ = join_tx.send(JoinStdinInput::LocalInputError(format!(
+                        "failed reading machine command from stdin: {error}"
+                    )));
+                    let _ = join_tx.send(JoinStdinInput::LocalInputClosed);
+                    break;
+                }
+            }
+        }
+    })
+}
+
 fn spawn_accept_loop(
     config: &SessionConfig,
     transport: IrohTransport,
@@ -684,10 +749,6 @@ async fn accept_machine_peer(
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))?;
-    let (peer_send, peer_recv) = connection
-        .open_data_stream()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
     let connection_status = transport.connection_status(&connection).await;
 
     Ok(ConnectedPeer {
@@ -695,8 +756,7 @@ async fn accept_machine_peer(
         connection_status,
         authority_send,
         authority_recv,
-        peer_send,
-        peer_recv,
+        connection,
     })
 }
 
@@ -877,6 +937,81 @@ fn spawn_join_accept_loop(
             }
         }
     })
+}
+
+fn spawn_join_host_peer_accept(
+    connection: IrohConnection,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        match connection.accept_data_stream().await {
+            Ok((send, mut recv)) => match read_peer_link_message(&mut recv).await {
+                Ok(Some(PeerLinkMessage::PeerHello { member })) => {
+                    let (sender, rx) = mpsc::unbounded_channel();
+                    spawn_link_writer(send, rx, "peer link message");
+                    spawn_join_peer_reader(recv, member.member_id.clone(), peer_tx.clone(), false);
+                    let _ = peer_tx.send(JoinPeerInput::Connected { member, sender });
+                }
+                Ok(Some(other)) => {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: format!("expected host peer introduction, got {other:?}"),
+                    });
+                }
+                Ok(None) => {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: "host closed peer link before sending introduction".into(),
+                    });
+                }
+                Err(error) => {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: error.to_string(),
+                    });
+                }
+            }
+            Err(error) => {
+                let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                    message: error.to_string(),
+                });
+            }
+        }
+    })
+}
+
+fn spawn_host_peer_link(
+    connection: IrohConnection,
+    host_member: Member,
+    member_id: MemberId,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+) {
+    tokio::spawn(async move {
+        let (mut send, recv) = match connection.open_data_stream().await {
+            Ok(streams) => streams,
+            Err(error) => {
+                let _ = host_tx.send(HostInput::PeerProtocolError {
+                    message: error.to_string(),
+                });
+                return;
+            }
+        };
+        if let Err(error) = write_framed(
+            &mut send,
+            &PeerLinkMessage::PeerHello {
+                member: host_member,
+            },
+            "peer link message",
+        )
+        .await
+        {
+            let _ = host_tx.send(HostInput::PeerProtocolError {
+                message: error.to_string(),
+            });
+            return;
+        }
+        let (sender, rx) = mpsc::unbounded_channel();
+        spawn_link_writer(send, rx, "peer link message");
+        spawn_host_peer_reader(recv, member_id.clone(), host_tx.clone());
+        let _ = host_tx.send(HostInput::PeerLinkReady { member_id, sender });
+    });
 }
 
 async fn accept_peer_link(
@@ -1187,18 +1322,6 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
     }
 }
 
-fn attach_pending_host_peer_link(state: &mut JoinState) {
-    let Some(host_member) = state.host_member.clone() else {
-        return;
-    };
-    if state.peer_links.contains_key(&host_member) {
-        return;
-    }
-    if let Some(sender) = state.pending_host_peer_link.take() {
-        state.peer_links.insert(host_member, sender);
-    }
-}
-
 async fn handle_join_command(
     state: &mut JoinState,
     authority_send: &mut SendStream,
@@ -1356,10 +1479,6 @@ fn join_channel_recipients(
         .collect())
 }
 
-fn member_id_placeholder() -> MemberId {
-    MemberId::new("pending-host").expect("static placeholder member id should be valid")
-}
-
 fn event_matches_sender(member_id: &MemberId, event: &MachineEvent) -> bool {
     match event {
         MachineEvent::Chat { from, .. }
@@ -1439,12 +1558,26 @@ async fn deliver_routed_events(
         if &routed.recipient == host_member {
             emit_event(stdout, &routed.event).await?;
         } else if let Some(peer) = peers.get(&routed.recipient) {
-            send_link_message(
-                &peer.peer_sender,
-                PeerLinkMessage::MachineEvent {
-                    event: routed.event,
-                },
-            )?;
+            if let Some(sender) = &peer.peer_sender {
+                send_link_message(
+                    sender,
+                    PeerLinkMessage::MachineEvent {
+                        event: routed.event,
+                    },
+                )?;
+            } else {
+                emit_event(
+                    stdout,
+                    &local_error(
+                        "peer_not_connected",
+                        &format!(
+                            "no direct room link to {}",
+                            routed.recipient.as_str()
+                        ),
+                    ),
+                )
+                .await?;
+            }
         }
     }
     Ok(())

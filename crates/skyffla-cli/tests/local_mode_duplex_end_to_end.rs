@@ -1,5 +1,6 @@
 use std::process::{ExitStatus, Stdio};
 use anyhow::{Context, Result};
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
@@ -13,12 +14,19 @@ use support::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_host_to_join_streams_payload_both_directions() -> Result<()> {
+async fn stdio_local_duplex_supports_host_join_promotion_and_simultaneous_join() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {
         return Ok(());
     }
 
+    assert_local_host_to_join_duplex().await?;
+    assert_local_join_promotion_duplex().await?;
+    assert_local_simultaneous_join_duplex().await?;
+    Ok(())
+}
+
+async fn assert_local_host_to_join_duplex() -> Result<()> {
     let home_dir = fresh_test_dir("skyffla-cli-stdio-local-duplex-host");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
@@ -61,13 +69,7 @@ async fn stdio_local_host_to_join_streams_payload_both_directions() -> Result<()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_join_to_join_streams_payload_both_directions_after_promotion() -> Result<()> {
-    let _guard = acquire_local_discovery_test_guard()?;
-    if !local_discovery_available().await? {
-        return Ok(());
-    }
-
+async fn assert_local_join_promotion_duplex() -> Result<()> {
     let home_dir = fresh_test_dir("skyffla-cli-stdio-local-duplex-join");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
@@ -120,13 +122,7 @@ async fn stdio_local_join_to_join_streams_payload_both_directions_after_promotio
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_simultaneous_join_establishes_duplex_session() -> Result<()> {
-    let _guard = acquire_local_discovery_test_guard()?;
-    if !local_discovery_available().await? {
-        return Ok(());
-    }
-
+async fn assert_local_simultaneous_join_duplex() -> Result<()> {
     let home_dir = fresh_test_dir("skyffla-cli-stdio-local-duplex-race");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
@@ -209,11 +205,52 @@ async fn write_child_stdin(child: &mut Child, payload: &[u8], label: &str) -> Re
     Ok(())
 }
 
-async fn wait_for_output(child: Child, label: &str) -> Result<std::process::Output> {
-    tokio::time::timeout(PROCESS_TIMEOUT, child.wait_with_output())
-        .await
-        .with_context(|| format!("{label} watchdog timed out"))?
-        .with_context(|| format!("{label} failed while waiting for output"))
+async fn wait_for_output(mut child: Child, label: &str) -> Result<std::process::Output> {
+    match tokio::time::timeout(PROCESS_TIMEOUT, child.wait()).await {
+        Ok(status) => {
+            let status = status.with_context(|| format!("{label} failed while waiting for exit"))?;
+            collect_child_output(child, status, label).await
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let status = child
+                .wait()
+                .await
+                .with_context(|| format!("{label} failed while collecting timeout status"))?;
+            let output = collect_child_output(child, status, label).await?;
+            anyhow::bail!(
+                "{label} watchdog timed out\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+async fn collect_child_output(
+    mut child: Child,
+    status: ExitStatus,
+    label: &str,
+) -> Result<std::process::Output> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut child_stdout) = child.stdout.take() {
+        child_stdout
+            .read_to_end(&mut stdout)
+            .await
+            .with_context(|| format!("failed to read {label} stdout"))?;
+    }
+    if let Some(mut child_stderr) = child.stderr.take() {
+        child_stderr
+            .read_to_end(&mut stderr)
+            .await
+            .with_context(|| format!("failed to read {label} stderr"))?;
+    }
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn assert_success(status: &ExitStatus, label: &str, stdout: &[u8], stderr: &[u8]) {

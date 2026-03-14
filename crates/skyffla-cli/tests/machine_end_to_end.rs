@@ -1,10 +1,13 @@
+use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::sync::{mpsc, Mutex};
 
 mod support;
 
@@ -21,94 +24,37 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &home_dir).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut join = MachineProc::spawn("join", &room, &server.url, "join", &home_dir).await?;
 
-    let mut join = Command::new(bin);
-    join.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("join")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut join = join.spawn().context("failed to spawn join process")?;
+    host.expect_event("member_joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("join".into()))
+    })
+    .await?;
+    join.expect_event("member snapshot with host+join", |event| {
+        event.get("type") == Some(&Value::String("member_snapshot".into()))
+            && member_count(event) == Some(2)
+    })
+    .await?;
+    host.expect_stderr_contains("\"member_name\":\"join\"")
+        .await?;
+    join.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
 
-    drop(join.stdin.take());
-
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(
-            br#"{"type":"send_chat","to":{"type":"all"},"text":"hello machine room"}"#,
-        )
-        .await
-        .context("failed to write machine command to host stdin")?;
-    host_stdin
-        .write_all(b"\n")
-        .await
-        .context("failed to terminate machine command line")?;
-    drop(host_stdin);
-
-    let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
-        .await
-        .context("join process watchdog timed out")?
-        .context("join process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(
-        join_output.status.success(),
-        "join failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&join_output.stdout),
-        String::from_utf8_lossy(&join_output.stderr)
-    );
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let join_events = parse_json_lines(&join_output.stdout)?;
-
-    assert!(contains_event(&host_events, "room_welcome"));
-    assert!(contains_event(&host_events, "member_snapshot"));
-    assert!(contains_event(&host_events, "member_joined"));
-
-    assert!(contains_event(&join_events, "room_welcome"));
-    assert!(contains_event(&join_events, "member_snapshot"));
-    assert!(join_events.iter().any(|event| {
+    host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello machine room"}"#)
+        .await?;
+    join.expect_event("host chat", |event| {
         event.get("type") == Some(&Value::String("chat".into()))
             && event.get("from_name") == Some(&Value::String("host".into()))
             && event.get("text") == Some(&Value::String("hello machine room".into()))
-    }));
+    })
+    .await?;
 
+    host.shutdown().await?;
+    join.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -127,126 +73,41 @@ async fn machine_host_accepts_two_joiners_and_broadcasts_to_both() -> Result<()>
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
-    drop(beta.stdin.take());
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
 
-    let mut gamma = Command::new(bin);
-    gamma.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("gamma")
-        .arg("--json")
-        .env("HOME", &gamma_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
-    drop(gamma.stdin.take());
+    host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello everyone"}"#)
+        .await?;
+    beta.expect_event("broadcast chat", |event| {
+        event.get("type") == Some(&Value::String("chat".into()))
+            && event.get("from_name") == Some(&Value::String("host".into()))
+            && event.get("text") == Some(&Value::String("hello everyone".into()))
+    })
+    .await?;
+    gamma.expect_event("broadcast chat", |event| {
+        event.get("type") == Some(&Value::String("chat".into()))
+            && event.get("from_name") == Some(&Value::String("host".into()))
+            && event.get("text") == Some(&Value::String("hello everyone".into()))
+    })
+    .await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(br#"{"type":"send_chat","to":{"type":"all"},"text":"hello everyone"}"#)
-        .await
-        .context("failed to write machine broadcast to host stdin")?;
-    host_stdin
-        .write_all(b"\n")
-        .await
-        .context("failed to terminate host machine command line")?;
-    drop(host_stdin);
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
-        .await
-        .context("gamma process watchdog timed out")?
-        .context("gamma process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
     server.abort();
-
-    assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(
-        beta_output.status.success(),
-        "beta failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
-    );
-    assert!(
-        gamma_output.status.success(),
-        "gamma failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
-    );
-
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-    let gamma_events = parse_json_lines(&gamma_output.stdout)?;
-
-    assert!(beta_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("member_joined".into()))
-            && event.pointer("/member/name") == Some(&Value::String("gamma".into()))
-    }));
-    assert!(gamma_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("member_snapshot".into()))
-            && event
-                .get("members")
-                .and_then(Value::as_array)
-                .is_some_and(|members| members.len() == 3)
-    }));
-    for events in [&beta_events, &gamma_events] {
-        assert!(events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("chat".into()))
-                && event.get("from_name") == Some(&Value::String("host".into()))
-                && event.get("text") == Some(&Value::String("hello everyone".into()))
-        }));
-    }
-
     Ok(())
 }
 
@@ -265,134 +126,58 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    let beta_stderr = beta.stderr_lines().await;
+    let beta_events = beta.events().await;
+    let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
+        .or_else(|| member_id_named(&beta_events, "gamma"))
+        .context("beta did not learn gamma member id")?;
 
-    let mut gamma = Command::new(bin);
-    gamma.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("gamma")
-        .arg("--json")
-        .env("HOME", &gamma_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
-    drop(gamma.stdin.take());
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(br#"{"type":"send_chat","to":{"type":"member","member_id":"m3"},"text":"secret hello"}"#)
-        .await
-        .context("failed to write beta direct chat command")?;
-    beta_stdin
-        .write_all(b"\n")
-        .await
-        .context("failed to terminate beta machine command line")?;
-    drop(beta_stdin);
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    drop(host.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
-        .await
-        .context("gamma process watchdog timed out")?
-        .context("gamma process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
+    beta.send(
+        &format!(
+            r#"{{"type":"send_chat","to":{{"type":"member","member_id":"{gamma_id}"}},"text":"secret hello"}}"#
+        ),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let beta_events = beta.events().await;
     assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
+        !beta_events.iter().any(|event| event.get("type") == Some(&Value::String("error".into()))),
+        "beta emitted an unexpected error after direct chat:\n{}",
+        beta.debug_dump().await
     );
-    assert!(
-        beta_output.status.success(),
-        "beta failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
-    );
-    assert!(
-        gamma_output.status.success(),
-        "gamma failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
-    );
+    gamma.expect_event("direct beta->gamma chat", |event| {
+        event.get("type") == Some(&Value::String("chat".into()))
+            && event.get("from_name") == Some(&Value::String("beta".into()))
+            && event.get("text") == Some(&Value::String("secret hello".into()))
+    })
+    .await?;
 
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let gamma_events = parse_json_lines(&gamma_output.stdout)?;
-    let beta_stderr = String::from_utf8_lossy(&beta_output.stderr);
-    let gamma_stderr = String::from_utf8_lossy(&gamma_output.stderr);
-
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let host_events = host.events().await;
     assert!(
         !host_events.iter().any(|event| {
             event.get("type") == Some(&Value::String("chat".into()))
                 && event.get("text") == Some(&Value::String("secret hello".into()))
         }),
-        "host unexpectedly saw direct beta->gamma chat:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(gamma_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("chat".into()))
-            && event.get("from_name") == Some(&Value::String("beta".into()))
-            && event.get("text") == Some(&Value::String("secret hello".into()))
-    }));
-    assert!(
-        beta_stderr.contains("\"event\":\"room_link_connected\""),
-        "beta stderr did not show peer link setup:\n{beta_stderr}"
-    );
-    assert!(
-        gamma_stderr.contains("\"event\":\"room_link_connected\""),
-        "gamma stderr did not show peer link setup:\n{gamma_stderr}"
+        "host unexpectedly saw direct beta->gamma chat:\n{}",
+        host.debug_dump().await
     );
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -410,85 +195,32 @@ async fn machine_joiner_can_chat_directly_to_host_member() -> Result<()> {
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_event("beta joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("beta".into()))
+    })
+    .await?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(br#"{"type":"send_chat","to":{"type":"member","member_id":"m1"},"text":"hi host"}"#)
-        .await
-        .context("failed to write beta->host direct chat command")?;
-    beta_stdin
-        .write_all(b"\n")
-        .await
-        .context("failed to terminate beta machine command line")?;
-    drop(beta_stdin);
-    drop(host.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(
-        beta_output.status.success(),
-        "beta failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
-    );
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    assert!(host_events.iter().any(|event| {
+    beta.send(r#"{"type":"send_chat","to":{"type":"member","member_id":"m1"},"text":"hi host"}"#)
+        .await?;
+    host.expect_event("beta->host chat", |event| {
         event.get("type") == Some(&Value::String("chat".into()))
             && event.get("from_name") == Some(&Value::String("beta".into()))
             && event.get("text") == Some(&Value::String("hi host".into()))
-    }));
+    })
+    .await?;
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -507,134 +239,60 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    let beta_stderr = beta.stderr_lines().await;
+    let beta_events = beta.events().await;
+    let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
+        .or_else(|| member_id_named(&beta_events, "gamma"))
+        .context("beta did not learn gamma member id")?;
 
-    let mut gamma = Command::new(bin);
-    gamma.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("gamma")
-        .arg("--json")
-        .env("HOME", &gamma_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
+    beta.send(
+        &format!(
+            r#"{{"type":"open_channel","channel_id":"c1","kind":"machine","to":{{"type":"member","member_id":"{gamma_id}"}}}}"#
+        ),
+    )
+    .await?;
+    gamma.expect_event("channel_opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    gamma
+        .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"sketch line"}"#)
+        .await?;
+    beta.expect_event("channel_data", |event| {
+        event.get("type") == Some(&Value::String("channel_data".into()))
+            && event.get("from_name") == Some(&Value::String("gamma".into()))
+            && event.get("body") == Some(&Value::String("sketch line".into()))
+    })
+    .await?;
 
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(
-            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m3"}}"#,
-        )
-        .await
-        .context("failed to write beta open channel command")?;
-    beta_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let mut gamma_stdin = gamma.stdin.take().context("gamma stdin missing")?;
-    gamma_stdin
-        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"sketch line"}"#)
-        .await
-        .context("failed to write gamma channel data command")?;
-    gamma_stdin.write_all(b"\n").await?;
-    drop(gamma_stdin);
-    drop(beta_stdin);
-    drop(host.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
-        .await
-        .context("gamma process watchdog timed out")?
-        .context("gamma process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(
-        beta_output.status.success(),
-        "beta failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
-    );
-    assert!(
-        gamma_output.status.success(),
-        "gamma failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
-    );
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let host_events = host.events().await;
     assert!(
         !host_events.iter().any(|event| {
             event.get("type") == Some(&Value::String("channel_data".into()))
                 && event.get("body") == Some(&Value::String("sketch line".into()))
         }),
-        "host unexpectedly saw direct beta<->gamma channel data:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
+        "host unexpectedly saw direct beta<->gamma channel data:\n{}",
+        host.debug_dump().await
     );
-    assert!(beta_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
-    assert!(beta_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("sketch line".into()))
-    }));
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -652,98 +310,49 @@ async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(
-            br#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","blob":{"hash":"abc123","format":"blob"}}"#,
-        )
-        .await
-        .context("failed to write host file channel command")?;
-    host_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    host_stdin
-        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"raw bytes"}"#)
-        .await
-        .context("failed to write host inline file data command")?;
-    host_stdin.write_all(b"\n").await?;
-    drop(host_stdin);
-    drop(beta.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(host_output.status.success());
-    assert!(beta_output.status.success());
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-
-    assert!(beta_events.iter().any(|event| {
+    host.send(
+        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","blob":{"hash":"abc123","format":"blob"}}"#,
+    )
+    .await?;
+    beta.expect_event("file channel_opened", |event| {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
             && event.pointer("/blob/hash") == Some(&Value::String("abc123".into()))
-    }));
-    assert!(host_events.iter().any(|event| {
+    })
+    .await?;
+
+    host.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"raw bytes"}"#)
+        .await?;
+    host.expect_event("file inline-data rejected", |event| {
         event.get("type") == Some(&Value::String("error".into()))
             && event.get("code") == Some(&Value::String("command_failed".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
+    })
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let beta_events = beta.events().await;
     assert!(
         !beta_events.iter().any(|event| {
             event.get("type") == Some(&Value::String("channel_data".into()))
                 && event.get("body") == Some(&Value::String("raw bytes".into()))
         }),
-        "beta unexpectedly saw inline file channel data:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
+        "beta unexpectedly saw inline file channel data:\n{}",
+        beta.debug_dump().await
     );
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -762,142 +371,68 @@ async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<(
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    let beta_stderr = beta.stderr_lines().await;
+    let beta_events = beta.events().await;
+    let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
+        .or_else(|| member_id_named(&beta_events, "gamma"))
+        .context("beta did not learn gamma member id")?;
 
-    let mut gamma = Command::new(bin);
-    gamma.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("gamma")
-        .arg("--json")
-        .env("HOME", &gamma_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
+    beta.send(
+        &format!(
+            r#"{{"type":"open_channel","channel_id":"c1","kind":"machine","to":{{"type":"member","member_id":"{gamma_id}"}}}}"#
+        ),
+    )
+    .await?;
+    gamma.expect_event("channel_opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(
-            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m3"}}"#,
-        )
-        .await
-        .context("failed to write beta open channel command")?;
-    beta_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let mut gamma_stdin = gamma.stdin.take().context("gamma stdin missing")?;
-    gamma_stdin
-        .write_all(br#"{"type":"reject_channel","channel_id":"c1","reason":"busy"}"#)
-        .await
-        .context("failed to write gamma reject channel command")?;
-    gamma_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    beta_stdin
-        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"too late"}"#)
-        .await
-        .context("failed to write beta late channel data command")?;
-    beta_stdin.write_all(b"\n").await?;
-    drop(beta_stdin);
-    drop(gamma_stdin);
-    drop(host.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
-        .await
-        .context("gamma process watchdog timed out")?
-        .context("gamma process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(
-        host_output.status.success(),
-        "host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert!(
-        beta_output.status.success(),
-        "beta failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
-    );
-    assert!(
-        gamma_output.status.success(),
-        "gamma failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
-    );
-
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-    let gamma_events = parse_json_lines(&gamma_output.stdout)?;
-
-    assert!(beta_events.iter().any(|event| {
+    gamma
+        .send(r#"{"type":"reject_channel","channel_id":"c1","reason":"busy"}"#)
+        .await?;
+    beta.expect_event("channel_rejected", |event| {
         event.get("type") == Some(&Value::String("channel_rejected".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
-    assert!(beta_events.iter().any(|event| {
+    })
+    .await?;
+
+    beta.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"too late"}"#)
+        .await?;
+    beta.expect_event("late sender error", |event| {
         event.get("type") == Some(&Value::String("error".into()))
             && event.get("code") == Some(&Value::String("command_failed".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
+    })
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let gamma_events = gamma.events().await;
     assert!(
         !gamma_events.iter().any(|event| {
             event.get("type") == Some(&Value::String("channel_data".into()))
                 && event.get("body") == Some(&Value::String("too late".into()))
         }),
-        "gamma unexpectedly saw late channel data after rejection:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
+        "gamma unexpectedly saw late channel data after rejection:\n{}",
+        gamma.debug_dump().await
     );
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
@@ -916,121 +451,51 @@ async fn machine_broadcast_channel_data_reaches_host_and_other_joiners() -> Resu
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
 
-    let mut gamma = Command::new(bin);
-    gamma.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("gamma")
-        .arg("--json")
-        .env("HOME", &gamma_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
+    beta.send(
+        r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#,
+    )
+    .await?;
+    host.expect_event("broadcast channel_opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
+    gamma.expect_event("broadcast channel_opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    gamma
+        .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"fanout line"}"#)
+        .await?;
+    beta.expect_event("broadcast channel_data", |event| {
+        event.get("type") == Some(&Value::String("channel_data".into()))
+            && event.get("from_name") == Some(&Value::String("gamma".into()))
+            && event.get("body") == Some(&Value::String("fanout line".into()))
+    })
+    .await?;
+    host.expect_event("broadcast channel_data", |event| {
+        event.get("type") == Some(&Value::String("channel_data".into()))
+            && event.get("from_name") == Some(&Value::String("gamma".into()))
+            && event.get("body") == Some(&Value::String("fanout line".into()))
+    })
+    .await?;
 
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(
-            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#,
-        )
-        .await
-        .context("failed to write beta broadcast open channel command")?;
-    beta_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let mut gamma_stdin = gamma.stdin.take().context("gamma stdin missing")?;
-    gamma_stdin
-        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"fanout line"}"#)
-        .await
-        .context("failed to write gamma broadcast channel data command")?;
-    gamma_stdin.write_all(b"\n").await?;
-    drop(gamma_stdin);
-    drop(beta_stdin);
-    drop(host.stdin.take());
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
-        .await
-        .context("gamma process watchdog timed out")?
-        .context("gamma process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
     server.abort();
-
-    assert!(host_output.status.success());
-    assert!(beta_output.status.success());
-    assert!(gamma_output.status.success());
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-    let gamma_events = parse_json_lines(&gamma_output.stdout)?;
-
-    assert!(host_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("fanout line".into()))
-    }));
-    assert!(beta_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("fanout line".into()))
-    }));
-    assert!(
-        !gamma_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_data".into()))
-                && event.get("body") == Some(&Value::String("fanout line".into()))
-        }),
-        "gamma unexpectedly saw its own broadcast channel data:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&gamma_output.stdout),
-        String::from_utf8_lossy(&gamma_output.stderr)
-    );
-
     Ok(())
 }
 
@@ -1048,120 +513,343 @@ async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
     }
 
     let room = unique_room_name();
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("host")
-        .arg("--json")
-        .env("HOME", &host_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn host process")?;
-
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
     wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    let mut beta = Command::new(bin);
-    beta.arg("join")
-        .arg(&room)
-        .arg("machine")
-        .arg("--server")
-        .arg(&server.url)
-        .arg("--name")
-        .arg("beta")
-        .arg("--json")
-        .env("HOME", &beta_home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    host.send(
+        r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m2"}}"#,
+    )
+    .await?;
+    beta.expect_event("channel_opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
 
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(
-            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m2"}}"#,
-        )
-        .await
-        .context("failed to write host open channel command")?;
-    host_stdin.write_all(b"\n").await?;
+    beta.send(r#"{"type":"close_channel","channel_id":"c1","reason":"done"}"#)
+        .await?;
+    host.expect_event("channel_closed", |event| {
+        event.get("type") == Some(&Value::String("channel_closed".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    })
+    .await?;
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
-    beta_stdin
-        .write_all(br#"{"type":"close_channel","channel_id":"c1","reason":"done"}"#)
-        .await
-        .context("failed to write beta close channel command")?;
-    beta_stdin.write_all(b"\n").await?;
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    host_stdin
-        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"after close"}"#)
-        .await
-        .context("failed to write host late channel data command")?;
-    host_stdin.write_all(b"\n").await?;
-    drop(host_stdin);
-    drop(beta_stdin);
-
-    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
-        .await
-        .context("beta process watchdog timed out")?
-        .context("beta process failed while waiting for output")?;
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("host process watchdog timed out")?
-        .context("host process failed while waiting for output")?;
-
-    server.abort();
-
-    assert!(host_output.status.success());
-    assert!(beta_output.status.success());
-
-    let host_events = parse_json_lines(&host_output.stdout)?;
-    let beta_events = parse_json_lines(&beta_output.stdout)?;
-
-    assert!(host_events.iter().any(|event| {
+    host.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"after close"}"#)
+        .await?;
+    host.expect_event("late host-data error", |event| {
         event.get("type") == Some(&Value::String("error".into()))
             && event.get("code") == Some(&Value::String("command_failed".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
-    assert!(beta_events.iter().any(|event| {
-        event.get("type") == Some(&Value::String("channel_closed".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    }));
+    })
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let beta_events = beta.events().await;
     assert!(
         !beta_events.iter().any(|event| {
             event.get("type") == Some(&Value::String("channel_data".into()))
                 && event.get("body") == Some(&Value::String("after close".into()))
         }),
-        "beta unexpectedly saw late host channel data after close:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&beta_output.stdout),
-        String::from_utf8_lossy(&beta_output.stderr)
+        "beta unexpectedly saw late host channel data after close:\n{}",
+        beta.debug_dump().await
     );
 
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
     Ok(())
 }
 
-fn parse_json_lines(output: &[u8]) -> Result<Vec<Value>> {
-    let stdout = String::from_utf8(output.to_vec()).context("stdout was not valid utf-8")?;
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<Value>(line).context("failed to parse stdout json line"))
-        .collect()
+struct MachineProc {
+    label: String,
+    child: Child,
+    stdin: Option<tokio::process::ChildStdin>,
+    stdout_rx: mpsc::UnboundedReceiver<Value>,
+    stderr_rx: mpsc::UnboundedReceiver<String>,
+    stdout_seen: Arc<Mutex<Vec<Value>>>,
+    stderr_seen: Arc<Mutex<Vec<String>>>,
 }
 
-fn contains_event(events: &[Value], event_type: &str) -> bool {
-    events
-        .iter()
-        .any(|event| event.get("type") == Some(&Value::String(event_type.into())))
+impl MachineProc {
+    async fn spawn(
+        role: &str,
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+    ) -> Result<Self> {
+        let bin = env!("CARGO_BIN_EXE_skyffla");
+        let mut command = Command::new(bin);
+        command
+            .arg(role)
+            .arg(room)
+            .arg("machine")
+            .arg("--server")
+            .arg(server_url)
+            .arg("--name")
+            .arg(name)
+            .arg("--json")
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn {role} process"))?;
+        let stdin = child.stdin.take().context("child stdin missing")?;
+        let stdout = child.stdout.take().context("child stdout missing")?;
+        let stderr = child.stderr.take().context("child stderr missing")?;
+
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        let (stderr_tx, stderr_rx) = mpsc::unbounded_channel();
+        let stdout_seen = Arc::new(Mutex::new(Vec::new()));
+        let stderr_seen = Arc::new(Mutex::new(Vec::new()));
+        spawn_stdout_reader(stdout, stdout_tx, stdout_seen.clone());
+        spawn_stderr_reader(stderr, stderr_tx, stderr_seen.clone());
+
+        Ok(Self {
+            label: format!("{role}:{name}"),
+            child,
+            stdin: Some(stdin),
+            stdout_rx,
+            stderr_rx,
+            stdout_seen,
+            stderr_seen,
+        })
+    }
+
+    async fn send(&mut self, line: &str) -> Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("{} stdin already closed", self.label))?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .with_context(|| format!("failed writing command to {}", self.label))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .with_context(|| format!("failed terminating command for {}", self.label))?;
+        stdin
+            .flush()
+            .await
+            .with_context(|| format!("failed flushing stdin for {}", self.label))?;
+        Ok(())
+    }
+
+    async fn expect_event<F>(&mut self, label: &str, predicate: F) -> Result<Value>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            if let Some(found) = self
+                .stdout_seen
+                .lock()
+                .await
+                .iter()
+                .find(|event| predicate(event))
+                .cloned()
+            {
+                return Ok(found);
+            }
+
+            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+                bail!(
+                    "timed out waiting for {} on {}\n{}",
+                    label,
+                    self.label,
+                    self.debug_dump().await
+                );
+            };
+
+            match tokio::time::timeout(timeout, self.stdout_rx.recv()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!(
+                    "stdout closed while waiting for {} on {}\n{}",
+                    label,
+                    self.label,
+                    self.debug_dump().await
+                ),
+                Err(_) => {
+                    bail!(
+                        "timed out waiting for {} on {}\n{}",
+                        label,
+                        self.label,
+                        self.debug_dump().await
+                    )
+                }
+            }
+        }
+    }
+
+    async fn expect_stderr_contains(&mut self, needle: &str) -> Result<()> {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            if self
+                .stderr_seen
+                .lock()
+                .await
+                .iter()
+                .any(|line| line.contains(needle))
+            {
+                return Ok(());
+            }
+
+            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+                bail!(
+                    "timed out waiting for stderr containing {:?} on {}\n{}",
+                    needle,
+                    self.label,
+                    self.debug_dump().await
+                );
+            };
+
+            match tokio::time::timeout(timeout, self.stderr_rx.recv()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!(
+                    "stderr closed while waiting for {:?} on {}\n{}",
+                    needle,
+                    self.label,
+                    self.debug_dump().await
+                ),
+                Err(_) => {
+                    bail!(
+                        "timed out waiting for stderr containing {:?} on {}\n{}",
+                        needle,
+                        self.label,
+                        self.debug_dump().await
+                    )
+                }
+            }
+        }
+    }
+
+    async fn events(&self) -> Vec<Value> {
+        self.stdout_seen.lock().await.clone()
+    }
+
+    async fn stderr_lines(&self) -> Vec<String> {
+        self.stderr_seen.lock().await.clone()
+    }
+
+    async fn debug_dump(&self) -> String {
+        let stdout = self
+            .stdout_seen
+            .lock()
+            .await
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let stderr = self.stderr_seen.lock().await.join("\n");
+        format!("stdout:\n{stdout}\n\nstderr:\n{stderr}")
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        if let Some(mut stdin) = self.stdin.take() {
+            let _ = stdin.shutdown().await;
+        }
+
+        if self.child.try_wait()?.is_none() {
+            self.child
+                .start_kill()
+                .with_context(|| format!("failed to kill {}", self.label))?;
+            let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for MachineProc {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+fn spawn_stdout_reader(
+    stdout: ChildStdout,
+    tx: mpsc::UnboundedSender<Value>,
+    seen: Arc<Mutex<Vec<Value>>>,
+) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                seen.lock().await.push(value.clone());
+                if tx.send(value).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_stderr_reader(
+    stderr: ChildStderr,
+    tx: mpsc::UnboundedSender<String>,
+    seen: Arc<Mutex<Vec<String>>>,
+) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            seen.lock().await.push(line.clone());
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn member_count(event: &Value) -> Option<usize> {
+    event.get("members").and_then(Value::as_array).map(Vec::len)
+}
+
+fn member_id_named(events: &[Value], name: &str) -> Option<String> {
+    for event in events {
+        if let Some(members) = event.get("members").and_then(Value::as_array) {
+            if let Some(member_id) = members.iter().find_map(|member| {
+                (member.get("name") == Some(&Value::String(name.into())))
+                    .then(|| member.get("member_id").and_then(Value::as_str))
+                    .flatten()
+            }) {
+                return Some(member_id.to_string());
+            }
+        }
+        if event.pointer("/member/name") == Some(&Value::String(name.into())) {
+            if let Some(member_id) = event.pointer("/member/member_id").and_then(Value::as_str) {
+                return Some(member_id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn linked_member_id_named(lines: &[String], name: &str) -> Option<String> {
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("event") == Some(&Value::String("room_link_connected".into()))
+            && value.get("member_name") == Some(&Value::String(name.into()))
+        {
+            if let Some(member_id) = value.get("member_id").and_then(Value::as_str) {
+                return Some(member_id.to_string());
+            }
+        }
+    }
+    None
 }
