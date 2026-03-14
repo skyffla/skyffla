@@ -16,7 +16,7 @@ use tokio::time::sleep;
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_secs(8);
+pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_secs(5);
 pub const LOCAL_JOIN_PROMOTION_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
@@ -178,6 +178,7 @@ pub fn unique_room_name() -> String {
         .as_nanos();
     format!("local-room-{nonce}")
 }
+
 
 pub async fn wait_for_server_ready(server_url: &str) -> Result<()> {
     let client = reqwest::Client::new();

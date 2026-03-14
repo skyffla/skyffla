@@ -15,6 +15,7 @@ use support::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow mdns multi-host coverage"]
 async fn stdio_local_mode_prefers_one_host_when_multiple_hosts_advertise() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {

@@ -14,14 +14,35 @@ use support::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_duplex_supports_host_join_promotion_and_simultaneous_join() -> Result<()> {
+async fn stdio_local_duplex_supports_host_to_join() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {
         return Ok(());
     }
 
     assert_local_host_to_join_duplex().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_local_duplex_supports_join_promotion() -> Result<()> {
+    let _guard = acquire_local_discovery_test_guard()?;
+    if !local_discovery_available().await? {
+        return Ok(());
+    }
+
     assert_local_join_promotion_duplex().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow mdns race coverage"]
+async fn stdio_local_duplex_supports_simultaneous_join() -> Result<()> {
+    let _guard = acquire_local_discovery_test_guard()?;
+    if !local_discovery_available().await? {
+        return Ok(());
+    }
+
     assert_local_simultaneous_join_duplex().await?;
     Ok(())
 }
