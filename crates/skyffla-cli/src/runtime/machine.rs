@@ -92,6 +92,11 @@ enum JoinPeerInput {
     },
 }
 
+enum LoopControl {
+    Continue,
+    Break,
+}
+
 pub(crate) async fn run_machine_host(
     config: &SessionConfig,
     sink: &EventSink,
@@ -112,23 +117,7 @@ pub(crate) async fn run_machine_host(
 
     let host_member = room.host_member().clone();
     let mut stdout = tokio::io::stdout();
-    emit_event(
-        &mut stdout,
-        &MachineEvent::RoomWelcome {
-            protocol_version: MACHINE_PROTOCOL_VERSION,
-            room_id: room.room_id().clone(),
-            self_member: host_member.clone(),
-            host_member: host_member.clone(),
-        },
-    )
-    .await?;
-    emit_event(
-        &mut stdout,
-        &MachineEvent::MemberSnapshot {
-            members: room.members().values().cloned().collect(),
-        },
-    )
-    .await?;
+    emit_initial_room_events(&mut stdout, &room, &host_member).await?;
 
     let (host_tx, mut host_rx) = mpsc::unbounded_channel();
     let stdin_handle = spawn_host_stdin_task(host_tx.clone());
@@ -144,124 +133,23 @@ pub(crate) async fn run_machine_host(
     let mut peers = BTreeMap::<MemberId, PeerHandle>::new();
 
     while let Some(input) = host_rx.recv().await {
-        match input {
-            HostInput::LocalCommand(command) => {
-                if let Err(error) = handle_host_command(
-                    &mut room,
-                    &host_member,
-                    command.clone(),
-                    &mut stdout,
-                    &mut peers,
-                )
-                .await
-                {
-                    emit_event(
-                        &mut stdout,
-                        &command_error_event("command_failed", &error.to_string(), command_channel_id(&command)),
-                    )
-                    .await?;
-                }
-            }
-            HostInput::LocalInputClosed => break,
-            HostInput::PeerConnected(connected) => {
-                if !machine_state_entered {
-                    enter_machine_state(session, sink, &config.stream_id)?;
-                    machine_state_entered = true;
-                }
-
-                let join_dispatch = room
-                    .join(
-                        connected.peer.peer_name.clone(),
-                        connected.peer.peer_fingerprint.clone(),
-                    )
-                    .map_err(room_error)?;
-                let member = join_dispatch.member.clone();
-                let member_id = member.member_id.clone();
-                let ticket = connected.peer.peer_ticket.clone();
-
-                let (authority_tx, authority_rx) = mpsc::unbounded_channel();
-                spawn_room_link_writer(connected.authority_send, authority_rx);
-                spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
-                let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-                spawn_room_link_writer(connected.peer_send, peer_rx);
-                spawn_host_peer_reader(connected.peer_recv, member_id.clone(), host_tx.clone());
-                let peer_handle = PeerHandle {
-                    authority_sender: authority_tx.clone(),
-                    peer_sender: peer_tx.clone(),
-                    member,
-                    ticket,
-                };
-                introduce_member_to_existing_peers(&peer_handle, &peers)?;
-                peers.insert(member_id.clone(), peer_handle);
-
-                for event in join_dispatch.to_joiner {
-                    send_link_message(
-                        &authority_tx,
-                        RoomLinkMessage::MachineEvent { event },
-                    )?;
-                }
-                deliver_routed_events(
-                    &host_member,
-                    join_dispatch.to_existing_members,
-                    &mut stdout,
-                    &mut peers,
-                )
-                .await?;
-
-                emit_peer_runtime_events(sink, &connected.peer, &connected.connection_status);
-                if let Some(trust) = remember_peer(&connected.peer)
-                    .map_err(|error| CliError::local_io(error.to_string()))?
-                {
-                    sink.emit_runtime_event(RuntimeEvent::PeerTrust {
-                        status: trust.status.to_string(),
-                        peer_name: trust.peer_name,
-                        peer_fingerprint: trust.peer_fingerprint,
-                        previous_name: trust.previous_name,
-                    });
-                }
-            }
-            HostInput::PeerCommand { member_id, command } => {
-                if peers.contains_key(&member_id) {
-                    if let Err(error) = handle_host_command(
-                        &mut room,
-                        &member_id,
-                        command.clone(),
-                        &mut stdout,
-                        &mut peers,
-                    )
-                    .await
-                    {
-                        send_command_error_to_peer(
-                            &member_id,
-                            &command,
-                            &error.to_string(),
-                            &peers,
-                        )?;
-                    }
-                }
-            }
-            HostInput::PeerEvent { event } => {
-                emit_event(&mut stdout, &event).await?;
-            }
-            HostInput::PeerDisconnected { member_id } => {
-                peers.remove(&member_id);
-                if let Ok(dispatch) = room.leave(&member_id, Some("peer disconnected".into())) {
-                    deliver_routed_events(
-                        &host_member,
-                        dispatch.to_remaining_members,
-                        &mut stdout,
-                        &mut peers,
-                    )
-                    .await?;
-                }
-            }
-            HostInput::PeerProtocolError { message } => {
-                emit_event(
-                    &mut stdout,
-                    &local_error("peer_protocol_error", &message),
-                )
-                .await?;
-            }
+        if matches!(
+            handle_host_input(
+                config,
+                sink,
+                session,
+                &host_member,
+                &host_tx,
+                &mut room,
+                &mut stdout,
+                &mut peers,
+                &mut machine_state_entered,
+                input,
+            )
+            .await?,
+            LoopControl::Break
+        ) {
+            break;
         }
     }
 
@@ -324,116 +212,29 @@ pub(crate) async fn run_machine_join_session(
     while !(input_closed && peer_closed) {
         tokio::select! {
             next_line = stdin_lines.next_line(), if !input_closed => {
-                match next_line
+                input_closed = handle_join_stdin_result(
+                    next_line
                     .context("failed reading machine command from stdin")
-                    .map_err(|error| CliError::local_io(error.to_string()))? {
-                    Some(line) => {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        if join_state.self_member.is_none() {
-                            emit_event(&mut stdout, &local_error("room_not_ready", "machine room is not ready yet")).await?;
-                            continue;
-                        }
-                        let command = parse_command(&line)?;
-                        if let Err(error) =
-                            handle_join_command(&mut join_state, send, command.clone(), &mut stdout).await
-                        {
-                            emit_event(
-                                &mut stdout,
-                                &command_error_event(
-                                    "command_failed",
-                                    &error.to_string(),
-                                    command_channel_id(&command),
-                                ),
-                            )
-                            .await?;
-                        }
-                    }
-                    None => {
-                        input_closed = true;
-                        let _ = send.finish();
-                    }
-                }
+                    .map_err(|error| CliError::local_io(error.to_string()))?,
+                    &mut join_state,
+                    send,
+                    &mut stdout,
+                )
+                .await?;
             }
             message = read_room_link_message(recv), if !peer_closed => {
-                match message? {
-                    Some(RoomLinkMessage::MachineEvent { event }) => {
-                        apply_machine_event(&mut join_state, &event);
-                        attach_pending_host_peer_link(&mut join_state);
-                        emit_event(&mut stdout, &event).await?;
-                    }
-                    Some(RoomLinkMessage::PeerIntroduction { member, ticket, connect }) => {
-                        if connect
-                            && !join_state.peer_links.contains_key(&member.member_id)
-                            && join_state.self_member.as_ref().is_some_and(|self_member| self_member != &member.member_id)
-                        {
-                            let Some(local_member) = join_state.local_member() else {
-                                emit_event(&mut stdout, &local_error("room_not_ready", "machine room is not ready yet")).await?;
-                                continue;
-                            };
-                            spawn_outbound_peer_link(
-                                config,
-                                transport.clone(),
-                                peer_tx.clone(),
-                                member,
-                                ticket,
-                                local_member,
-                                join_state.local_fingerprint.clone(),
-                                join_state.local_ticket.clone(),
-                            );
-                        }
-                    }
-                    Some(RoomLinkMessage::MachineCommand { .. }) => {
-                        return Err(CliError::protocol(
-                            "joiner received unexpected command on authority link",
-                        ));
-                    }
-                    None => {
-                        peer_closed = true;
-                    }
-                }
+                peer_closed = handle_join_authority_message(
+                    config,
+                    transport,
+                    &mut join_state,
+                    &mut stdout,
+                    peer_tx.clone(),
+                    message?,
+                )
+                .await?;
             }
             peer_input = peer_rx.recv() => {
-                match peer_input {
-                    Some(JoinPeerInput::Connected { member, sender }) => {
-                        join_state.peer_links.insert(member.member_id.clone(), sender);
-                        sink.emit_json_event(serde_json::json!({
-                            "event": "room_link_connected",
-                            "member_id": member.member_id,
-                            "member_name": member.name,
-                        }));
-                    }
-                    Some(JoinPeerInput::Event { member_id, event, strict_sender }) => {
-                        if strict_sender && !event_matches_sender(&member_id, &event) {
-                            emit_event(
-                                &mut stdout,
-                                &local_error(
-                                    "peer_protocol_error",
-                                    &format!(
-                                        "peer {} delivered an event with mismatched sender",
-                                        member_id.as_str()
-                                    ),
-                                ),
-                            )
-                            .await?;
-                            continue;
-                        }
-                        apply_machine_event(&mut join_state, &event);
-                        emit_event(&mut stdout, &event).await?;
-                    }
-                    Some(JoinPeerInput::Disconnected { member_id }) => {
-                        join_state.peer_links.remove(&member_id);
-                        sink.emit_json_event(serde_json::json!({
-                            "event": "room_link_disconnected",
-                            "member_id": member_id,
-                        }));
-                    }
-                    Some(JoinPeerInput::ProtocolError { message }) => {
-                        emit_event(&mut stdout, &local_error("peer_protocol_error", &message)).await?;
-                    }
-                    None => {}
-                }
+                handle_join_peer_input(sink, &mut join_state, &mut stdout, peer_input).await?;
             }
         }
     }
@@ -446,6 +247,321 @@ pub(crate) async fn run_machine_join_session(
         "role": "join",
     }));
 
+    Ok(())
+}
+
+async fn emit_initial_room_events(
+    stdout: &mut tokio::io::Stdout,
+    room: &RoomEngine,
+    host_member: &MemberId,
+) -> Result<(), CliError> {
+    emit_event(
+        stdout,
+        &MachineEvent::RoomWelcome {
+            protocol_version: MACHINE_PROTOCOL_VERSION,
+            room_id: room.room_id().clone(),
+            self_member: host_member.clone(),
+            host_member: host_member.clone(),
+        },
+    )
+    .await?;
+    emit_event(
+        stdout,
+        &MachineEvent::MemberSnapshot {
+            members: room.members().values().cloned().collect(),
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_host_input(
+    config: &SessionConfig,
+    sink: &EventSink,
+    session: &mut SessionMachine,
+    host_member: &MemberId,
+    host_tx: &mpsc::UnboundedSender<HostInput>,
+    room: &mut RoomEngine,
+    stdout: &mut tokio::io::Stdout,
+    peers: &mut BTreeMap<MemberId, PeerHandle>,
+    machine_state_entered: &mut bool,
+    input: HostInput,
+) -> Result<LoopControl, CliError> {
+    match input {
+        HostInput::LocalCommand(command) => {
+            if let Err(error) =
+                handle_host_command(room, host_member, command.clone(), stdout, peers).await
+            {
+                emit_event(
+                    stdout,
+                    &command_error_event(
+                        "command_failed",
+                        &error.to_string(),
+                        command_channel_id(&command),
+                    ),
+                )
+                .await?;
+            }
+            Ok(LoopControl::Continue)
+        }
+        HostInput::LocalInputClosed => Ok(LoopControl::Break),
+        HostInput::PeerConnected(connected) => {
+            handle_host_peer_connected(
+                config,
+                sink,
+                session,
+                host_member,
+                host_tx,
+                room,
+                stdout,
+                peers,
+                machine_state_entered,
+                connected,
+            )
+            .await?;
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PeerCommand { member_id, command } => {
+            if peers.contains_key(&member_id) {
+                if let Err(error) = handle_host_command(
+                    room,
+                    &member_id,
+                    command.clone(),
+                    stdout,
+                    peers,
+                )
+                .await
+                {
+                    send_command_error_to_peer(&member_id, &command, &error.to_string(), peers)?;
+                }
+            }
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PeerEvent { event } => {
+            emit_event(stdout, &event).await?;
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PeerDisconnected { member_id } => {
+            peers.remove(&member_id);
+            if let Ok(dispatch) = room.leave(&member_id, Some("peer disconnected".into())) {
+                deliver_routed_events(host_member, dispatch.to_remaining_members, stdout, peers)
+                    .await?;
+            }
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PeerProtocolError { message } => {
+            emit_event(stdout, &local_error("peer_protocol_error", &message)).await?;
+            Ok(LoopControl::Continue)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_host_peer_connected(
+    config: &SessionConfig,
+    sink: &EventSink,
+    session: &mut SessionMachine,
+    host_member: &MemberId,
+    host_tx: &mpsc::UnboundedSender<HostInput>,
+    room: &mut RoomEngine,
+    stdout: &mut tokio::io::Stdout,
+    peers: &mut BTreeMap<MemberId, PeerHandle>,
+    machine_state_entered: &mut bool,
+    connected: ConnectedPeer,
+) -> Result<(), CliError> {
+    if !*machine_state_entered {
+        enter_machine_state(session, sink, &config.stream_id)?;
+        *machine_state_entered = true;
+    }
+
+    let join_dispatch = room
+        .join(
+            connected.peer.peer_name.clone(),
+            connected.peer.peer_fingerprint.clone(),
+        )
+        .map_err(room_error)?;
+    let member = join_dispatch.member.clone();
+    let member_id = member.member_id.clone();
+    let ticket = connected.peer.peer_ticket.clone();
+
+    let (authority_tx, authority_rx) = mpsc::unbounded_channel();
+    spawn_room_link_writer(connected.authority_send, authority_rx);
+    spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
+    let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+    spawn_room_link_writer(connected.peer_send, peer_rx);
+    spawn_host_peer_reader(connected.peer_recv, member_id.clone(), host_tx.clone());
+    let peer_handle = PeerHandle {
+        authority_sender: authority_tx.clone(),
+        peer_sender: peer_tx.clone(),
+        member,
+        ticket,
+    };
+    introduce_member_to_existing_peers(&peer_handle, peers)?;
+    peers.insert(member_id, peer_handle);
+
+    for event in join_dispatch.to_joiner {
+        send_link_message(&authority_tx, RoomLinkMessage::MachineEvent { event })?;
+    }
+    deliver_routed_events(host_member, join_dispatch.to_existing_members, stdout, peers).await?;
+
+    emit_peer_runtime_events(sink, &connected.peer, &connected.connection_status);
+    if let Some(trust) = remember_peer(&connected.peer)
+        .map_err(|error| CliError::local_io(error.to_string()))?
+    {
+        sink.emit_runtime_event(RuntimeEvent::PeerTrust {
+            status: trust.status.to_string(),
+            peer_name: trust.peer_name,
+            peer_fingerprint: trust.peer_fingerprint,
+            previous_name: trust.previous_name,
+        });
+    }
+
+    Ok(())
+}
+
+async fn handle_join_stdin_result(
+    next_line: Option<String>,
+    join_state: &mut JoinState,
+    authority_send: &mut SendStream,
+    stdout: &mut tokio::io::Stdout,
+) -> Result<bool, CliError> {
+    match next_line {
+        Some(line) => {
+            if line.trim().is_empty() {
+                return Ok(false);
+            }
+            if join_state.self_member.is_none() {
+                emit_event(stdout, &local_error("room_not_ready", "machine room is not ready yet"))
+                    .await?;
+                return Ok(false);
+            }
+            let command = parse_command(&line)?;
+            if let Err(error) =
+                handle_join_command(join_state, authority_send, command.clone(), stdout).await
+            {
+                emit_event(
+                    stdout,
+                    &command_error_event(
+                        "command_failed",
+                        &error.to_string(),
+                        command_channel_id(&command),
+                    ),
+                )
+                .await?;
+            }
+            Ok(false)
+        }
+        None => {
+            let _ = authority_send.finish();
+            Ok(true)
+        }
+    }
+}
+
+async fn handle_join_authority_message(
+    config: &SessionConfig,
+    transport: &IrohTransport,
+    join_state: &mut JoinState,
+    stdout: &mut tokio::io::Stdout,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    message: Option<RoomLinkMessage>,
+) -> Result<bool, CliError> {
+    match message {
+        Some(RoomLinkMessage::MachineEvent { event }) => {
+            apply_machine_event(join_state, &event);
+            attach_pending_host_peer_link(join_state);
+            emit_event(stdout, &event).await?;
+            Ok(false)
+        }
+        Some(RoomLinkMessage::PeerIntroduction {
+            member,
+            ticket,
+            connect,
+        }) => {
+            if connect
+                && !join_state.peer_links.contains_key(&member.member_id)
+                && join_state
+                    .self_member
+                    .as_ref()
+                    .is_some_and(|self_member| self_member != &member.member_id)
+            {
+                let Some(local_member) = join_state.local_member() else {
+                    emit_event(
+                        stdout,
+                        &local_error("room_not_ready", "machine room is not ready yet"),
+                    )
+                    .await?;
+                    return Ok(false);
+                };
+                spawn_outbound_peer_link(
+                    config,
+                    transport.clone(),
+                    peer_tx,
+                    member,
+                    ticket,
+                    local_member,
+                    join_state.local_fingerprint.clone(),
+                    join_state.local_ticket.clone(),
+                );
+            }
+            Ok(false)
+        }
+        Some(RoomLinkMessage::MachineCommand { .. }) => Err(CliError::protocol(
+            "joiner received unexpected command on authority link",
+        )),
+        None => Ok(true),
+    }
+}
+
+async fn handle_join_peer_input(
+    sink: &EventSink,
+    join_state: &mut JoinState,
+    stdout: &mut tokio::io::Stdout,
+    peer_input: Option<JoinPeerInput>,
+) -> Result<(), CliError> {
+    match peer_input {
+        Some(JoinPeerInput::Connected { member, sender }) => {
+            join_state.peer_links.insert(member.member_id.clone(), sender);
+            sink.emit_json_event(serde_json::json!({
+                "event": "room_link_connected",
+                "member_id": member.member_id,
+                "member_name": member.name,
+            }));
+        }
+        Some(JoinPeerInput::Event {
+            member_id,
+            event,
+            strict_sender,
+        }) => {
+            if strict_sender && !event_matches_sender(&member_id, &event) {
+                emit_event(
+                    stdout,
+                    &local_error(
+                        "peer_protocol_error",
+                        &format!(
+                            "peer {} delivered an event with mismatched sender",
+                            member_id.as_str()
+                        ),
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+            apply_machine_event(join_state, &event);
+            emit_event(stdout, &event).await?;
+        }
+        Some(JoinPeerInput::Disconnected { member_id }) => {
+            join_state.peer_links.remove(&member_id);
+            sink.emit_json_event(serde_json::json!({
+                "event": "room_link_disconnected",
+                "member_id": member_id,
+            }));
+        }
+        Some(JoinPeerInput::ProtocolError { message }) => {
+            emit_event(stdout, &local_error("peer_protocol_error", &message)).await?;
+        }
+        None => {}
+    }
     Ok(())
 }
 

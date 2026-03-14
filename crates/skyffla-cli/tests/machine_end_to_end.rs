@@ -792,6 +792,256 @@ async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_broadcast_channel_data_reaches_host_and_other_joiners() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
+    for home in [&host_home, &beta_home, &gamma_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let bin = env!("CARGO_BIN_EXE_skyffla");
+
+    let mut host = Command::new(bin);
+    host.arg("host")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("host")
+        .arg("--json")
+        .env("HOME", &host_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut host = host.spawn().context("failed to spawn host process")?;
+
+    wait_for_stream_ready(&server.url, &room).await?;
+
+    let mut beta = Command::new(bin);
+    beta.arg("join")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("beta")
+        .arg("--json")
+        .env("HOME", &beta_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+
+    let mut gamma = Command::new(bin);
+    gamma.arg("join")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("gamma")
+        .arg("--json")
+        .env("HOME", &gamma_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut gamma = gamma.spawn().context("failed to spawn gamma process")?;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
+    beta_stdin
+        .write_all(
+            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#,
+        )
+        .await
+        .context("failed to write beta broadcast open channel command")?;
+    beta_stdin.write_all(b"\n").await?;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut gamma_stdin = gamma.stdin.take().context("gamma stdin missing")?;
+    gamma_stdin
+        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"fanout line"}"#)
+        .await
+        .context("failed to write gamma broadcast channel data command")?;
+    gamma_stdin.write_all(b"\n").await?;
+    drop(gamma_stdin);
+    drop(beta_stdin);
+    drop(host.stdin.take());
+
+    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
+        .await
+        .context("beta process watchdog timed out")?
+        .context("beta process failed while waiting for output")?;
+    let gamma_output = tokio::time::timeout(PROCESS_TIMEOUT, gamma.wait_with_output())
+        .await
+        .context("gamma process watchdog timed out")?
+        .context("gamma process failed while waiting for output")?;
+    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
+        .await
+        .context("host process watchdog timed out")?
+        .context("host process failed while waiting for output")?;
+
+    server.abort();
+
+    assert!(host_output.status.success());
+    assert!(beta_output.status.success());
+    assert!(gamma_output.status.success());
+
+    let host_events = parse_json_lines(&host_output.stdout)?;
+    let beta_events = parse_json_lines(&beta_output.stdout)?;
+    let gamma_events = parse_json_lines(&gamma_output.stdout)?;
+
+    assert!(host_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("channel_data".into()))
+            && event.get("from_name") == Some(&Value::String("gamma".into()))
+            && event.get("body") == Some(&Value::String("fanout line".into()))
+    }));
+    assert!(beta_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("channel_data".into()))
+            && event.get("from_name") == Some(&Value::String("gamma".into()))
+            && event.get("body") == Some(&Value::String("fanout line".into()))
+    }));
+    assert!(
+        !gamma_events.iter().any(|event| {
+            event.get("type") == Some(&Value::String("channel_data".into()))
+                && event.get("body") == Some(&Value::String("fanout line".into()))
+        }),
+        "gamma unexpectedly saw its own broadcast channel data:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&gamma_output.stdout),
+        String::from_utf8_lossy(&gamma_output.stderr)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let bin = env!("CARGO_BIN_EXE_skyffla");
+
+    let mut host = Command::new(bin);
+    host.arg("host")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("host")
+        .arg("--json")
+        .env("HOME", &host_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut host = host.spawn().context("failed to spawn host process")?;
+
+    wait_for_stream_ready(&server.url, &room).await?;
+
+    let mut beta = Command::new(bin);
+    beta.arg("join")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("beta")
+        .arg("--json")
+        .env("HOME", &beta_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
+    host_stdin
+        .write_all(
+            br#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m2"}}"#,
+        )
+        .await
+        .context("failed to write host open channel command")?;
+    host_stdin.write_all(b"\n").await?;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut beta_stdin = beta.stdin.take().context("beta stdin missing")?;
+    beta_stdin
+        .write_all(br#"{"type":"close_channel","channel_id":"c1","reason":"done"}"#)
+        .await
+        .context("failed to write beta close channel command")?;
+    beta_stdin.write_all(b"\n").await?;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    host_stdin
+        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"after close"}"#)
+        .await
+        .context("failed to write host late channel data command")?;
+    host_stdin.write_all(b"\n").await?;
+    drop(host_stdin);
+    drop(beta_stdin);
+
+    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
+        .await
+        .context("beta process watchdog timed out")?
+        .context("beta process failed while waiting for output")?;
+    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
+        .await
+        .context("host process watchdog timed out")?
+        .context("host process failed while waiting for output")?;
+
+    server.abort();
+
+    assert!(host_output.status.success());
+    assert!(beta_output.status.success());
+
+    let host_events = parse_json_lines(&host_output.stdout)?;
+    let beta_events = parse_json_lines(&beta_output.stdout)?;
+
+    assert!(host_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("error".into()))
+            && event.get("code") == Some(&Value::String("command_failed".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    }));
+    assert!(beta_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("channel_closed".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    }));
+    assert!(
+        !beta_events.iter().any(|event| {
+            event.get("type") == Some(&Value::String("channel_data".into()))
+                && event.get("body") == Some(&Value::String("after close".into()))
+        }),
+        "beta unexpectedly saw late host channel data after close:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&beta_output.stdout),
+        String::from_utf8_lossy(&beta_output.stderr)
+    );
+
+    Ok(())
+}
+
 fn parse_json_lines(output: &[u8]) -> Result<Vec<Value>> {
     let stdout = String::from_utf8(output.to_vec()).context("stdout was not valid utf-8")?;
     stdout

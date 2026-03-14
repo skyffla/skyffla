@@ -685,4 +685,72 @@ mod tests {
             .expect_err("rejected channel should be gone");
         assert!(matches!(err, RoomEngineError::UnknownChannel { .. }));
     }
+
+    #[test]
+    fn closing_channel_removes_it_from_future_routing() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("c1"),
+            ChannelKind::Machine,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("channel opens");
+
+        let closed = room
+            .close_channel(&host_member, &channel_id("c1"), Some("done".into()))
+            .expect("channel closes");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].recipient, beta.member.member_id);
+        assert!(matches!(closed[0].event, MachineEvent::ChannelClosed { .. }));
+
+        let err = room
+            .send_channel_data(&host_member, &channel_id("c1"), "after close".into())
+            .expect_err("closed channel should be gone");
+        assert!(matches!(err, RoomEngineError::UnknownChannel { .. }));
+    }
+
+    #[test]
+    fn broadcast_channel_includes_all_current_members() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let gamma = room.join("gamma", None).expect("gamma joins");
+
+        let opened = room
+            .open_channel(
+                &beta.member.member_id,
+                channel_id("c1"),
+                ChannelKind::Machine,
+                Route::All,
+                None,
+                None,
+                None,
+            )
+            .expect("channel opens");
+
+        assert_eq!(opened.len(), 2);
+        assert!(opened.iter().any(|event| event.recipient == member_id("m1")));
+        assert!(opened
+            .iter()
+            .any(|event| event.recipient == gamma.member.member_id));
+
+        let routed = room
+            .send_channel_data(&gamma.member.member_id, &channel_id("c1"), "fanout".into())
+            .expect("channel data routes");
+        assert_eq!(routed.len(), 2);
+        assert!(routed
+            .iter()
+            .any(|event| event.recipient == member_id("m1")));
+        assert!(routed
+            .iter()
+            .any(|event| event.recipient == beta.member.member_id));
+    }
 }
