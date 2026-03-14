@@ -32,11 +32,11 @@ Implemented so far:
 - in-band machine errors instead of process-level failures
 - blob-backed file and folder channels in `machine` mode via `iroh-blobs`
 - broadcast file acceptance / rejection now preserves per-recipient outcomes
+- in-band `machine` stdin commands for file send / accept / reject / export without raw JSON
 - rendezvous uses minimal exact room-id host lookup via `/v1/rooms/{room_id}`
 
 Not implemented yet:
 
-- file UX outside raw `machine` command entry
 - room-native TUI on the new room engine
 - a standalone wrapper-facing `machine` protocol spec
 - thin Python wrapper over the `machine` API
@@ -247,6 +247,7 @@ Current implementation status:
 - blob-backed file and folder / collection channels are implemented in `machine` mode
 - multi-recipient file accept / reject behavior now has direct coverage
 - raw inline `channel_data` is intentionally invalid for file channels
+- `machine` mode accepts structured in-band commands for file send/export and channel accept/reject/close, while keeping JSON as the canonical protocol format
 
 For `route = all`, the sender fans out to one direct peer channel per accepted recipient.
 

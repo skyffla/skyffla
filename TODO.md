@@ -4,11 +4,10 @@ This file tracks the remaining work in the order we should tackle it.
 
 ## Current Priority Order
 
-1. Finish the remaining file UX work
-2. Port the TUI onto the room engine
-3. Write the wrapper-facing `machine` protocol spec
-4. Build the thin Python wrapper
-5. Add `pipe` as a separate raw payload surface
+1. Port the TUI onto the room engine
+2. Write the wrapper-facing `machine` protocol spec
+3. Build the thin Python wrapper
+4. Add `pipe` as a separate raw payload surface
 
 ## 1. Rendezvous Cleanup
 
@@ -29,8 +28,8 @@ Exit criteria:
 - [x] Add end-to-end tests for folder round-trips
 - [x] Add multi-recipient file fanout coverage
 - [x] Add rejection / partial-failure coverage for multi-recipient file sends
-- [ ] Decide and implement the room-native CLI surface for file send/export outside raw JSON entry
-- [ ] Keep file-channel UX in-band and machine-friendly
+- [x] Decide and implement the room-native CLI surface for file send/export outside raw JSON entry
+- [x] Keep file-channel UX in-band and machine-friendly
 
 Exit criteria:
 

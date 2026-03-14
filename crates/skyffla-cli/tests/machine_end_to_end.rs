@@ -411,8 +411,8 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
         .await?;
 
     host.send(&format!(
-        r#"{{"type":"send_file","channel_id":"f1","to":{{"type":"member","member_id":"m2"}},"path":{}}}"#,
-        serde_json::to_string(&source_path.display().to_string())?
+        r#"/file send --channel f1 --to m2 --path "{}""#,
+        source_path.display()
     ))
     .await?;
     beta.expect_event("file opened from host", |event| {
@@ -422,8 +422,7 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
     })
     .await?;
 
-    beta.send(r#"{"type":"accept_channel","channel_id":"f1"}"#)
-        .await?;
+    beta.send("/channel accept f1").await?;
     beta.expect_event("file ready", |event| {
         event.get("type") == Some(&Value::String("channel_file_ready".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
@@ -431,8 +430,8 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
     .await?;
 
     beta.send(&format!(
-        r#"{{"type":"export_channel_file","channel_id":"f1","path":{}}}"#,
-        serde_json::to_string(&export_path.display().to_string())?
+        r#"/file export --channel f1 --path "{}""#,
+        export_path.display()
     ))
     .await?;
     beta.expect_event("file exported", |event| {
@@ -481,8 +480,8 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
         .await?;
 
     host.send(&format!(
-        r#"{{"type":"send_file","channel_id":"folder1","to":{{"type":"member","member_id":"m2"}},"path":{}}}"#,
-        serde_json::to_string(&source_dir.display().to_string())?
+        r#"/file send --channel folder1 --to m2 --path "{}""#,
+        source_dir.display()
     ))
     .await?;
     beta.expect_event("folder opened from host", |event| {
@@ -492,8 +491,7 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     })
     .await?;
 
-    beta.send(r#"{"type":"accept_channel","channel_id":"folder1"}"#)
-        .await?;
+    beta.send("/channel accept folder1").await?;
     beta.expect_event("folder ready", |event| {
         event.get("type") == Some(&Value::String("channel_file_ready".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
@@ -502,8 +500,8 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     .await?;
 
     beta.send(&format!(
-        r#"{{"type":"export_channel_file","channel_id":"folder1","path":{}}}"#,
-        serde_json::to_string(&export_dir.display().to_string())?
+        r#"/file export --channel folder1 --path "{}""#,
+        export_dir.display()
     ))
     .await?;
     beta.expect_event("folder exported", |event| {
@@ -565,8 +563,8 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
         .await?;
 
     host.send(&format!(
-        r#"{{"type":"send_file","channel_id":"f-all","to":{{"type":"all"}},"path":{}}}"#,
-        serde_json::to_string(&source_path.display().to_string())?
+        r#"/file send --channel f-all --to all --path "{}""#,
+        source_path.display()
     ))
     .await?;
     beta.expect_event("broadcast file opened", |event| {
@@ -581,11 +579,8 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
         })
         .await?;
 
-    beta.send(r#"{"type":"accept_channel","channel_id":"f-all"}"#)
-        .await?;
-    gamma
-        .send(r#"{"type":"reject_channel","channel_id":"f-all","reason":"busy"}"#)
-        .await?;
+    beta.send("/channel accept f-all").await?;
+    gamma.send("/channel reject f-all busy").await?;
 
     beta.expect_event("broadcast file ready", |event| {
         event.get("type") == Some(&Value::String("channel_file_ready".into()))
@@ -600,8 +595,8 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     .await?;
 
     beta.send(&format!(
-        r#"{{"type":"export_channel_file","channel_id":"f-all","path":{}}}"#,
-        serde_json::to_string(&export_path.display().to_string())?
+        r#"/file export --channel f-all --path "{}""#,
+        export_path.display()
     ))
     .await?;
     beta.expect_event("broadcast file exported", |event| {

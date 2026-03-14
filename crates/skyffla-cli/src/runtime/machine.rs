@@ -25,6 +25,7 @@ use crate::cli_error::CliError;
 use crate::config::SessionConfig;
 use crate::local_state::local_state_file_path;
 use crate::net::framing::write_framed;
+use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
     spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_download,
@@ -1187,10 +1188,18 @@ async fn deliver_routed_events(
 }
 
 fn parse_command(line: &str) -> Result<MachineCommand, CliError> {
-    let command: MachineCommand =
-        serde_json::from_str(line).map_err(|error| CliError::usage(error.to_string()))?;
-    command.validate().map_err(protocol_error)?;
-    Ok(command)
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::usage("machine command must not be empty"));
+    }
+    if trimmed.starts_with('{') {
+        let command: MachineCommand =
+            serde_json::from_str(trimmed).map_err(|error| CliError::usage(error.to_string()))?;
+        command.validate().map_err(protocol_error)?;
+        Ok(command)
+    } else {
+        parse_machine_command_line(trimmed)
+    }
 }
 
 fn local_error(code: &str, message: &str) -> MachineEvent {
