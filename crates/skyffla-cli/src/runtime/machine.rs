@@ -293,6 +293,13 @@ async fn handle_host_input(
         }
         HostInput::PeerLinkReady { member_id, sender } => {
             if let Some(peer) = peers.get_mut(&member_id) {
+                let pending_events = std::mem::take(&mut peer.pending_events);
+                for event in pending_events {
+                    send_link_message(
+                        &sender,
+                        PeerLinkMessage::MachineEvent { event },
+                    )?;
+                }
                 peer.peer_sender = Some(sender);
                 sink.emit_json_event(serde_json::json!({
                     "event": "room_link_connected",
@@ -391,6 +398,7 @@ async fn handle_host_peer_connected(
         peer_sender: None,
         member,
         ticket,
+        pending_events: Vec::new(),
     };
     introduce_member_to_existing_peers(&peer_handle, peers)?;
     peers.insert(member_id, peer_handle);
@@ -1158,13 +1166,13 @@ async fn handle_host_command(
 async fn deliver_routed_events(
     host_member: &MemberId,
     routed_events: Vec<RoutedEvent>,
-    stdout: &mut tokio::io::Stdout,
+    _stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
 ) -> Result<(), CliError> {
     for routed in routed_events {
         if &routed.recipient == host_member {
-            emit_event(stdout, &routed.event).await?;
-        } else if let Some(peer) = peers.get(&routed.recipient) {
+            emit_event(_stdout, &routed.event).await?;
+        } else if let Some(peer) = peers.get_mut(&routed.recipient) {
             if let Some(sender) = &peer.peer_sender {
                 send_link_message(
                     sender,
@@ -1173,14 +1181,7 @@ async fn deliver_routed_events(
                     },
                 )?;
             } else {
-                emit_event(
-                    stdout,
-                    &local_error(
-                        "peer_not_connected",
-                        &format!("no direct room link to {}", routed.recipient.as_str()),
-                    ),
-                )
-                .await?;
+                peer.pending_events.push(routed.event);
             }
         }
     }

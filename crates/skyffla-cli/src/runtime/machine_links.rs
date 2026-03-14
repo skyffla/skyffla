@@ -27,6 +27,7 @@ pub(crate) struct PeerHandle {
     pub(crate) peer_sender: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     pub(crate) member: Member,
     pub(crate) ticket: Option<String>,
+    pub(crate) pending_events: Vec<MachineEvent>,
 }
 
 #[derive(Debug)]
