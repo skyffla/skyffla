@@ -27,6 +27,7 @@ struct JoinState {
     host_member: Option<MemberId>,
     members: BTreeMap<MemberId, Member>,
     peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<RoomLinkMessage>>,
+    pending_host_peer_link: Option<mpsc::UnboundedSender<RoomLinkMessage>>,
     local_name: String,
     local_fingerprint: Option<String>,
     local_ticket: String,
@@ -36,13 +37,16 @@ struct JoinState {
 struct ConnectedPeer {
     peer: SessionPeer,
     connection_status: ConnectionStatus,
-    send: SendStream,
-    recv: RecvStream,
+    authority_send: SendStream,
+    authority_recv: RecvStream,
+    peer_send: SendStream,
+    peer_recv: RecvStream,
 }
 
 #[derive(Debug)]
 struct PeerHandle {
-    sender: mpsc::UnboundedSender<RoomLinkMessage>,
+    authority_sender: mpsc::UnboundedSender<RoomLinkMessage>,
+    peer_sender: mpsc::UnboundedSender<RoomLinkMessage>,
     member: Member,
     ticket: Option<String>,
 }
@@ -76,6 +80,7 @@ enum JoinPeerInput {
     Event {
         member_id: MemberId,
         event: MachineEvent,
+        strict_sender: bool,
     },
     Disconnected {
         member_id: MemberId,
@@ -165,11 +170,15 @@ pub(crate) async fn run_machine_host(
                 let member_id = member.member_id.clone();
                 let ticket = connected.peer.peer_ticket.clone();
 
+                let (authority_tx, authority_rx) = mpsc::unbounded_channel();
+                spawn_room_link_writer(connected.authority_send, authority_rx);
+                spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
                 let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-                spawn_peer_writer(connected.send, peer_rx);
-                spawn_peer_reader(connected.recv, member_id.clone(), host_tx.clone());
+                spawn_room_link_writer(connected.peer_send, peer_rx);
+                spawn_host_peer_reader(connected.peer_recv, member_id.clone(), host_tx.clone());
                 let peer_handle = PeerHandle {
-                    sender: peer_tx.clone(),
+                    authority_sender: authority_tx.clone(),
+                    peer_sender: peer_tx.clone(),
                     member,
                     ticket,
                 };
@@ -177,7 +186,10 @@ pub(crate) async fn run_machine_host(
                 peers.insert(member_id.clone(), peer_handle);
 
                 for event in join_dispatch.to_joiner {
-                    send_link_message(&peer_tx, RoomLinkMessage::MachineEvent { event })?;
+                    send_link_message(
+                        &authority_tx,
+                        RoomLinkMessage::MachineEvent { event },
+                    )?;
                 }
                 deliver_routed_events(
                     &host_member,
@@ -245,6 +257,7 @@ pub(crate) async fn run_machine_join_session(
     config: &SessionConfig,
     sink: &EventSink,
     transport: &IrohTransport,
+    connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
     local_fingerprint: Option<String>,
@@ -261,10 +274,20 @@ pub(crate) async fn run_machine_join_session(
         host_member: None,
         members: BTreeMap::new(),
         peer_links: BTreeMap::new(),
+        pending_host_peer_link: None,
         local_name: config.peer_name.clone(),
         local_fingerprint,
         local_ticket,
     };
+
+    let (host_peer_send, host_peer_recv) = connection
+        .accept_data_stream()
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
+    let (host_peer_tx, host_peer_rx) = mpsc::unbounded_channel();
+    join_state.pending_host_peer_link = Some(host_peer_tx.clone());
+    spawn_room_link_writer(host_peer_send, host_peer_rx);
+    spawn_join_peer_reader(host_peer_recv, member_id_placeholder(), peer_tx.clone(), false);
 
     let accept_handle = spawn_join_accept_loop(
         config,
@@ -301,6 +324,7 @@ pub(crate) async fn run_machine_join_session(
                 match message? {
                     Some(RoomLinkMessage::MachineEvent { event }) => {
                         apply_authority_event(&mut join_state, &event);
+                        attach_pending_host_peer_link(&mut join_state);
                         emit_event(&mut stdout, &event).await?;
                     }
                     Some(RoomLinkMessage::PeerIntroduction { member, ticket, connect }) => {
@@ -344,8 +368,8 @@ pub(crate) async fn run_machine_join_session(
                             "member_name": member.name,
                         }));
                     }
-                    Some(JoinPeerInput::Event { member_id, event }) => {
-                        if !event_matches_sender(&member_id, &event) {
+                    Some(JoinPeerInput::Event { member_id, event, strict_sender }) => {
+                        if strict_sender && !event_matches_sender(&member_id, &event) {
                             emit_event(
                                 &mut stdout,
                                 &local_error(
@@ -487,31 +511,37 @@ async fn accept_machine_peer(
     local_fingerprint: Option<&str>,
     local_ticket: Option<&str>,
 ) -> Result<ConnectedPeer, CliError> {
-    let (mut send, mut recv) = connection
+    let (mut authority_send, mut authority_recv) = connection
         .accept_control_stream()
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
     let peer = exchange_hello(
         config,
         &config.stream_id,
-        &mut send,
-        &mut recv,
+        &mut authority_send,
+        &mut authority_recv,
         local_fingerprint,
         local_ticket,
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))?;
+    let (peer_send, peer_recv) = connection
+        .open_data_stream()
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
     let connection_status = transport.connection_status(&connection).await;
 
     Ok(ConnectedPeer {
         peer,
         connection_status,
-        send,
-        recv,
+        authority_send,
+        authority_recv,
+        peer_send,
+        peer_recv,
     })
 }
 
-fn spawn_peer_writer(
+fn spawn_room_link_writer(
     mut send: SendStream,
     mut rx: mpsc::UnboundedReceiver<RoomLinkMessage>,
 ) -> tokio::task::JoinHandle<()> {
@@ -532,7 +562,7 @@ fn spawn_peer_writer(
     })
 }
 
-fn spawn_peer_reader(
+fn spawn_host_authority_reader(
     mut recv: RecvStream,
     member_id: MemberId,
     host_tx: mpsc::UnboundedSender<HostInput>,
@@ -588,6 +618,51 @@ fn spawn_peer_reader(
     })
 }
 
+fn spawn_host_peer_reader(
+    mut recv: RecvStream,
+    member_id: MemberId,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match read_room_link_message(&mut recv).await {
+                Ok(Some(RoomLinkMessage::MachineEvent { event })) => {
+                    if host_tx.send(HostInput::PeerEvent { event }).is_err() {
+                        break;
+                    }
+                }
+                Ok(Some(other)) => {
+                    let _ = host_tx.send(HostInput::PeerProtocolError {
+                        message: format!(
+                            "peer {} sent unexpected peer-link message {other:?}",
+                            member_id.as_str()
+                        ),
+                    });
+                    let _ = host_tx.send(HostInput::PeerDisconnected {
+                        member_id: member_id.clone(),
+                    });
+                    break;
+                }
+                Ok(None) => {
+                    let _ = host_tx.send(HostInput::PeerDisconnected {
+                        member_id: member_id.clone(),
+                    });
+                    break;
+                }
+                Err(error) => {
+                    let _ = host_tx.send(HostInput::PeerProtocolError {
+                        message: error.to_string(),
+                    });
+                    let _ = host_tx.send(HostInput::PeerDisconnected {
+                        member_id: member_id.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+    })
+}
+
 fn spawn_join_accept_loop(
     config: &SessionConfig,
     transport: IrohTransport,
@@ -615,17 +690,16 @@ fn spawn_join_accept_loop(
                 continue;
             }
 
-            match accept_machine_peer(
+            match accept_peer_link(
                 &config,
-                &transport,
                 connection,
                 local_fingerprint.as_deref(),
                 Some(local_ticket.as_str()),
             )
             .await
             {
-                Ok(connected) => {
-                    spawn_inbound_peer_link(connected, peer_tx.clone());
+                Ok((peer, send, recv)) => {
+                    spawn_inbound_peer_link(peer, send, recv, peer_tx.clone());
                 }
                 Err(error) => {
                     let _ = peer_tx.send(JoinPeerInput::ProtocolError {
@@ -637,21 +711,50 @@ fn spawn_join_accept_loop(
     })
 }
 
+async fn accept_peer_link(
+    config: &SessionConfig,
+    connection: IrohConnection,
+    local_fingerprint: Option<&str>,
+    local_ticket: Option<&str>,
+) -> Result<(SessionPeer, SendStream, RecvStream), CliError> {
+    let (mut send, mut recv) = connection
+        .accept_control_stream()
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
+    let peer = exchange_hello(
+        config,
+        &config.stream_id,
+        &mut send,
+        &mut recv,
+        local_fingerprint,
+        local_ticket,
+    )
+    .await
+    .map_err(|error| CliError::protocol(error.to_string()))?;
+    Ok((peer, send, recv))
+}
+
 fn spawn_inbound_peer_link(
-    connected: ConnectedPeer,
+    peer: SessionPeer,
+    send: SendStream,
+    mut recv: RecvStream,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
 ) {
     tokio::spawn(async move {
-        let ConnectedPeer {
-            send,
-            mut recv,
-            ..
-        } = connected;
         match read_room_link_message(&mut recv).await {
             Ok(Some(RoomLinkMessage::PeerIntroduction { member, .. })) => {
+                if peer.peer_name != member.name {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: format!(
+                            "peer introduction name mismatch: hello={} intro={}",
+                            peer.peer_name, member.name
+                        ),
+                    });
+                    return;
+                }
                 let (sender, rx) = mpsc::unbounded_channel();
-                spawn_peer_writer(send, rx);
-                spawn_join_peer_reader(recv, member.member_id.clone(), peer_tx.clone());
+                spawn_room_link_writer(send, rx);
+                spawn_join_peer_reader(recv, member.member_id.clone(), peer_tx.clone(), true);
                 let _ = peer_tx.send(JoinPeerInput::Connected { member, sender });
             }
             Ok(Some(other)) => {
@@ -740,8 +843,8 @@ fn spawn_outbound_peer_link(
         }
 
         let (sender, rx) = mpsc::unbounded_channel();
-        spawn_peer_writer(send, rx);
-        spawn_join_peer_reader(recv, target.member_id.clone(), peer_tx.clone());
+        spawn_room_link_writer(send, rx);
+        spawn_join_peer_reader(recv, target.member_id.clone(), peer_tx.clone(), true);
         let _ = peer_tx.send(JoinPeerInput::Connected { member: target, sender });
     });
 }
@@ -750,6 +853,7 @@ fn spawn_join_peer_reader(
     mut recv: RecvStream,
     member_id: MemberId,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    strict_sender: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -759,6 +863,7 @@ fn spawn_join_peer_reader(
                         .send(JoinPeerInput::Event {
                             member_id: member_id.clone(),
                             event,
+                            strict_sender,
                         })
                         .is_err()
                     {
@@ -811,7 +916,7 @@ fn introduce_member_to_existing_peers(
             .clone()
             .ok_or_else(|| CliError::protocol("existing peer missing ticket"))?;
         send_link_message(
-            &new_peer.sender,
+            &new_peer.authority_sender,
             RoomLinkMessage::PeerIntroduction {
                 member: existing.member.clone(),
                 ticket: existing_ticket,
@@ -819,7 +924,7 @@ fn introduce_member_to_existing_peers(
             },
         )?;
         send_link_message(
-            &existing.sender,
+            &existing.authority_sender,
             RoomLinkMessage::PeerIntroduction {
                 member: new_peer.member.clone(),
                 ticket: new_ticket.clone(),
@@ -890,6 +995,18 @@ fn apply_authority_event(state: &mut JoinState, event: &MachineEvent) {
     }
 }
 
+fn attach_pending_host_peer_link(state: &mut JoinState) {
+    let Some(host_member) = state.host_member.clone() else {
+        return;
+    };
+    if state.peer_links.contains_key(&host_member) {
+        return;
+    }
+    if let Some(sender) = state.pending_host_peer_link.take() {
+        state.peer_links.insert(host_member, sender);
+    }
+}
+
 async fn handle_join_command(
     state: &mut JoinState,
     authority_send: &mut SendStream,
@@ -911,17 +1028,7 @@ async fn handle_join_command(
                 text,
             };
             for recipient in join_chat_recipients(&self_member, &to, &state.members)? {
-                if state.host_member.as_ref().is_some_and(|host| host == &recipient) {
-                    write_framed(
-                        authority_send,
-                        &RoomLinkMessage::MachineEvent {
-                            event: event.clone(),
-                        },
-                        "room link event",
-                    )
-                    .await
-                    .map_err(|error| CliError::protocol(error.to_string()))?;
-                } else if let Some(peer) = state.peer_links.get(&recipient) {
+                if let Some(peer) = state.peer_links.get(&recipient) {
                     send_link_message(
                         peer,
                         RoomLinkMessage::MachineEvent {
@@ -969,6 +1076,10 @@ fn join_chat_recipients(
             Ok(vec![member_id.clone()])
         }
     }
+}
+
+fn member_id_placeholder() -> MemberId {
+    MemberId::new("pending-host").expect("static placeholder member id should be valid")
 }
 
 fn event_matches_sender(member_id: &MemberId, event: &MachineEvent) -> bool {
@@ -1096,7 +1207,7 @@ async fn deliver_routed_events(
             emit_event(stdout, &routed.event).await?;
         } else if let Some(peer) = peers.get(&routed.recipient) {
             send_link_message(
-                &peer.sender,
+                &peer.peer_sender,
                 RoomLinkMessage::MachineEvent {
                     event: routed.event,
                 },
@@ -1114,7 +1225,7 @@ async fn deliver_channel_reply(
 ) -> Result<(), CliError> {
     if let Some(peer) = peers.get(sender) {
         send_link_message(
-            &peer.sender,
+            &peer.peer_sender,
             RoomLinkMessage::MachineEvent {
                 event,
             },

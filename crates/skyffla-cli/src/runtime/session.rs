@@ -115,6 +115,7 @@ pub(crate) async fn run_connected_session(
             config,
             sink,
             transport,
+            &connection,
             &mut send,
             &mut recv,
             Some(identity.fingerprint.clone()),
