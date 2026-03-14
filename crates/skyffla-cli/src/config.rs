@@ -66,6 +66,7 @@ pub(crate) enum Role {
     Join,
 }
 
+#[derive(Clone)]
 pub(crate) struct SessionConfig {
     pub(crate) role: Role,
     pub(crate) stream_id: String,

@@ -14,6 +14,7 @@ use crate::net::local_discovery::{
     LocalJoinDecision,
 };
 use crate::net::rendezvous::{delete_stream, register_stream, resolve_stream, RegisterStreamError};
+use crate::runtime::machine::run_machine_host;
 use crate::runtime::session::run_connected_session;
 
 pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
@@ -249,6 +250,16 @@ async fn wait_for_incoming_peer(
         );
     }
 
+    if config.machine {
+        let result = run_machine_host(config, sink, session, &transport).await;
+        let delete_result = delete_stream(client, config)
+            .await
+            .map_err(|error| CliError::rendezvous(error.to_string()));
+        transport.close().await;
+        delete_result?;
+        return result;
+    }
+
     let connection = transport
         .accept_connection()
         .await
@@ -293,6 +304,12 @@ async fn wait_for_incoming_peer_local(
             "waiting for local peer on stream {} via mDNS discovery",
             config.stream_id
         );
+    }
+
+    if config.machine {
+        let result = run_machine_host(config, sink, session, &transport).await;
+        transport.close().await;
+        return result;
     }
 
     let connection = transport

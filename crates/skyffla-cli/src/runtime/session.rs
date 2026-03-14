@@ -12,7 +12,7 @@ use crate::local_state::local_state_file_path;
 use crate::net::framing::read_envelope;
 use crate::runtime::handshake::{exchange_hello, handle_post_handshake_message, send_chat_message};
 use crate::runtime::interactive::run_interactive_chat_loop;
-use crate::runtime::machine::run_machine_session;
+use crate::runtime::machine::run_machine_join_session;
 use crate::runtime::stdio::run_stdio_session;
 use crate::ui::UiState;
 
@@ -110,18 +110,8 @@ pub(crate) async fn run_connected_session(
                 .map_err(|error| CliError::protocol(error.to_string()))?;
         }
     } else if config.machine {
-        run_machine_session(
-            &session_id,
-            sink,
-            &mut send,
-            &mut recv,
-            is_host,
-            &config.peer_name,
-            Some(identity.fingerprint.clone()),
-            &peer.peer_name,
-            peer.peer_fingerprint.clone(),
-        )
-        .await?;
+        debug_assert!(!is_host, "machine host path should use run_machine_host");
+        run_machine_join_session(&session_id, sink, &mut send, &mut recv).await?;
     } else if config.stdio {
         run_stdio_session(sink, &session_id, &connection, &mut send, &mut recv, is_host).await?;
     } else {
