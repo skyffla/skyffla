@@ -1,6 +1,6 @@
 # Skyffla Room / Mesh Design
 
-Status: draft
+Status: in progress
 
 ## Goal
 
@@ -19,6 +19,27 @@ This is not a full network mesh in v1. It is a native multiparty product model w
 - direct peer-to-peer payload channels
 
 One host process hosts one room.
+
+## Current Status
+
+Implemented so far:
+
+- room-native protocol types in `skyffla-protocol`
+- host-owned room engine in `skyffla-session`
+- `machine` client surface in the CLI
+- direct peer chat over peer links
+- direct `machine` channel traffic over peer links
+- in-band machine errors instead of process-level failures
+- blob-backed single-file channels in `machine` mode via `iroh-blobs`
+
+Not implemented yet:
+
+- folder / collection transfer on top of `iroh-blobs`
+- multiparty file fanout polish and file UX outside `machine`
+- room-native TUI on the new room engine
+- a standalone wrapper-facing `machine` protocol spec
+- thin Python wrapper over the `machine` API
+- raw `pipe` on top of the room model
 
 ## Naming
 
@@ -98,7 +119,8 @@ V1 channel kinds:
 Important distinction:
 
 - `machine` channels are a Skyffla-native data path
-- `file` and folder payloads should reuse `iroh-blobs` for the data plane
+- `file` payloads should reuse `iroh-blobs` for the data plane
+- folders should be represented as blob collections rather than custom streamed archives
 - `clipboard` can stay Skyffla-native unless it later benefits from the same blob path
 
 The key rule is:
@@ -218,6 +240,12 @@ For `machine` channels, that means Skyffla peer links.
 
 For `file` or folder channels, that means a blob transfer keyed by blob or
 collection metadata, not a custom raw byte stream invented in the room runtime.
+
+Current implementation status:
+
+- single-file blob-backed channels are implemented in `machine` mode
+- folder / collection channels are the next file milestone
+- raw inline `channel_data` is intentionally invalid for file channels
 
 For `route = all`, the sender fans out to one direct peer channel per accepted recipient.
 
@@ -660,6 +688,8 @@ The build should happen in stages, but each stage should move toward the final n
 
 ### Phase 1: Canonical protocol reshape
 
+Status: done
+
 Goals:
 
 - introduce room/member/channel terminology in `skyffla-protocol`
@@ -681,6 +711,8 @@ Tests:
 - schema consistency tests for channel lifecycle types
 
 ### Phase 2: Core room engine in Rust
+
+Status: done
 
 Goals:
 
@@ -706,6 +738,8 @@ Tests:
 
 ### Phase 3: Machine adapter
 
+Status: done
+
 Goals:
 
 - expose room commands/events through `machine`
@@ -724,24 +758,9 @@ Tests:
 - machine client targets a single member
 - machine client opens and closes a machine channel
 
-### Phase 4: TUI adapter on top of room engine
+### Phase 4: Direct payload channels
 
-Goals:
-
-- port interactive mode to room-native state
-- support room member UI and routing commands
-
-Output:
-
-- human-facing room client using the same core as stdio
-
-Tests:
-
-- command parsing for member targeting
-- integration tests for broadcast and direct chat
-- room UI state updates on join/leave
-
-### Phase 5: Direct payload channels
+Status: mostly done for `machine`; file path is in progress
 
 Goals:
 
@@ -767,7 +786,9 @@ Non-goals for this phase:
 - do not build a new custom mesh file/folder byte-stream implementation
 - do not port the old 1:1 file/folder transfer path into rooms
 
-### Phase 6: Blob-backed files and folders
+### Phase 5: Blob-backed files and folders
+
+Status: in progress
 
 Goals:
 
@@ -781,6 +802,18 @@ Output:
 - Skyffla-controlled file/folder UX with `iroh-blobs` as the data plane
 - clear separation between room authorization and blob transfer
 
+Implemented so far:
+
+- single-file blob-backed channels in `machine` mode
+- local file import, remote fetch, and local export on top of the shared transport endpoint
+- file-channel validation that rejects inline `channel_data`
+
+Remaining work:
+
+- folder / collection support
+- multi-recipient file acceptance and failure isolation coverage
+- file UX outside `machine`
+
 Tests:
 
 - offer file to one member, accept, transfer by blob metadata
@@ -789,7 +822,28 @@ Tests:
 - rejecting one recipient does not affect the others
 - resuming or reusing already-present content works when supported by `iroh-blobs`
 
+### Phase 6: TUI adapter on top of room engine
+
+Status: not started
+
+Goals:
+
+- port interactive mode to room-native state
+- support room member UI and routing commands
+
+Output:
+
+- human-facing room client using the same core as stdio
+
+Tests:
+
+- command parsing for member targeting
+- integration tests for broadcast and direct chat
+- room UI state updates on join/leave
+
 ### Phase 7: `pipe`
+
+Status: not started
 
 Goals:
 
@@ -807,7 +861,27 @@ Tests:
 - `pipe --to all`
 - buffered stdin replay for multi-recipient fanout if required
 
-### Phase 8: Python wrapper
+### Phase 8: Wrapper-facing protocol docs
+
+Status: not started
+
+Goals:
+
+- write a clean standalone `machine` protocol spec for wrapper authors
+- document command and event shapes independently of runtime internals
+- document host-authority vs peer-delivered behavior at the contract level
+
+Output:
+
+- a wrapper-facing machine protocol document that matches the Rust schema
+
+Tests:
+
+- example command/event payloads stay in sync with protocol types
+
+### Phase 9: Python wrapper
+
+Status: not started
 
 Goals:
 
@@ -827,6 +901,19 @@ Tests:
 - wrapper can send room chat
 - wrapper can open a machine channel
 - wrapper receives typed events matching the Rust schema
+
+## Remaining Execution Order
+
+From the current state, the recommended order is:
+
+1. finish file-related work
+   - folder / collection support
+   - multiparty file fanout and rejection coverage
+   - file UX polish outside raw `machine` command entry
+2. port the TUI onto the room engine
+3. document the wrapper-facing `machine` contract cleanly
+4. build the thin Python wrapper on top of that contract
+5. add raw `pipe` as a separate surface after the wrapper-facing contract is stable
 
 ## Test Strategy
 
@@ -896,6 +983,9 @@ The first milestone is:
 - a room-native Rust protocol
 - a room-native Rust runtime
 - broadcast and 1:1 routing under one model
+
+That milestone is complete. The current frontier is blob-backed file/folder work,
+then TUI, then wrappers.
 
 ## Summary
 
