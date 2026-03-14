@@ -36,7 +36,7 @@ Join a session, or create it if nobody is there yet:
 skyffla join copper-731
 ```
 
-The first peer waits. The next peer connects with the same command:
+The first peer hosts the room and waits in the default TUI. The next peer connects with the same command:
 
 ```sh
 skyffla join copper-731
@@ -47,6 +47,32 @@ Use explicit host mode when you want deterministic automation:
 ```sh
 skyffla host copper-731
 ```
+
+The default human surface is room-native:
+
+- plain text sends room broadcast chat
+- `/msg <member_id> <text>` sends a direct message
+- `/members` shows the live roster
+- `/send <member_id|all> <path>` offers a file or folder
+- `/save <channel_id> <path>` exports an accepted file or folder
+
+Use the `machine` surface for wrappers and automation:
+
+```sh
+skyffla host copper-731 machine
+```
+
+```sh
+skyffla join copper-731 machine
+```
+
+In `machine` mode:
+
+- commands are newline-delimited JSON on `stdin`
+- events are newline-delimited JSON on `stdout`
+- runtime logs stay on `stderr`
+
+The public machine contract is documented in [`docs/machine-protocol.md`](docs/machine-protocol.md).
 
 Use local discovery on the same LAN without rendezvous. Both peers can use `join --local`:
 

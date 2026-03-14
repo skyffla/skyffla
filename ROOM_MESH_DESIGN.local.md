@@ -35,10 +35,10 @@ Implemented so far:
 - in-band `machine` stdin commands for file send / accept / reject / export without raw JSON
 - rendezvous uses minimal exact room-id host lookup via `/v1/rooms/{room_id}`
 - default TUI now fronts the room engine by spawning the internal `machine` backend and rendering room events / commands as a human UI
+- standalone wrapper-facing `machine` protocol docs now live in `docs/machine-protocol.md`
 
 Not implemented yet:
 
-- a standalone wrapper-facing `machine` protocol spec
 - thin Python wrapper over the `machine` API
 - raw `pipe` on top of the room model
 

@@ -4,10 +4,10 @@ This file tracks the remaining work in the order we should tackle it.
 
 ## Current Priority Order
 
-1. Port the TUI onto the room engine
-2. Write the wrapper-facing `machine` protocol spec
-3. Build the thin Python wrapper
-4. Add `pipe` as a separate raw payload surface
+1. Add `pipe` as a separate raw payload surface
+2. Remove obsolete 1:1-only code paths now that the room-native TUI is the default
+3. Continue cleanup of authority-link vs peer-link responsibilities
+4. Build the thin Python wrapper in parallel against the documented `machine` contract
 
 ## 1. Rendezvous Cleanup
 
@@ -56,11 +56,11 @@ Exit criteria:
 
 ## 4. Wrapper-Facing Machine Spec
 
-- [ ] Write a standalone `machine` protocol document
-- [ ] Document all command and event shapes
-- [ ] Document route semantics and member/channel identifiers
-- [ ] Document which operations are host-authoritative vs peer-delivered
-- [ ] Add example payloads that are kept in sync with protocol tests
+- [x] Write a standalone `machine` protocol document
+- [x] Document all command and event shapes
+- [x] Document route semantics and member/channel identifiers
+- [x] Document which operations are host-authoritative vs peer-delivered
+- [x] Add example payloads that are kept in sync with protocol tests
 
 Exit criteria:
 

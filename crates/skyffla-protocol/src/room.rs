@@ -703,6 +703,25 @@ mod tests {
     }
 
     #[test]
+    fn documented_accept_channel_command_shape_round_trips() {
+        let json = r#"{
+            "type":"accept_channel",
+            "channel_id":"c7"
+        }"#;
+
+        let command: MachineCommand =
+            serde_json::from_str(json).expect("accept_channel command should parse");
+
+        assert_eq!(
+            command,
+            MachineCommand::AcceptChannel {
+                channel_id: ChannelId::new("c7").expect("valid channel id"),
+            }
+        );
+        command.validate().expect("accept_channel should validate");
+    }
+
+    #[test]
     fn documented_file_channel_command_with_blob_round_trips() {
         let json = r#"{
             "type":"open_channel",
@@ -736,6 +755,29 @@ mod tests {
             }
         );
         command.validate().expect("file channel should validate");
+    }
+
+    #[test]
+    fn documented_channel_accepted_event_shape_round_trips() {
+        let json = r#"{
+            "type":"channel_accepted",
+            "channel_id":"c7",
+            "member_id":"m1",
+            "member_name":"alpha"
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("channel_accepted event should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::ChannelAccepted {
+                channel_id: ChannelId::new("c7").expect("valid channel id"),
+                member_id: MemberId::new("m1").expect("valid member id"),
+                member_name: "alpha".into(),
+            }
+        );
+        event.validate().expect("channel_accepted should validate");
     }
 
     #[test]
@@ -777,5 +819,28 @@ mod tests {
         event
             .validate()
             .expect("channel_file_ready should validate");
+    }
+
+    #[test]
+    fn documented_error_event_shape_round_trips() {
+        let json = r#"{
+            "type":"error",
+            "code":"command_failed",
+            "message":"channel c7 is closed",
+            "channel_id":"c7"
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("error event should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::Error {
+                code: "command_failed".into(),
+                message: "channel c7 is closed".into(),
+                channel_id: Some(ChannelId::new("c7").expect("valid channel id")),
+            }
+        );
+        event.validate().expect("error event should validate");
     }
 }
