@@ -4,5 +4,7 @@ pub(crate) mod interactive_commands;
 pub(crate) mod interactive_control;
 pub(crate) mod interactive_peer;
 pub(crate) mod machine;
+pub(crate) mod machine_links;
+pub(crate) mod machine_state;
 pub(crate) mod session;
 pub(crate) mod stdio;
