@@ -39,14 +39,14 @@ Exit criteria:
 
 ## 3. TUI on Room Engine
 
-- [ ] Replace remaining 1:1 assumptions in the interactive runtime
-- [ ] Show room id, self member id, and host member id
-- [ ] Render live member roster updates
-- [ ] Default text entry to room broadcast chat
-- [ ] Add direct-message command for targeting one member
-- [ ] Show channel open / accept / reject / close events
-- [ ] Add file accept / reject / export flows in the TUI
-- [ ] Add integration coverage for room join, broadcast chat, and direct chat through the TUI-facing runtime
+- [x] Replace remaining 1:1 assumptions in the interactive runtime
+- [x] Show room id, self member id, and host member id
+- [x] Render live member roster updates
+- [x] Default text entry to room broadcast chat
+- [x] Add direct-message command for targeting one member
+- [x] Show channel open / accept / reject / close events
+- [x] Add file accept / reject / export flows in the TUI
+- [x] Add integration coverage for room join, broadcast chat, and direct chat through the TUI-facing runtime
 
 Exit criteria:
 

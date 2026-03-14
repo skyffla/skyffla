@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +56,9 @@ pub(crate) struct UiState {
     pub(crate) stream_id: String,
     pub(crate) peer_name: String,
     pub(crate) local_name: String,
+    pub(crate) self_member_id: Option<String>,
+    pub(crate) host_member_id: Option<String>,
+    pub(crate) room_members: BTreeMap<String, String>,
     pub(crate) auto_accept_policy: AutoAcceptPolicy,
     pub(crate) auto_accept_source: String,
     events: Vec<EventLine>,
@@ -108,6 +112,9 @@ impl UiState {
             stream_id: stream_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
+            self_member_id: None,
+            host_member_id: None,
+            room_members: BTreeMap::new(),
             auto_accept_policy,
             auto_accept_source: auto_accept_source.to_string(),
             events: Vec::new(),
@@ -131,6 +138,31 @@ impl UiState {
 
     pub(crate) fn chat(&mut self, speaker: &str, text: &str) {
         self.push_event(format!("{speaker}: {text}"));
+    }
+
+    pub(crate) fn set_room_identity(
+        &mut self,
+        self_member_id: impl Into<String>,
+        host_member_id: impl Into<String>,
+    ) {
+        self.self_member_id = Some(self_member_id.into());
+        self.host_member_id = Some(host_member_id.into());
+    }
+
+    pub(crate) fn replace_room_members(&mut self, members: impl IntoIterator<Item = (String, String)>) {
+        self.room_members = members.into_iter().collect();
+    }
+
+    pub(crate) fn upsert_room_member(
+        &mut self,
+        member_id: impl Into<String>,
+        name: impl Into<String>,
+    ) {
+        self.room_members.insert(member_id.into(), name.into());
+    }
+
+    pub(crate) fn remove_room_member(&mut self, member_id: &str) {
+        self.room_members.remove(member_id);
     }
 
     pub(crate) fn upsert_transfer(&mut self, transfer: TransferUi) {
@@ -206,49 +238,44 @@ impl UiState {
     }
 
     pub(crate) fn render(&mut self) {
-        const SHOVEL_ART: &[&str] = &[
-            r"   ===       skyffla.com",
-            r"    |",
-            r"    |        - moving your bits, seamless and secure!",
-            r"  __|__",
-            r"  \   /",
-            r"   \_/",
-        ];
-        const SHOVEL_TOP_ROW: u16 = 2;
         let width = terminal_width();
         let height = terminal_height();
         let divider = "-".repeat(width);
         let prompt_row = height.saturating_sub(1) as u16;
         let (visible_input, cursor_col) = self.prompt_window(width);
+        let header_lines = self.header_lines(width);
+        let header_start = 1u16;
+        let header_end = header_start + header_lines.len() as u16;
         let mut stdout = std::io::stdout();
 
         if self.rendered_width != Some(width) {
             self.rendered_width = Some(width);
             self.rendered_event_lines = 0;
             let _ = queue!(stdout, MoveTo(0, 0), Clear(ClearType::All));
-            let _ = queue!(
-                stdout,
-                MoveTo(0, 0),
-                Clear(ClearType::CurrentLine),
-                Print(clip_line(&divider, width))
-            );
-            for (index, line) in SHOVEL_ART.iter().enumerate() {
-                let _ = queue!(
-                    stdout,
-                    MoveTo(0, SHOVEL_TOP_ROW + index as u16),
-                    Clear(ClearType::CurrentLine),
-                    Print(clip_line(line, width))
-                );
-            }
-            let _ = queue!(
-                stdout,
-                MoveTo(0, SHOVEL_TOP_ROW + SHOVEL_ART.len() as u16 + 1),
-                Clear(ClearType::CurrentLine),
-                Print(clip_line(&divider, width))
-            );
             let _ = write!(stdout, "\x1b[1;{}r", prompt_row);
-            self.next_event_row = SHOVEL_TOP_ROW + SHOVEL_ART.len() as u16 + 2;
         }
+
+        let _ = queue!(
+            stdout,
+            MoveTo(0, 0),
+            Clear(ClearType::CurrentLine),
+            Print(clip_line(&divider, width))
+        );
+        for (index, line) in header_lines.iter().enumerate() {
+            let _ = queue!(
+                stdout,
+                MoveTo(0, header_start + index as u16),
+                Clear(ClearType::CurrentLine),
+                Print(clip_line(line, width))
+            );
+        }
+        let _ = queue!(
+            stdout,
+            MoveTo(0, header_end),
+            Clear(ClearType::CurrentLine),
+            Print(clip_line(&divider, width))
+        );
+        self.next_event_row = header_end + 1;
 
         let event_lines = if self.events.is_empty() {
             vec!["[--:--:--] waiting for events".to_string()]
@@ -448,6 +475,37 @@ impl UiState {
         let visible: String = buffer_chars[start..end].iter().collect();
         let cursor_col = 2 + cursor_chars.saturating_sub(start);
         (visible, cursor_col)
+    }
+
+    fn header_lines(&self, width: usize) -> Vec<String> {
+        let self_member = self.self_member_id.as_deref().unwrap_or("?");
+        let host_member = self.host_member_id.as_deref().unwrap_or("?");
+        let members = if self.room_members.is_empty() {
+            "members: (waiting)".to_string()
+        } else {
+            let mut parts = Vec::new();
+            for (member_id, name) in &self.room_members {
+                let marker = if self.self_member_id.as_deref() == Some(member_id.as_str()) {
+                    "*"
+                } else if self.host_member_id.as_deref() == Some(member_id.as_str()) {
+                    "^"
+                } else {
+                    ""
+                };
+                parts.push(format!("{member_id}{marker}:{name}"));
+            }
+            format!("members: {}", parts.join(", "))
+        };
+        vec![
+            clip_line(
+                &format!(
+                    "room={} you={} self={} host={} peer={}",
+                    self.stream_id, self.local_name, self_member, host_member, self.peer_name
+                ),
+                width,
+            ),
+            clip_line(&members, width),
+        ]
     }
 }
 

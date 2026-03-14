@@ -14,10 +14,14 @@ use crate::net::local_discovery::{
 };
 use crate::net::rendezvous::{delete_room, register_room, resolve_room, RegisterRoomError};
 use crate::runtime::machine::run_machine_host;
+use crate::runtime::room_tui::run_room_tui;
 use crate::runtime::session::run_connected_session;
 
 pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
     let config = SessionConfig::from_args(Role::Host, args)?;
+    if should_use_room_tui(&config) {
+        return run_room_tui(Role::Host, &config).await;
+    }
     let sink = EventSink::from_config(&config);
     let mut session = SessionMachine::new();
     sink.emit_runtime_event(state_changed_event(
@@ -53,6 +57,9 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
 
 pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     let mut config = SessionConfig::from_args(Role::Join, args)?;
+    if should_use_room_tui(&config) {
+        return run_room_tui(Role::Join, &config).await;
+    }
     let sink = EventSink::from_config(&config);
     let mut session = SessionMachine::new();
     sink.emit_runtime_event(state_changed_event(
@@ -108,6 +115,10 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
         }
         Err(RegisterRoomError::Other(error)) => Err(CliError::rendezvous(error.to_string())),
     }
+}
+
+fn should_use_room_tui(config: &SessionConfig) -> bool {
+    !config.machine && !config.stdio && config.outgoing_message.is_none()
 }
 
 async fn connect_to_registered_peer(
