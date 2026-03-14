@@ -139,6 +139,11 @@ For room authority and membership:
 
 - messages go through the host
 
+The control plane is for setup and authority only.
+
+It must not become a fallback chat relay path just because the host is already
+connected to everyone.
+
 The host is authoritative for:
 
 - room membership
@@ -150,6 +155,10 @@ The host is authoritative for:
 
 But ordinary room messaging should be direct between members after introduction.
 
+That means room chat should not be carried by the host-owned authority link.
+The host participates in chat as a normal room member over a peer link, not as
+the control-plane relay.
+
 For example, if `b` sends a room chat message to `c`:
 
 - `b -> c`
@@ -160,7 +169,14 @@ If `b` broadcasts chat:
 - `b -> c`
 - `b -> d`
 
-The host is included in the broadcast fanout if it is a member recipient, but it is not a required relay hop.
+The host is included in the broadcast fanout if it is a member recipient, but
+it is not a required relay hop and should not carry the chat over the authority
+protocol.
+
+So the clean split is:
+
+- authority link: join, leave, snapshots, introductions, channel control
+- peer links: chat, direct machine messages, and channel payload traffic
 
 ### Data plane
 
@@ -397,6 +413,13 @@ Wrappers do not need to know whether a routed message is:
 - direct member-to-member traffic such as chat or machine messages
 
 That distinction remains inside the Rust implementation.
+
+Internally, Skyffla should keep those link types separate as well. The
+machine-facing wrapper API stays unified, but the runtime should not blur:
+
+- authority/control messages
+- peer-delivered room messages
+- payload-bearing channel traffic
 
 The Rust `machine` schema remains the source of truth.
 

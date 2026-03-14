@@ -9,6 +9,10 @@
 //!
 //! Keeping this separate lets runtimes evolve without pushing transport or
 //! membership details into wrapper-facing machine events.
+//!
+//! `room_link` is intentionally setup/control oriented. Ordinary room chat and
+//! other peer-delivered messages should move over established peer links, not
+//! over the host authority protocol.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +30,7 @@ pub enum RoomLinkMessage {
     PeerIntroduction {
         member: Member,
         ticket: String,
+        connect: bool,
     },
 }
 
@@ -34,7 +39,11 @@ impl RoomLinkMessage {
         match self {
             Self::MachineCommand { command } => command.validate().map_err(|err| err.to_string()),
             Self::MachineEvent { event } => event.validate().map_err(|err| err.to_string()),
-            Self::PeerIntroduction { member, ticket } => {
+            Self::PeerIntroduction {
+                member,
+                ticket,
+                ..
+            } => {
                 member.validate().map_err(|err| err.to_string())?;
                 if ticket.trim().is_empty() {
                     return Err("peer ticket must not be empty".into());
@@ -76,6 +85,7 @@ mod tests {
                 fingerprint: None,
             },
             ticket: "   ".into(),
+            connect: true,
         };
 
         assert_eq!(
