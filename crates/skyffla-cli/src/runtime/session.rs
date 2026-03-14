@@ -53,12 +53,16 @@ pub(crate) async fn run_connected_session(
     let identity = load_or_create_identity(&local_state_file_path())
         .map_err(|error| CliError::local_io(error.to_string()))?;
     let local_fingerprint = Some(identity.fingerprint.clone());
+    let local_ticket = transport
+        .local_ticket()
+        .map_err(|error| CliError::transport(error.to_string()))?;
     let peer = exchange_hello(
         config,
         &session_id,
         &mut send,
         &mut recv,
         local_fingerprint.as_deref(),
+        Some(&local_ticket.encoded),
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))?;

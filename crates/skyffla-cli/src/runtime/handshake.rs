@@ -18,6 +18,7 @@ pub(crate) async fn exchange_hello(
     send: &mut SendStream,
     recv: &mut RecvStream,
     local_fingerprint: Option<&str>,
+    local_ticket: Option<&str>,
 ) -> Result<SessionPeer> {
     let hello = Envelope::new(
         session_id,
@@ -27,6 +28,7 @@ pub(crate) async fn exchange_hello(
             session_id: session_id.to_string(),
             peer_name: config.peer_name.clone(),
             peer_fingerprint: local_fingerprint.map(ToOwned::to_owned),
+            peer_ticket: local_ticket.map(ToOwned::to_owned),
             capabilities: Capabilities::default(),
             transport_capabilities: vec![TransportCapability::NativeDirect],
             session_mode: config.session_mode(),
@@ -57,6 +59,7 @@ pub(crate) async fn exchange_hello(
                 session_id: hello.session_id,
                 peer_name: hello.peer_name,
                 peer_fingerprint: hello.peer_fingerprint,
+                peer_ticket: hello.peer_ticket,
             }
         }
         other => bail!("expected hello from peer, got {:?}", other),

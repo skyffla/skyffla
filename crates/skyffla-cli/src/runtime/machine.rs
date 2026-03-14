@@ -1,22 +1,15 @@
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
-use serde::{Deserialize, Serialize};
 use skyffla_protocol::room::{
     MachineCommand, MachineEvent, MemberId, RoomId, MACHINE_PROTOCOL_VERSION,
 };
+use skyffla_protocol::room_link::RoomLinkMessage;
 use skyffla_session::room::{RoomEngine, RoutedEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::app::sink::EventSink;
 use crate::cli_error::CliError;
 use crate::net::framing::{read_framed, write_framed};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PeerMachineMessage {
-    Command { command: MachineCommand },
-    Event { event: MachineEvent },
-}
 
 #[derive(Debug)]
 struct JoinState {
@@ -113,9 +106,9 @@ pub(crate) async fn run_machine_session(
                         }
                     }
                 }
-                message = read_framed::<PeerMachineMessage>(recv, "machine peer message"), if !peer_closed => {
+                message = read_framed::<RoomLinkMessage>(recv, "room link message"), if !peer_closed => {
                     match message.map_err(|error| CliError::protocol(error.to_string()))? {
-                        Some(PeerMachineMessage::Command { command }) => {
+                        Some(RoomLinkMessage::MachineCommand { command }) => {
                             handle_host_command(
                                 &mut room,
                                 &peer_member,
@@ -126,9 +119,9 @@ pub(crate) async fn run_machine_session(
                             )
                             .await?;
                         }
-                        Some(PeerMachineMessage::Event { .. }) => {
+                        Some(RoomLinkMessage::MachineEvent { .. } | RoomLinkMessage::PeerIntroduction { .. }) => {
                             return Err(CliError::protocol(
-                                "host received machine event from peer; expected command",
+                                "host received non-command room link message from peer",
                             ));
                         }
                         None => {
@@ -162,15 +155,15 @@ pub(crate) async fn run_machine_session(
                         }
                     }
                 }
-                message = read_framed::<PeerMachineMessage>(recv, "machine peer message"), if !peer_closed => {
+                message = read_framed::<RoomLinkMessage>(recv, "room link message"), if !peer_closed => {
                     match message.map_err(|error| CliError::protocol(error.to_string()))? {
-                        Some(PeerMachineMessage::Event { event }) => {
+                        Some(RoomLinkMessage::MachineEvent { event }) => {
                             track_join_state(&mut join_state, &event);
                             emit_event(&mut stdout, &event).await?;
                         }
-                        Some(PeerMachineMessage::Command { .. }) => {
+                        Some(RoomLinkMessage::MachineCommand { .. } | RoomLinkMessage::PeerIntroduction { .. }) => {
                             return Err(CliError::protocol(
-                                "joiner received machine command from peer; expected event",
+                                "joiner received unexpected non-event room link message from peer",
                             ));
                         }
                         None => {
@@ -387,10 +380,10 @@ async fn emit_event(
 async fn send_peer_command(send: &mut SendStream, command: &MachineCommand) -> Result<(), CliError> {
     write_framed(
         send,
-        &PeerMachineMessage::Command {
+        &RoomLinkMessage::MachineCommand {
             command: command.clone(),
         },
-        "machine command",
+        "room link command",
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))
@@ -399,10 +392,10 @@ async fn send_peer_command(send: &mut SendStream, command: &MachineCommand) -> R
 async fn send_peer_event(send: &mut SendStream, event: &MachineEvent) -> Result<(), CliError> {
     write_framed(
         send,
-        &PeerMachineMessage::Event {
+        &RoomLinkMessage::MachineEvent {
             event: event.clone(),
         },
-        "machine event",
+        "room link event",
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))

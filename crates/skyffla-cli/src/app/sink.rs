@@ -185,6 +185,7 @@ mod tests {
                 session_id: "room".into(),
                 peer_name: "alice".into(),
                 peer_fingerprint: Some("fp".into()),
+                peer_ticket: None,
             },
         };
 

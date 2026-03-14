@@ -1,5 +1,6 @@
 mod framing;
 pub mod room;
+pub mod room_link;
 
 use std::fmt;
 
@@ -140,6 +141,7 @@ pub struct Hello {
     pub session_id: String,
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,
+    pub peer_ticket: Option<String>,
     pub capabilities: Capabilities,
     pub transport_capabilities: Vec<TransportCapability>,
     pub session_mode: SessionMode,

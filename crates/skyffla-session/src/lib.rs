@@ -10,6 +10,7 @@ pub struct SessionPeer {
     pub session_id: String,
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,
+    pub peer_ticket: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
