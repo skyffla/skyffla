@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    MachineCommand, MachineEvent, Member, MemberId, RoomId, Route, MACHINE_PROTOCOL_VERSION,
+    ChannelId, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
+    MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::RoomLinkMessage;
 use skyffla_session::room::{RoomEngine, RoutedEvent};
@@ -26,6 +27,7 @@ struct JoinState {
     self_member: Option<MemberId>,
     host_member: Option<MemberId>,
     members: BTreeMap<MemberId, Member>,
+    channels: BTreeMap<ChannelId, BTreeSet<MemberId>>,
     peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<RoomLinkMessage>>,
     pending_host_peer_link: Option<mpsc::UnboundedSender<RoomLinkMessage>>,
     local_name: String,
@@ -273,6 +275,7 @@ pub(crate) async fn run_machine_join_session(
         self_member: None,
         host_member: None,
         members: BTreeMap::new(),
+        channels: BTreeMap::new(),
         peer_links: BTreeMap::new(),
         pending_host_peer_link: None,
         local_name: config.peer_name.clone(),
@@ -323,7 +326,7 @@ pub(crate) async fn run_machine_join_session(
             message = read_room_link_message(recv), if !peer_closed => {
                 match message? {
                     Some(RoomLinkMessage::MachineEvent { event }) => {
-                        apply_authority_event(&mut join_state, &event);
+                        apply_machine_event(&mut join_state, &event);
                         attach_pending_host_peer_link(&mut join_state);
                         emit_event(&mut stdout, &event).await?;
                     }
@@ -383,6 +386,7 @@ pub(crate) async fn run_machine_join_session(
                             .await?;
                             continue;
                         }
+                        apply_machine_event(&mut join_state, &event);
                         emit_event(&mut stdout, &event).await?;
                     }
                     Some(JoinPeerInput::Disconnected { member_id }) => {
@@ -627,6 +631,18 @@ fn spawn_host_peer_reader(
         loop {
             match read_room_link_message(&mut recv).await {
                 Ok(Some(RoomLinkMessage::MachineEvent { event })) => {
+                    if !event_matches_sender(&member_id, &event) {
+                        let _ = host_tx.send(HostInput::PeerProtocolError {
+                            message: format!(
+                                "peer {} delivered an event with mismatched sender",
+                                member_id.as_str()
+                            ),
+                        });
+                        let _ = host_tx.send(HostInput::PeerDisconnected {
+                            member_id: member_id.clone(),
+                        });
+                        break;
+                    }
                     if host_tx.send(HostInput::PeerEvent { event }).is_err() {
                         break;
                     }
@@ -972,7 +988,7 @@ fn emit_peer_runtime_events(
     });
 }
 
-fn apply_authority_event(state: &mut JoinState, event: &MachineEvent) {
+fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
     track_join_state(state, event);
     match event {
         MachineEvent::MemberSnapshot { members } => {
@@ -990,6 +1006,22 @@ fn apply_authority_event(state: &mut JoinState, event: &MachineEvent) {
         MachineEvent::MemberLeft { member_id, .. } => {
             state.members.remove(member_id);
             state.peer_links.remove(member_id);
+            for participants in state.channels.values_mut() {
+                participants.remove(member_id);
+            }
+        }
+        MachineEvent::ChannelOpened {
+            channel_id,
+            from,
+            to,
+            ..
+        } => {
+            if let Ok(participants) = event_participants(state, from, to) {
+                state.channels.insert(channel_id.clone(), participants);
+            }
+        }
+        MachineEvent::ChannelClosed { channel_id, .. } => {
+            state.channels.remove(channel_id);
         }
         _ => {}
     }
@@ -1027,29 +1059,61 @@ async fn handle_join_command(
                 to: to.clone(),
                 text,
             };
-            for recipient in join_chat_recipients(&self_member, &to, &state.members)? {
-                if let Some(peer) = state.peer_links.get(&recipient) {
-                    send_link_message(
-                        peer,
-                        RoomLinkMessage::MachineEvent {
-                            event: event.clone(),
-                        },
-                    )?;
-                } else {
-                    emit_event(
-                        stdout,
-                        &local_error(
-                            "peer_not_connected",
-                            &format!("no direct room link to {}", recipient.as_str()),
-                        ),
-                    )
-                    .await?;
-                }
-            }
+            send_join_direct_event(
+                state,
+                stdout,
+                join_chat_recipients(&self_member, &to, &state.members)?,
+                event,
+            )
+            .await?;
+            Ok(())
+        }
+        MachineCommand::SendChannelData { channel_id, body } => {
+            let event = MachineEvent::ChannelData {
+                channel_id: channel_id.clone(),
+                from: self_member.clone(),
+                from_name: state.local_name.clone(),
+                body,
+            };
+            send_join_direct_event(
+                state,
+                stdout,
+                join_channel_recipients(&self_member, &channel_id, &state.channels)?,
+                event,
+            )
+            .await?;
             Ok(())
         }
         other => send_peer_command(authority_send, &other).await,
     }
+}
+
+async fn send_join_direct_event(
+    state: &JoinState,
+    stdout: &mut tokio::io::Stdout,
+    recipients: Vec<MemberId>,
+    event: MachineEvent,
+) -> Result<(), CliError> {
+    for recipient in recipients {
+        if let Some(peer) = state.peer_links.get(&recipient) {
+            send_link_message(
+                peer,
+                RoomLinkMessage::MachineEvent {
+                    event: event.clone(),
+                },
+            )?;
+        } else {
+            emit_event(
+                stdout,
+                &local_error(
+                    "peer_not_connected",
+                    &format!("no direct room link to {}", recipient.as_str()),
+                ),
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn join_chat_recipients(
@@ -1076,6 +1140,53 @@ fn join_chat_recipients(
             Ok(vec![member_id.clone()])
         }
     }
+}
+
+fn event_participants(
+    state: &JoinState,
+    sender: &MemberId,
+    route: &Route,
+) -> Result<BTreeSet<MemberId>, CliError> {
+    let mut participants = BTreeSet::from([sender.clone()]);
+    match route {
+        Route::All => {
+            for member_id in state.members.keys() {
+                participants.insert(member_id.clone());
+            }
+        }
+        Route::Member { member_id } => {
+            if !state.members.contains_key(member_id) {
+                return Err(CliError::runtime(format!(
+                    "unknown room member {}",
+                    member_id.as_str()
+                )));
+            }
+            participants.insert(member_id.clone());
+        }
+    }
+    Ok(participants)
+}
+
+fn join_channel_recipients(
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+    channels: &BTreeMap<ChannelId, BTreeSet<MemberId>>,
+) -> Result<Vec<MemberId>, CliError> {
+    let participants = channels
+        .get(channel_id)
+        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
+    if !participants.contains(self_member) {
+        return Err(CliError::runtime(format!(
+            "member {} is not part of channel {}",
+            self_member.as_str(),
+            channel_id.as_str()
+        )));
+    }
+    Ok(participants
+        .iter()
+        .filter(|member_id| *member_id != self_member)
+        .cloned()
+        .collect())
 }
 
 fn member_id_placeholder() -> MemberId {
@@ -1120,78 +1231,32 @@ async fn handle_host_command(
             size,
             mime,
         } => {
-            let from_name = room.member_name(sender).map_err(room_error)?;
-            let event = MachineEvent::ChannelOpened {
-                channel_id,
-                kind,
-                from: sender.clone(),
-                from_name,
-                to: to.clone(),
-                name,
-                size,
-                mime,
-            };
-            let routed = room.route_event(sender, to, event).map_err(room_error)?;
+            let routed = room
+                .open_channel(sender, channel_id, kind, to, name, size, mime)
+                .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
         MachineCommand::AcceptChannel { channel_id } => {
-            let member_name = room.member_name(sender).map_err(room_error)?;
-            deliver_channel_reply(
-                sender,
-                stdout,
-                peers,
-                MachineEvent::ChannelAccepted {
-                    channel_id,
-                    member_id: sender.clone(),
-                    member_name,
-                },
-            )
-            .await
+            let routed = room.accept_channel(sender, &channel_id).map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
         MachineCommand::RejectChannel { channel_id, reason } => {
-            let member_name = room.member_name(sender).map_err(room_error)?;
-            deliver_channel_reply(
-                sender,
-                stdout,
-                peers,
-                MachineEvent::ChannelRejected {
-                    channel_id,
-                    member_id: sender.clone(),
-                    member_name,
-                    reason,
-                },
-            )
-            .await
+            let routed = room
+                .reject_channel(sender, &channel_id, reason)
+                .map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
         MachineCommand::SendChannelData { channel_id, body } => {
-            let from_name = room.member_name(sender).map_err(room_error)?;
-            deliver_channel_reply(
-                sender,
-                stdout,
-                peers,
-                MachineEvent::ChannelData {
-                    channel_id,
-                    from: sender.clone(),
-                    from_name,
-                    body,
-                },
-            )
-            .await
+            let routed = room
+                .send_channel_data(sender, &channel_id, body)
+                .map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
         MachineCommand::CloseChannel { channel_id, reason } => {
-            let member_name = room.member_name(sender).map_err(room_error)?;
-            deliver_channel_reply(
-                sender,
-                stdout,
-                peers,
-                MachineEvent::ChannelClosed {
-                    channel_id,
-                    member_id: sender.clone(),
-                    member_name,
-                    reason,
-                },
-            )
-            .await
+            let routed = room
+                .close_channel(sender, &channel_id, reason)
+                .map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
     }
 }
@@ -1215,24 +1280,6 @@ async fn deliver_routed_events(
         }
     }
     Ok(())
-}
-
-async fn deliver_channel_reply(
-    sender: &MemberId,
-    stdout: &mut tokio::io::Stdout,
-    peers: &mut BTreeMap<MemberId, PeerHandle>,
-    event: MachineEvent,
-) -> Result<(), CliError> {
-    if let Some(peer) = peers.get(sender) {
-        send_link_message(
-            &peer.peer_sender,
-            RoomLinkMessage::MachineEvent {
-                event,
-            },
-        )
-    } else {
-        emit_event(stdout, &event).await
-    }
 }
 
 async fn read_room_link_message(

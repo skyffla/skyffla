@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use skyffla_protocol::room::{
-    MachineEvent, Member, MemberId, RoomId, RoomProtocolError, Route, MACHINE_PROTOCOL_VERSION,
+    ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError, Route,
+    MACHINE_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,13 @@ pub struct RoomEngine {
     room_id: RoomId,
     host_member: MemberId,
     members: BTreeMap<MemberId, Member>,
+    channels: BTreeMap<ChannelId, ChannelState>,
     next_member_index: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChannelState {
+    participants: BTreeSet<MemberId>,
 }
 
 impl RoomEngine {
@@ -52,6 +59,7 @@ impl RoomEngine {
             room_id,
             host_member: host_member.member_id,
             members,
+            channels: BTreeMap::new(),
             next_member_index: 2,
         })
     }
@@ -175,6 +183,123 @@ impl RoomEngine {
         self.route_event(from, to, event)
     }
 
+    pub fn open_channel(
+        &mut self,
+        from: &MemberId,
+        channel_id: ChannelId,
+        kind: ChannelKind,
+        to: Route,
+        name: Option<String>,
+        size: Option<u64>,
+        mime: Option<String>,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        self.require_member(from)?;
+        if self.channels.contains_key(&channel_id) {
+            return Err(RoomEngineError::ChannelAlreadyOpen { channel_id });
+        }
+
+        let from_name = self.member_name(from)?;
+        let participants = self.channel_participants(from, &to)?;
+        let event = MachineEvent::ChannelOpened {
+            channel_id: channel_id.clone(),
+            kind,
+            from: from.clone(),
+            from_name,
+            to,
+            name,
+            size,
+            mime,
+        };
+        event.validate()?;
+        self.channels
+            .insert(channel_id, ChannelState { participants: participants.clone() });
+
+        Ok(participants
+            .into_iter()
+            .filter(|member_id| member_id != from)
+            .map(|recipient| RoutedEvent {
+                recipient,
+                event: event.clone(),
+            })
+            .collect())
+    }
+
+    pub fn accept_channel(
+        &self,
+        member_id: &MemberId,
+        channel_id: &ChannelId,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        let member_name = self.member_name(member_id)?;
+        self.route_channel_event(
+            member_id,
+            channel_id,
+            MachineEvent::ChannelAccepted {
+                channel_id: channel_id.clone(),
+                member_id: member_id.clone(),
+                member_name,
+            },
+        )
+    }
+
+    pub fn reject_channel(
+        &self,
+        member_id: &MemberId,
+        channel_id: &ChannelId,
+        reason: Option<String>,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        let member_name = self.member_name(member_id)?;
+        self.route_channel_event(
+            member_id,
+            channel_id,
+            MachineEvent::ChannelRejected {
+                channel_id: channel_id.clone(),
+                member_id: member_id.clone(),
+                member_name,
+                reason,
+            },
+        )
+    }
+
+    pub fn send_channel_data(
+        &self,
+        from: &MemberId,
+        channel_id: &ChannelId,
+        body: String,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        let from_name = self.member_name(from)?;
+        self.route_channel_event(
+            from,
+            channel_id,
+            MachineEvent::ChannelData {
+                channel_id: channel_id.clone(),
+                from: from.clone(),
+                from_name,
+                body,
+            },
+        )
+    }
+
+    pub fn close_channel(
+        &mut self,
+        member_id: &MemberId,
+        channel_id: &ChannelId,
+        reason: Option<String>,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        let member_name = self.member_name(member_id)?;
+        let routed = self.route_channel_event(
+            member_id,
+            channel_id,
+            MachineEvent::ChannelClosed {
+                channel_id: channel_id.clone(),
+                member_id: member_id.clone(),
+                member_name,
+                reason,
+            },
+        )?;
+        self.channels.remove(channel_id);
+        Ok(routed)
+    }
+
     pub fn route_event(
         &self,
         sender: &MemberId,
@@ -224,12 +349,70 @@ impl RoomEngine {
                 member_id: member_id.clone(),
             })
     }
+
+    fn channel_participants(
+        &self,
+        sender: &MemberId,
+        to: &Route,
+    ) -> Result<BTreeSet<MemberId>, RoomEngineError> {
+        self.require_member(sender)?;
+        let mut participants = BTreeSet::from([sender.clone()]);
+        match to {
+            Route::All => {
+                for member_id in self.members.keys() {
+                    participants.insert(member_id.clone());
+                }
+            }
+            Route::Member { member_id } => {
+                self.require_member(member_id)?;
+                participants.insert(member_id.clone());
+            }
+        }
+        Ok(participants)
+    }
+
+    fn route_channel_event(
+        &self,
+        sender: &MemberId,
+        channel_id: &ChannelId,
+        event: MachineEvent,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        self.require_member(sender)?;
+        event.validate()?;
+        let channel = self
+            .channels
+            .get(channel_id)
+            .ok_or_else(|| RoomEngineError::UnknownChannel {
+                channel_id: channel_id.clone(),
+            })?;
+        if !channel.participants.contains(sender) {
+            return Err(RoomEngineError::MemberNotInChannel {
+                member_id: sender.clone(),
+                channel_id: channel_id.clone(),
+            });
+        }
+
+        Ok(channel
+            .participants
+            .iter()
+            .filter(|member_id| *member_id != sender)
+            .filter(|member_id| self.members.contains_key(*member_id))
+            .cloned()
+            .map(|recipient| RoutedEvent {
+                recipient,
+                event: event.clone(),
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomEngineError {
     Protocol(RoomProtocolError),
     UnknownMember { member_id: MemberId },
+    UnknownChannel { channel_id: ChannelId },
+    ChannelAlreadyOpen { channel_id: ChannelId },
+    MemberNotInChannel { member_id: MemberId, channel_id: ChannelId },
     HostCannotLeaveRoom,
 }
 
@@ -239,6 +422,23 @@ impl fmt::Display for RoomEngineError {
             Self::Protocol(error) => write!(f, "{error}"),
             Self::UnknownMember { member_id } => {
                 write!(f, "unknown room member {}", member_id.as_str())
+            }
+            Self::UnknownChannel { channel_id } => {
+                write!(f, "unknown channel {}", channel_id.as_str())
+            }
+            Self::ChannelAlreadyOpen { channel_id } => {
+                write!(f, "channel {} is already open", channel_id.as_str())
+            }
+            Self::MemberNotInChannel {
+                member_id,
+                channel_id,
+            } => {
+                write!(
+                    f,
+                    "member {} is not part of channel {}",
+                    member_id.as_str(),
+                    channel_id.as_str()
+                )
             }
             Self::HostCannotLeaveRoom => write!(f, "host cannot leave its own room"),
         }
@@ -255,7 +455,7 @@ impl From<RoomProtocolError> for RoomEngineError {
 
 #[cfg(test)]
 mod tests {
-    use skyffla_protocol::room::MachineEvent;
+    use skyffla_protocol::room::{ChannelKind, MachineEvent};
 
     use super::*;
 
@@ -265,6 +465,10 @@ mod tests {
 
     fn room_id(value: &str) -> RoomId {
         RoomId::new(value).expect("valid room id")
+    }
+
+    fn channel_id(value: &str) -> ChannelId {
+        ChannelId::new(value).expect("valid channel id")
     }
 
     #[test]
@@ -380,5 +584,68 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].recipient, member_id("m1"));
+    }
+
+    #[test]
+    fn open_channel_tracks_participants_and_routes_to_target() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let _beta = room.join("beta", None).expect("beta joins");
+        let gamma = room.join("gamma", None).expect("gamma joins");
+        let host_member = room.host_member().clone();
+
+        let opened = room
+            .open_channel(
+                &host_member,
+                channel_id("c1"),
+                ChannelKind::Machine,
+                Route::Member {
+                    member_id: gamma.member.member_id.clone(),
+                },
+                Some("demo".into()),
+                None,
+                None,
+            )
+            .expect("channel opens");
+
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].recipient, gamma.member.member_id);
+        assert!(matches!(
+            opened[0].event,
+            MachineEvent::ChannelOpened { .. }
+        ));
+
+        let data = room
+            .send_channel_data(&host_member, &channel_id("c1"), "hello".into())
+            .expect("channel data routes");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].recipient, member_id("m3"));
+        assert!(matches!(data[0].event, MachineEvent::ChannelData { .. }));
+    }
+
+    #[test]
+    fn channel_data_reaches_other_participants_only() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let gamma = room.join("gamma", None).expect("gamma joins");
+        room.open_channel(
+            &beta.member.member_id,
+            channel_id("c1"),
+            ChannelKind::Machine,
+            Route::Member {
+                member_id: gamma.member.member_id.clone(),
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("channel opens");
+
+        let routed = room
+            .send_channel_data(&gamma.member.member_id, &channel_id("c1"), "pong".into())
+            .expect("channel data routes");
+
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].recipient, beta.member.member_id);
+        assert!(matches!(routed[0].event, MachineEvent::ChannelData { .. }));
     }
 }
