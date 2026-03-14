@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, Mutex};
 mod support;
 
 use support::{
-    fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer, PROCESS_TIMEOUT,
+    fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -27,7 +27,7 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &home_dir).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut join = MachineProc::spawn("join", &room, &server.url, "join", &home_dir).await?;
 
     host.expect_event("member_joined", |event| {
@@ -76,7 +76,7 @@ async fn machine_host_accepts_two_joiners_and_broadcasts_to_both() -> Result<()>
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
@@ -134,7 +134,7 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
@@ -209,7 +209,7 @@ async fn machine_joiner_can_chat_directly_to_host_member() -> Result<()> {
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
     host.expect_event("beta joined", |event| {
@@ -253,7 +253,7 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
@@ -328,7 +328,7 @@ async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
     host.expect_stderr_contains("\"member_name\":\"beta\"")
@@ -402,7 +402,7 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
     host.expect_stderr_contains("\"member_name\":\"beta\"")
@@ -450,6 +450,185 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let source_dir = fresh_test_dir("skyffla-cli-machine-folder-source");
+    let nested_dir = source_dir.join("nested");
+    let export_dir = fresh_test_dir("skyffla-cli-machine-folder-export");
+    std::fs::create_dir_all(&nested_dir)?;
+    std::fs::create_dir_all(&export_dir)?;
+    std::fs::write(source_dir.join("a.txt"), b"alpha")?;
+    std::fs::write(nested_dir.join("b.txt"), b"beta")?;
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
+
+    host.send(&format!(
+        r#"{{"type":"send_file","channel_id":"folder1","to":{{"type":"member","member_id":"m2"}},"path":{}}}"#,
+        serde_json::to_string(&source_dir.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("folder opened from host", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.pointer("/blob/format") == Some(&Value::String("collection".into()))
+    })
+    .await?;
+
+    beta.send(r#"{"type":"accept_channel","channel_id":"folder1"}"#)
+        .await?;
+    beta.expect_event("folder ready", |event| {
+        event.get("type") == Some(&Value::String("channel_file_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.pointer("/blob/format") == Some(&Value::String("collection".into()))
+    })
+    .await?;
+
+    beta.send(&format!(
+        r#"{{"type":"export_channel_file","channel_id":"folder1","path":{}}}"#,
+        serde_json::to_string(&export_dir.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("folder exported", |event| {
+        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+    })
+    .await?;
+
+    assert_eq!(std::fs::read(export_dir.join("a.txt"))?, b"alpha");
+    assert_eq!(std::fs::read(export_dir.join("nested").join("b.txt"))?, b"beta");
+
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
+    for home in [&host_home, &beta_home, &gamma_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let source_path = fresh_test_dir("skyffla-cli-machine-fanout-source").join("report.txt");
+    let export_path = fresh_test_dir("skyffla-cli-machine-fanout-export").join("report.txt");
+    std::fs::create_dir_all(
+        source_path
+            .parent()
+            .context("source path should have a parent")?,
+    )?;
+    std::fs::create_dir_all(
+        export_path
+            .parent()
+            .context("export path should have a parent")?,
+    )?;
+    std::fs::write(&source_path, b"fanout payload")?;
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
+
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+
+    host.send(&format!(
+        r#"{{"type":"send_file","channel_id":"f-all","to":{{"type":"all"}},"path":{}}}"#,
+        serde_json::to_string(&source_path.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("broadcast file opened", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("f-all".into()))
+    })
+    .await?;
+    gamma
+        .expect_event("broadcast file opened", |event| {
+            event.get("type") == Some(&Value::String("channel_opened".into()))
+                && event.get("channel_id") == Some(&Value::String("f-all".into()))
+        })
+        .await?;
+
+    beta.send(r#"{"type":"accept_channel","channel_id":"f-all"}"#)
+        .await?;
+    gamma
+        .send(r#"{"type":"reject_channel","channel_id":"f-all","reason":"busy"}"#)
+        .await?;
+
+    beta.expect_event("broadcast file ready", |event| {
+        event.get("type") == Some(&Value::String("channel_file_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("f-all".into()))
+    })
+    .await?;
+    host.expect_event("gamma rejected", |event| {
+        event.get("type") == Some(&Value::String("channel_rejected".into()))
+            && event.get("channel_id") == Some(&Value::String("f-all".into()))
+            && event.get("member_name") == Some(&Value::String("gamma".into()))
+    })
+    .await?;
+
+    beta.send(&format!(
+        r#"{{"type":"export_channel_file","channel_id":"f-all","path":{}}}"#,
+        serde_json::to_string(&export_path.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("broadcast file exported", |event| {
+        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+            && event.get("channel_id") == Some(&Value::String("f-all".into()))
+    })
+    .await?;
+    assert_eq!(std::fs::read(&export_path)?, b"fanout payload");
+
+    let gamma_events = gamma.events().await;
+    assert!(
+        !gamma_events.iter().any(|event| {
+            event.get("type") == Some(&Value::String("channel_file_ready".into()))
+                && event.get("channel_id") == Some(&Value::String("f-all".into()))
+        }),
+        "gamma unexpectedly marked rejected file ready:\n{}",
+        gamma.debug_dump().await
+    );
+
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -465,7 +644,7 @@ async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<(
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
@@ -549,7 +728,7 @@ async fn machine_broadcast_channel_data_reaches_host_and_other_joiners() -> Resu
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
@@ -611,7 +790,7 @@ async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
 
     let room = unique_room_name();
     let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
     host.expect_stderr_contains("\"member_name\":\"beta\"")

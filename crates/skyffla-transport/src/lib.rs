@@ -1,12 +1,13 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::ProtocolHandler;
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
+use iroh_blobs::format::collection::Collection;
 use iroh_blobs::store::mem::MemStore;
 use iroh_blobs::{BlobFormat as IrohBlobFormat, BlobsProtocol, Hash, HashAndFormat};
 use skyffla_protocol::room::{BlobFormat, BlobRef};
@@ -79,6 +80,12 @@ pub struct IrohTransport {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TransportOptions {
     pub local_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedPath {
+    pub blob: BlobRef,
+    pub size: u64,
 }
 
 impl IrohTransport {
@@ -166,6 +173,27 @@ impl IrohTransport {
         Ok(blob_ref_from_hash_and_format(tag.hash_and_format()))
     }
 
+    pub async fn import_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ImportedPath, TransportError> {
+        let path = path.as_ref();
+        if path.is_file() {
+            let blob = self.import_blob_path(path).await?;
+            let size = std::fs::metadata(path)
+                .map_err(|error| TransportError::BlobImport(error.to_string()))?
+                .len();
+            return Ok(ImportedPath { blob, size });
+        }
+        if path.is_dir() {
+            return self.import_collection_path(path).await;
+        }
+        Err(TransportError::BlobImport(format!(
+            "path {} is not a file or directory",
+            path.display()
+        )))
+    }
+
     pub async fn fetch_blob(
         &self,
         provider: &PeerTicket,
@@ -218,6 +246,17 @@ impl IrohTransport {
             .export(hash, target)
             .await
             .map_err(|error| TransportError::BlobExport(error.to_string()))
+    }
+
+    pub async fn export_path(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+    ) -> Result<u64, TransportError> {
+        match blob.format {
+            BlobFormat::Blob => self.export_blob(blob, target).await,
+            BlobFormat::Collection => self.export_collection(blob, target.as_ref()).await,
+        }
     }
 
     pub async fn enforce_connection_policy(
@@ -290,6 +329,160 @@ impl IrohTransport {
         }
         let _ = self.inner.blob_store.shutdown().await;
     }
+}
+
+impl IrohTransport {
+    async fn import_collection_path(&self, path: &Path) -> Result<ImportedPath, TransportError> {
+        let entries = collect_collection_entries(path)?;
+        let mut total_size = 0_u64;
+        let mut tags = Vec::with_capacity(entries.len());
+        let mut items = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            total_size = total_size.saturating_add(entry.size);
+            let tag = self
+                .inner
+                .blob_store
+                .blobs()
+                .add_path(&entry.absolute_path)
+                .temp_tag()
+                .await
+                .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+            let name = collection_entry_name(&entry.relative_path)?;
+            items.push((name, tag.hash()));
+            tags.push(tag);
+        }
+
+        let collection = Collection::from_iter(items);
+        let mut root = collection
+            .store(self.inner.blob_store.as_ref())
+            .await
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+        for tag in &mut tags {
+            tag.leak();
+        }
+        root.leak();
+
+        Ok(ImportedPath {
+            blob: blob_ref_from_hash_and_format(root.hash_and_format()),
+            size: total_size,
+        })
+    }
+
+    async fn export_collection(&self, blob: &BlobRef, target: &Path) -> Result<u64, TransportError> {
+        std::fs::create_dir_all(target)
+            .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+        let hash = hash_from_blob_ref(blob)?;
+        let collection = Collection::load(hash, self.inner.blob_store.as_ref())
+            .await
+            .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+
+        let mut total_size = 0_u64;
+        for (name, hash) in collection {
+            let relative_path = validated_collection_relative_path(&name)?;
+            let destination = target.join(&relative_path);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+            }
+            let size = self
+                .inner
+                .blob_store
+                .blobs()
+                .export(hash, &destination)
+                .await
+                .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+            total_size = total_size.saturating_add(size);
+        }
+        Ok(total_size)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectionEntry {
+    relative_path: PathBuf,
+    absolute_path: PathBuf,
+    size: u64,
+}
+
+fn collect_collection_entries(root: &Path) -> Result<Vec<CollectionEntry>, TransportError> {
+    let mut entries = Vec::new();
+    collect_collection_entries_recursive(root, root, &mut entries)?;
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(entries)
+}
+
+fn collect_collection_entries_recursive(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<CollectionEntry>,
+) -> Result<(), TransportError> {
+    for entry in std::fs::read_dir(current).map_err(|error| TransportError::BlobImport(error.to_string()))? {
+        let entry = entry.map_err(|error| TransportError::BlobImport(error.to_string()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+
+        if file_type.is_dir() {
+            collect_collection_entries_recursive(root, &path, entries)?;
+            continue;
+        }
+        if !(file_type.is_file() || file_type.is_symlink()) {
+            continue;
+        }
+
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?
+            .to_path_buf();
+        let size = std::fs::metadata(&path)
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?
+            .len();
+        entries.push(CollectionEntry {
+            relative_path,
+            absolute_path: path,
+            size,
+        });
+    }
+    Ok(())
+}
+
+fn collection_entry_name(relative_path: &Path) -> Result<String, TransportError> {
+    let relative_path = validated_collection_relative_path(relative_path)?;
+    Ok(relative_path.to_string_lossy().replace('\\', "/"))
+}
+
+fn validated_collection_relative_path(path: impl AsRef<Path>) -> Result<PathBuf, TransportError> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return Err(TransportError::BlobExport(format!(
+            "collection entry {} must be relative",
+            path.display()
+        )));
+    }
+
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => clean.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(TransportError::BlobExport(format!(
+                    "collection entry {} contains invalid path components",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    if clean.as_os_str().is_empty() {
+        return Err(TransportError::BlobExport(
+            "collection entry path must not be empty".into(),
+        ));
+    }
+
+    Ok(clean)
 }
 
 async fn run_accept_loop(
@@ -712,6 +905,45 @@ mod tests {
         let _ = std::fs::remove_file(&target);
         host.close().await;
         joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn import_and_export_collection_round_trip() {
+        let Some(transport) = bind_or_skip().await else {
+            return;
+        };
+        let source_dir = unique_temp_path("collection-source");
+        let nested_dir = source_dir.join("nested");
+        let target_dir = unique_temp_path("collection-target");
+        std::fs::create_dir_all(&nested_dir).expect("nested source dir should be writable");
+        std::fs::write(source_dir.join("a.txt"), b"alpha").expect("a.txt should be writable");
+        std::fs::write(nested_dir.join("b.txt"), b"beta").expect("b.txt should be writable");
+
+        let imported = transport
+            .import_path(&source_dir)
+            .await
+            .expect("collection import should succeed");
+        assert_eq!(imported.blob.format, BlobFormat::Collection);
+        assert_eq!(imported.size, 9);
+
+        let exported_size = transport
+            .export_path(&imported.blob, &target_dir)
+            .await
+            .expect("collection export should succeed");
+        assert_eq!(exported_size, 9);
+        assert_eq!(
+            std::fs::read(target_dir.join("a.txt")).expect("exported a.txt should exist"),
+            b"alpha"
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join("nested").join("b.txt"))
+                .expect("exported nested b.txt should exist"),
+            b"beta"
+        );
+
+        let _ = std::fs::remove_dir_all(&source_dir);
+        let _ = std::fs::remove_dir_all(&target_dir);
+        transport.close().await;
     }
 
     #[tokio::test]

@@ -4,14 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use skyffla_rendezvous::app::{build_router, AppState, IpRateLimiter};
-use skyffla_rendezvous::store::{SharedStreamStore, SqliteStreamStore};
+use skyffla_rendezvous::store::{SharedRoomStore, SqliteRoomStore};
 use skyffla_rendezvous::unix_timestamp_seconds;
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
-    let store: SharedStreamStore = Arc::new(SqliteStreamStore::new(&config.database_path)?);
+    let store: SharedRoomStore = Arc::new(SqliteRoomStore::new(&config.database_path)?);
     spawn_cleanup_task(
         store.clone(),
         Duration::from_secs(config.cleanup_interval_seconds),
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn spawn_cleanup_task(store: SharedStreamStore, interval: Duration) {
+fn spawn_cleanup_task(store: SharedRoomStore, interval: Duration) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         loop {
@@ -47,7 +47,7 @@ fn spawn_cleanup_task(store: SharedStreamStore, interval: Duration) {
             match unix_timestamp_seconds() {
                 Ok(now_epoch_seconds) => {
                     if let Err(error) = store.purge_expired(now_epoch_seconds) {
-                        eprintln!("failed to purge expired streams: {error}");
+                        eprintln!("failed to purge expired rooms: {error}");
                     }
                 }
                 Err(error) => eprintln!("failed to read system clock for cleanup: {error}"),

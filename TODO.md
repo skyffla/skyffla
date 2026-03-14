@@ -4,20 +4,19 @@ This file tracks the remaining work in the order we should tackle it.
 
 ## Current Priority Order
 
-1. Tighten rendezvous around room terminology and contract
-2. Finish file and folder work
-3. Port the TUI onto the room engine
-4. Write the wrapper-facing `machine` protocol spec
-5. Build the thin Python wrapper
-6. Add `pipe` as a separate raw payload surface
+1. Finish the remaining file UX work
+2. Port the TUI onto the room engine
+3. Write the wrapper-facing `machine` protocol spec
+4. Build the thin Python wrapper
+5. Add `pipe` as a separate raw payload surface
 
 ## 1. Rendezvous Cleanup
 
-- [ ] Rename rendezvous API and docs conceptually from `stream` to `room`
-- [ ] Keep exact room-id lookup semantics explicit
-- [ ] Verify host registration remains one live host per room id
-- [ ] Keep rendezvous free of room roster, chat, or channel semantics
-- [ ] Update CLI/client naming where appropriate without widening rendezvous responsibilities
+- [x] Rename rendezvous API and docs conceptually from `stream` to `room`
+- [x] Keep exact room-id lookup semantics explicit
+- [x] Verify host registration remains one live host per room id
+- [x] Keep rendezvous free of room roster, chat, or channel semantics
+- [x] Update CLI/client naming where appropriate without widening rendezvous responsibilities
 
 Exit criteria:
 
@@ -26,10 +25,10 @@ Exit criteria:
 ## 2. File / Folder Work
 
 - [x] Blob-backed single-file channels in `machine`
-- [ ] Add folder / collection channels on top of `iroh-blobs`
-- [ ] Add end-to-end tests for folder round-trips
-- [ ] Add multi-recipient file fanout coverage
-- [ ] Add rejection / partial-failure coverage for multi-recipient file sends
+- [x] Add folder / collection channels on top of `iroh-blobs`
+- [x] Add end-to-end tests for folder round-trips
+- [x] Add multi-recipient file fanout coverage
+- [x] Add rejection / partial-failure coverage for multi-recipient file sends
 - [ ] Decide and implement the room-native CLI surface for file send/export outside raw JSON entry
 - [ ] Keep file-channel UX in-band and machine-friendly
 

@@ -7,7 +7,7 @@ use tokio::process::{Child, Command};
 mod support;
 
 use support::{
-    assert_stdio_json_stderr, fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer,
+    assert_stdio_json_stderr, fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer,
     PROCESS_TIMEOUT,
 };
 
@@ -33,7 +33,7 @@ async fn stdio_host_to_join_streams_bytes_both_directions_end_to_end() -> Result
     )?;
     write_child_stdin(&mut host, host_payload, "host stdin").await?;
 
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
 
     let mut join = spawn_stdio_peer(
         &home_dir,
@@ -80,7 +80,7 @@ async fn stdio_join_to_join_streams_bytes_both_directions_end_to_end() -> Result
     )?;
     write_child_stdin(&mut first, first_payload, "first join stdin").await?;
 
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
 
     let mut second = spawn_stdio_peer(
         &home_dir,

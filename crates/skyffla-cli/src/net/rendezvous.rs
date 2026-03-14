@@ -4,27 +4,27 @@ use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use skyffla_protocol::Capabilities;
-use skyffla_rendezvous::{GetStreamResponse, PutStreamRequest, DEFAULT_TTL_SECONDS};
+use skyffla_rendezvous::{GetRoomResponse, PutRoomRequest, DEFAULT_TTL_SECONDS};
 use skyffla_transport::PeerTicket;
 
 use crate::config::SessionConfig;
 
-pub(crate) async fn register_stream(
+pub(crate) async fn register_room(
     client: &Client,
     config: &SessionConfig,
     ticket: &PeerTicket,
-) -> std::result::Result<(), RegisterStreamError> {
+) -> std::result::Result<(), RegisterRoomError> {
     let response = client
-        .put(stream_url(config))
-        .json(&PutStreamRequest {
+        .put(room_url(config))
+        .json(&PutRoomRequest {
             ticket: ticket.encoded.clone(),
             ttl_seconds: DEFAULT_TTL_SECONDS,
             capabilities: Capabilities::default(),
         })
         .send()
         .await
-        .context("failed to register stream with rendezvous server")
-        .map_err(RegisterStreamError::Other)?;
+        .context("failed to register room with rendezvous server")
+        .map_err(RegisterRoomError::Other)?;
 
     if response.status() == StatusCode::CONFLICT {
         let message = response
@@ -32,49 +32,49 @@ pub(crate) async fn register_stream(
             .await
             .ok()
             .map(|body| body.message)
-            .unwrap_or_else(|| format!("stream {} is already hosted", config.stream_id));
-        return Err(RegisterStreamError::AlreadyHosted {
-            stream_id: config.stream_id.clone(),
+            .unwrap_or_else(|| format!("room {} is already hosted", config.stream_id));
+        return Err(RegisterRoomError::AlreadyHosted {
+            room_id: config.stream_id.clone(),
             message,
         });
     }
 
     response
         .error_for_status()
-        .context("rendezvous server rejected stream registration")
-        .map_err(RegisterStreamError::Other)?;
+        .context("rendezvous server rejected room registration")
+        .map_err(RegisterRoomError::Other)?;
     Ok(())
 }
 
-pub(crate) async fn resolve_stream(
+pub(crate) async fn resolve_room(
     client: &Client,
     config: &SessionConfig,
-) -> Result<Option<GetStreamResponse>> {
+) -> Result<Option<GetRoomResponse>> {
     let response = client
-        .get(stream_url(config))
+        .get(room_url(config))
         .send()
         .await
-        .context("failed to resolve stream from rendezvous server")?;
+        .context("failed to resolve room from rendezvous server")?;
 
     if response.status() == StatusCode::NOT_FOUND {
         return Ok(None);
     }
 
-    let stream = response
+    let room = response
         .error_for_status()
-        .context("rendezvous server rejected stream lookup")?
+        .context("rendezvous server rejected room lookup")?
         .json()
         .await
         .context("failed to decode rendezvous lookup response")?;
-    Ok(Some(stream))
+    Ok(Some(room))
 }
 
-pub(crate) async fn delete_stream(client: &Client, config: &SessionConfig) -> Result<()> {
+pub(crate) async fn delete_room(client: &Client, config: &SessionConfig) -> Result<()> {
     let response = client
-        .delete(stream_url(config))
+        .delete(room_url(config))
         .send()
         .await
-        .context("failed to delete stream from rendezvous server")?;
+        .context("failed to delete room from rendezvous server")?;
 
     if is_delete_success(response.status()) {
         return Ok(());
@@ -82,7 +82,7 @@ pub(crate) async fn delete_stream(client: &Client, config: &SessionConfig) -> Re
 
     response
         .error_for_status()
-        .context("rendezvous server rejected stream deletion")?;
+        .context("rendezvous server rejected room deletion")?;
     Ok(())
 }
 
@@ -90,21 +90,21 @@ fn is_delete_success(status: StatusCode) -> bool {
     status.is_success() || status == StatusCode::NOT_FOUND
 }
 
-fn stream_url(config: &SessionConfig) -> String {
+fn room_url(config: &SessionConfig) -> String {
     format!(
-        "{}/v1/streams/{}",
+        "{}/v1/rooms/{}",
         config.rendezvous_server.trim_end_matches('/'),
         config.stream_id
     )
 }
 
 #[derive(Debug)]
-pub(crate) enum RegisterStreamError {
-    AlreadyHosted { stream_id: String, message: String },
+pub(crate) enum RegisterRoomError {
+    AlreadyHosted { room_id: String, message: String },
     Other(anyhow::Error),
 }
 
-impl fmt::Display for RegisterStreamError {
+impl fmt::Display for RegisterRoomError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyHosted { message, .. } => message.fmt(f),
@@ -113,7 +113,7 @@ impl fmt::Display for RegisterStreamError {
     }
 }
 
-impl std::error::Error for RegisterStreamError {}
+impl std::error::Error for RegisterRoomError {}
 
 #[derive(Debug, Deserialize)]
 struct RendezvousErrorResponse {
@@ -129,10 +129,10 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{is_delete_success, stream_url, RendezvousErrorResponse};
+    use super::{is_delete_success, room_url, RendezvousErrorResponse};
 
     #[test]
-    fn stream_url_trims_trailing_slash_from_server() {
+    fn room_url_trims_trailing_slash_from_server() {
         let config = SessionConfig {
             role: Role::Host,
             stream_id: "room".into(),
@@ -149,23 +149,23 @@ mod tests {
         };
 
         assert_eq!(
-            stream_url(&config),
-            format!("{DEFAULT_RENDEZVOUS_URL}/v1/streams/room")
+            room_url(&config),
+            format!("{DEFAULT_RENDEZVOUS_URL}/v1/rooms/room")
         );
     }
 
     #[test]
     fn rendezvous_error_response_deserializes_message() {
         let body = serde_json::from_str::<RendezvousErrorResponse>(
-            r#"{"error":"stream_already_exists","message":"stream demo is already hosted"}"#,
+            r#"{"error":"room_already_exists","message":"room demo is already hosted"}"#,
         )
         .expect("rendezvous error response should deserialize");
 
-        assert_eq!(body.message, "stream demo is already hosted");
+        assert_eq!(body.message, "room demo is already hosted");
     }
 
     #[test]
-    fn delete_treats_missing_stream_as_success() {
+    fn delete_treats_missing_room_as_success() {
         assert!(is_delete_success(StatusCode::NO_CONTENT));
         assert!(is_delete_success(StatusCode::NOT_FOUND));
         assert!(!is_delete_success(StatusCode::INTERNAL_SERVER_ERROR));

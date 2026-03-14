@@ -12,7 +12,9 @@ use skyffla_session::room::{RoomEngine, RoutedEvent};
 use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
 };
-use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
+use skyffla_transport::{
+    ConnectionStatus, ImportedPath, IrohConnection, IrohTransport, PeerTicket,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -1431,9 +1433,7 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             state.members.remove(member_id);
             state.member_tickets.remove(member_id);
             state.peer_links.remove(member_id);
-            for channel in state.channels.values_mut() {
-                channel.participants.remove(member_id);
-            }
+            prune_join_channels_for_member(state, member_id);
         }
         MachineEvent::ChannelOpened {
             channel_id,
@@ -1462,10 +1462,18 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             }
         }
         MachineEvent::ChannelClosed { channel_id, .. } => {
-            state.channels.remove(channel_id);
+            if let Some(member_id) = event_actor_member(event) {
+                remove_join_channel_participant(state, channel_id, &member_id);
+            } else {
+                state.channels.remove(channel_id);
+            }
         }
         MachineEvent::ChannelRejected { channel_id, .. } => {
-            state.channels.remove(channel_id);
+            if let Some(member_id) = event_actor_member(event) {
+                remove_join_channel_participant(state, channel_id, &member_id);
+            } else {
+                state.channels.remove(channel_id);
+            }
         }
         _ => {}
     }
@@ -1510,19 +1518,10 @@ async fn handle_join_command(
             mime,
         } => {
             let path_ref = Path::new(&path);
-            if !path_ref.is_file() {
-                return Err(CliError::runtime(format!(
-                    "path {} is not a regular file",
-                    path_ref.display()
-                )));
-            }
-            let blob = transport
-                .import_blob_path(path_ref)
+            let ImportedPath { blob, size } = transport
+                .import_path(path_ref)
                 .await
                 .map_err(|error| CliError::transport(error.to_string()))?;
-            let size = std::fs::metadata(path_ref)
-                .map_err(|error| CliError::local_io(error.to_string()))?
-                .len();
             let name = name.or_else(|| {
                 path_ref
                     .file_name()
@@ -1664,7 +1663,7 @@ async fn handle_join_command(
         MachineCommand::ExportChannelFile { channel_id, path } => {
             let blob = join_exportable_blob(state, &self_member, &channel_id)?;
             let size = transport
-                .export_blob(&blob, Path::new(&path))
+                .export_path(&blob, Path::new(&path))
                 .await
                 .map_err(|error| CliError::transport(error.to_string()))?;
             emit_event(
@@ -2040,19 +2039,10 @@ async fn handle_host_command(
                 ));
             }
             let path_ref = Path::new(&path);
-            if !path_ref.is_file() {
-                return Err(CliError::runtime(format!(
-                    "path {} is not a regular file",
-                    path_ref.display()
-                )));
-            }
-            let blob = transport
-                .import_blob_path(path_ref)
+            let ImportedPath { blob, size } = transport
+                .import_path(path_ref)
                 .await
                 .map_err(|error| CliError::transport(error.to_string()))?;
-            let size = std::fs::metadata(path_ref)
-                .map_err(|error| CliError::local_io(error.to_string()))?
-                .len();
             let name = name.or_else(|| {
                 path_ref
                     .file_name()
@@ -2081,7 +2071,7 @@ async fn handle_host_command(
             }
             let blob = host_exportable_blob(room, sender, &channel_id, host_state)?;
             let size = transport
-                .export_blob(&blob, Path::new(&path))
+                .export_path(&blob, Path::new(&path))
                 .await
                 .map_err(|error| CliError::transport(error.to_string()))?;
             emit_event(
@@ -2197,6 +2187,42 @@ fn track_join_state(state: &mut JoinState, event: &MachineEvent) {
             }
         }
         _ => {}
+    }
+}
+
+fn event_actor_member(event: &MachineEvent) -> Option<MemberId> {
+    match event {
+        MachineEvent::ChannelAccepted { member_id, .. }
+        | MachineEvent::ChannelRejected { member_id, .. }
+        | MachineEvent::ChannelClosed { member_id, .. } => Some(member_id.clone()),
+        _ => None,
+    }
+}
+
+fn remove_join_channel_participant(
+    state: &mut JoinState,
+    channel_id: &ChannelId,
+    member_id: &MemberId,
+) {
+    let self_member = state.self_member.clone();
+    let should_remove = if let Some(channel) = state.channels.get_mut(channel_id) {
+        channel.participants.remove(member_id);
+        channel.participants.len() < 2
+            || self_member
+                .as_ref()
+                .is_some_and(|self_member| !channel.participants.contains(self_member))
+    } else {
+        false
+    };
+    if should_remove {
+        state.channels.remove(channel_id);
+    }
+}
+
+fn prune_join_channels_for_member(state: &mut JoinState, member_id: &MemberId) {
+    let channel_ids = state.channels.keys().cloned().collect::<Vec<_>>();
+    for channel_id in channel_ids {
+        remove_join_channel_participant(state, &channel_id, member_id);
     }
 }
 

@@ -30,18 +30,17 @@ Implemented so far:
 - direct peer chat over peer links
 - direct `machine` channel traffic over peer links
 - in-band machine errors instead of process-level failures
-- blob-backed single-file channels in `machine` mode via `iroh-blobs`
-- rendezvous already acts as a minimal exact-key host locator
+- blob-backed file and folder channels in `machine` mode via `iroh-blobs`
+- broadcast file acceptance / rejection now preserves per-recipient outcomes
+- rendezvous uses minimal exact room-id host lookup via `/v1/rooms/{room_id}`
 
 Not implemented yet:
 
-- folder / collection transfer on top of `iroh-blobs`
-- multiparty file fanout polish and file UX outside `machine`
+- file UX outside raw `machine` command entry
 - room-native TUI on the new room engine
 - a standalone wrapper-facing `machine` protocol spec
 - thin Python wrapper over the `machine` API
 - raw `pipe` on top of the room model
-- rendezvous naming and contract cleanup from `stream` to `room`
 
 ## Naming
 
@@ -245,8 +244,8 @@ collection metadata, not a custom raw byte stream invented in the room runtime.
 
 Current implementation status:
 
-- single-file blob-backed channels are implemented in `machine` mode
-- folder / collection channels are the next file milestone
+- blob-backed file and folder / collection channels are implemented in `machine` mode
+- multi-recipient file accept / reject behavior now has direct coverage
 - raw inline `channel_data` is intentionally invalid for file channels
 
 For `route = all`, the sender fans out to one direct peer channel per accepted recipient.
@@ -816,14 +815,14 @@ Output:
 
 Implemented so far:
 
-- single-file blob-backed channels in `machine` mode
+- single-file and folder / collection blob-backed channels in `machine` mode
 - local file import, remote fetch, and local export on top of the shared transport endpoint
+- local directory import, remote fetch, and local directory export via blob collections
 - file-channel validation that rejects inline `channel_data`
+- per-recipient reject / accept coverage for broadcast file channels
 
 Remaining work:
 
-- folder / collection support
-- multi-recipient file acceptance and failure isolation coverage
 - file UX outside `machine`
 
 Tests:
@@ -918,15 +917,11 @@ Tests:
 
 From the current state, the recommended order is:
 
-1. tighten rendezvous naming and contract around rooms
-2. finish file-related work
-   - folder / collection support
-   - multiparty file fanout and rejection coverage
-   - file UX polish outside raw `machine` command entry
-3. port the TUI onto the room engine
-4. document the wrapper-facing `machine` contract cleanly
-5. build the thin Python wrapper on top of that contract
-6. add raw `pipe` as a separate surface after the wrapper-facing contract is stable
+1. finish the remaining file UX work outside raw `machine` command entry
+2. port the TUI onto the room engine
+3. document the wrapper-facing `machine` contract cleanly
+4. build the thin Python wrapper on top of that contract
+5. add raw `pipe` as a separate surface after the wrapper-facing contract is stable
 
 ## Test Strategy
 
@@ -997,7 +992,7 @@ The first milestone is:
 - a room-native Rust runtime
 - broadcast and 1:1 routing under one model
 
-That milestone is complete. The current frontier is blob-backed file/folder work,
+That milestone is complete. The current frontier is the remaining file UX work,
 then TUI, then wrappers.
 
 ## Summary

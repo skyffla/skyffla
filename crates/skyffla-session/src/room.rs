@@ -170,6 +170,7 @@ impl RoomEngine {
                 member_id: member_id.clone(),
             });
         }
+        self.prune_member_from_channels(member_id);
 
         let event = MachineEvent::MemberLeft {
             member_id: member_id.clone(),
@@ -299,7 +300,7 @@ impl RoomEngine {
                 reason,
             },
         )?;
-        self.channels.remove(channel_id);
+        self.remove_channel_participant(channel_id, member_id);
         Ok(routed)
     }
 
@@ -339,7 +340,7 @@ impl RoomEngine {
                 reason,
             },
         )?;
-        self.channels.remove(channel_id);
+        self.remove_channel_participant(channel_id, member_id);
         Ok(routed)
     }
 
@@ -452,6 +453,32 @@ impl RoomEngine {
                 event: event.clone(),
             })
             .collect())
+    }
+
+    fn remove_channel_participant(&mut self, channel_id: &ChannelId, member_id: &MemberId) {
+        let should_remove = if let Some(channel) = self.channels.get_mut(channel_id) {
+            channel.participants.remove(member_id);
+            channel.participants.len() < 2
+        } else {
+            false
+        };
+        if should_remove {
+            self.channels.remove(channel_id);
+        }
+    }
+
+    fn prune_member_from_channels(&mut self, member_id: &MemberId) {
+        let empty_channels = self
+            .channels
+            .iter_mut()
+            .filter_map(|(channel_id, channel)| {
+                channel.participants.remove(member_id);
+                (channel.participants.len() < 2).then(|| channel_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for channel_id in empty_channels {
+            self.channels.remove(&channel_id);
+        }
     }
 }
 
@@ -790,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn rejecting_channel_removes_it_from_future_routing() {
+    fn rejecting_two_member_channel_removes_it_from_future_routing() {
         let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
         let beta = room.join("beta", None).expect("beta joins");
         let host_member = room.host_member().clone();
@@ -834,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_channel_removes_it_from_future_routing() {
+    fn closing_two_member_channel_removes_it_from_future_routing() {
         let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
         let beta = room.join("beta", None).expect("beta joins");
         let host_member = room.host_member().clone();
@@ -906,6 +933,83 @@ mod tests {
         assert!(routed
             .iter()
             .any(|event| event.recipient == beta.member.member_id));
+    }
+
+    #[test]
+    fn rejecting_one_broadcast_participant_keeps_channel_for_others() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let gamma = room.join("gamma", None).expect("gamma joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("c1"),
+            ChannelKind::File,
+            Route::All,
+            Some("report.txt".into()),
+            Some(12),
+            Some("text/plain".into()),
+            Some(BlobRef {
+                hash: "abc123".into(),
+                format: BlobFormat::Blob,
+            }),
+        )
+        .expect("channel opens");
+
+        let rejected = room
+            .reject_channel(
+                &gamma.member.member_id,
+                &channel_id("c1"),
+                Some("busy".into()),
+            )
+            .expect("gamma can reject");
+        assert_eq!(rejected.len(), 2);
+        assert!(rejected.iter().any(|event| event.recipient == host_member));
+        assert!(rejected
+            .iter()
+            .any(|event| event.recipient == beta.member.member_id));
+
+        let accepted = room
+            .accept_channel(&beta.member.member_id, &channel_id("c1"))
+            .expect("beta can still accept");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].recipient, host_member);
+    }
+
+    #[test]
+    fn closing_one_broadcast_participant_keeps_channel_for_others() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let gamma = room.join("gamma", None).expect("gamma joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("c1"),
+            ChannelKind::Machine,
+            Route::All,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("channel opens");
+
+        let closed = room
+            .close_channel(&gamma.member.member_id, &channel_id("c1"), Some("done".into()))
+            .expect("gamma can close");
+        assert_eq!(closed.len(), 2);
+        assert!(closed.iter().any(|event| event.recipient == host_member));
+        assert!(closed
+            .iter()
+            .any(|event| event.recipient == beta.member.member_id));
+
+        let routed = room
+            .send_channel_data(&host_member, &channel_id("c1"), "still open".into())
+            .expect("channel should remain for host and beta");
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].recipient, beta.member.member_id);
     }
 
     #[test]

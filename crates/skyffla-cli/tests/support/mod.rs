@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use iroh::address_lookup::MdnsAddressLookup;
 use skyffla_rendezvous::app::{build_router, AppState, IpRateLimiter};
-use skyffla_rendezvous::store::InMemoryStreamStore;
+use skyffla_rendezvous::store::InMemoryRoomStore;
 use skyffla_transport::{IrohTransport, TransportError};
 use tokio::net::TcpListener;
 use tokio::time::sleep;
@@ -110,7 +110,7 @@ impl TestServer {
             .context("failed to read rendezvous test listener addr")?;
         let task = tokio::spawn(async move {
             let app = build_router(AppState {
-                store: Arc::new(InMemoryStreamStore::new()),
+                store: Arc::new(InMemoryRoomStore::new()),
                 rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
                 trust_proxy_headers: false,
             });
@@ -200,19 +200,19 @@ pub async fn wait_for_server_ready(server_url: &str) -> Result<()> {
     }
 }
 
-pub async fn wait_for_stream_ready(server_url: &str, room: &str) -> Result<()> {
+pub async fn wait_for_room_ready(server_url: &str, room: &str) -> Result<()> {
     let client = reqwest::Client::new();
-    let stream_url = format!("{server_url}/v1/streams/{room}");
+    let room_url = format!("{server_url}/v1/rooms/{room}");
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
 
     loop {
-        if let Ok(response) = client.get(&stream_url).send().await {
+        if let Ok(response) = client.get(&room_url).send().await {
             if response.status().is_success() {
                 return Ok(());
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("stream {room} was not registered within {:?}", CONNECT_TIMEOUT);
+            anyhow::bail!("room {room} was not registered within {:?}", CONNECT_TIMEOUT);
         }
         sleep(Duration::from_millis(50)).await;
     }

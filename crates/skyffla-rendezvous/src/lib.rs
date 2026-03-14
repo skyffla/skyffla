@@ -11,13 +11,13 @@ pub const DEFAULT_TTL_SECONDS: u64 = 600;
 pub const MAX_TTL_SECONDS: u64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PutStreamRequest {
+pub struct PutRoomRequest {
     pub ticket: String,
     pub ttl_seconds: u64,
     pub capabilities: Capabilities,
 }
 
-impl PutStreamRequest {
+impl PutRoomRequest {
     pub fn normalized_ttl_seconds(&self) -> Result<u64, RegistryError> {
         if self.ttl_seconds == 0 {
             return Err(RegistryError::InvalidTtl {
@@ -30,15 +30,15 @@ impl PutStreamRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PutStreamResponse {
-    pub stream_id: String,
+pub struct PutRoomResponse {
+    pub room_id: String,
     pub expires_at_epoch_seconds: u64,
-    pub status: StreamStatus,
+    pub status: RoomStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GetStreamResponse {
-    pub stream_id: String,
+pub struct GetRoomResponse {
+    pub room_id: String,
     pub ticket: String,
     pub expires_at_epoch_seconds: u64,
     pub capabilities: Capabilities,
@@ -46,26 +46,26 @@ pub struct GetStreamResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum StreamStatus {
+pub enum RoomStatus {
     Waiting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamRecord {
-    pub stream_id: String,
+pub struct RoomRecord {
+    pub room_id: String,
     pub ticket: String,
     pub capabilities: Capabilities,
     pub expires_at_epoch_seconds: u64,
 }
 
-impl StreamRecord {
+impl RoomRecord {
     pub fn is_expired_at(&self, now_epoch_seconds: u64) -> bool {
         self.expires_at_epoch_seconds <= now_epoch_seconds
     }
 
-    pub fn as_get_response(&self) -> GetStreamResponse {
-        GetStreamResponse {
-            stream_id: self.stream_id.clone(),
+    pub fn as_get_response(&self) -> GetRoomResponse {
+        GetRoomResponse {
+            room_id: self.room_id.clone(),
             ticket: self.ticket.clone(),
             expires_at_epoch_seconds: self.expires_at_epoch_seconds,
             capabilities: self.capabilities.clone(),
@@ -74,69 +74,69 @@ impl StreamRecord {
 }
 
 #[derive(Debug, Default)]
-pub struct StreamRegistry {
-    entries: BTreeMap<String, StreamRecord>,
+pub struct RoomRegistry {
+    entries: BTreeMap<String, RoomRecord>,
 }
 
-impl StreamRegistry {
+impl RoomRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn put(
         &mut self,
-        stream_id: impl Into<String>,
-        request: PutStreamRequest,
+        room_id: impl Into<String>,
+        request: PutRoomRequest,
         now_epoch_seconds: u64,
-    ) -> Result<PutStreamResponse, RegistryError> {
-        let stream_id = stream_id.into();
+    ) -> Result<PutRoomResponse, RegistryError> {
+        let room_id = room_id.into();
         self.purge_expired(now_epoch_seconds);
 
         let ttl_seconds = request.normalized_ttl_seconds()?;
         let expires_at_epoch_seconds = now_epoch_seconds + ttl_seconds;
-        if let Some(existing) = self.entries.get_mut(&stream_id) {
+        if let Some(existing) = self.entries.get_mut(&room_id) {
             if existing.ticket != request.ticket {
-                return Err(RegistryError::StreamAlreadyExists {
-                    stream_id: stream_id.clone(),
+                return Err(RegistryError::RoomAlreadyExists {
+                    room_id: room_id.clone(),
                 });
             }
 
             existing.capabilities = request.capabilities;
             existing.expires_at_epoch_seconds = expires_at_epoch_seconds;
         } else {
-            let record = StreamRecord {
-                stream_id: stream_id.clone(),
+            let record = RoomRecord {
+                room_id: room_id.clone(),
                 ticket: request.ticket,
                 capabilities: request.capabilities,
                 expires_at_epoch_seconds,
             };
-            self.entries.insert(stream_id.clone(), record);
+            self.entries.insert(room_id.clone(), record);
         }
 
-        Ok(PutStreamResponse {
-            stream_id,
+        Ok(PutRoomResponse {
+            room_id,
             expires_at_epoch_seconds,
-            status: StreamStatus::Waiting,
+            status: RoomStatus::Waiting,
         })
     }
 
     pub fn get(
         &mut self,
-        stream_id: &str,
+        room_id: &str,
         now_epoch_seconds: u64,
-    ) -> Result<GetStreamResponse, RegistryError> {
+    ) -> Result<GetRoomResponse, RegistryError> {
         self.purge_expired(now_epoch_seconds);
 
         self.entries
-            .get(stream_id)
-            .map(StreamRecord::as_get_response)
-            .ok_or_else(|| RegistryError::StreamNotFound {
-                stream_id: stream_id.to_string(),
+            .get(room_id)
+            .map(RoomRecord::as_get_response)
+            .ok_or_else(|| RegistryError::RoomNotFound {
+                room_id: room_id.to_string(),
             })
     }
 
-    pub fn delete(&mut self, stream_id: &str) -> bool {
-        self.entries.remove(stream_id).is_some()
+    pub fn delete(&mut self, room_id: &str) -> bool {
+        self.entries.remove(room_id).is_some()
     }
 
     pub fn purge_expired(&mut self, now_epoch_seconds: u64) -> usize {
@@ -158,8 +158,8 @@ impl StreamRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
     InvalidTtl { ttl_seconds: u64 },
-    StreamAlreadyExists { stream_id: String },
-    StreamNotFound { stream_id: String },
+    RoomAlreadyExists { room_id: String },
+    RoomNotFound { room_id: String },
 }
 
 impl fmt::Display for RegistryError {
@@ -171,10 +171,10 @@ impl fmt::Display for RegistryError {
                     "ttl_seconds must be greater than zero, got {ttl_seconds}"
                 )
             }
-            Self::StreamAlreadyExists { stream_id } => {
-                write!(f, "stream {stream_id} is already hosted")
+            Self::RoomAlreadyExists { room_id } => {
+                write!(f, "room {room_id} is already hosted")
             }
-            Self::StreamNotFound { stream_id } => write!(f, "stream {stream_id} was not found"),
+            Self::RoomNotFound { room_id } => write!(f, "room {room_id} was not found"),
         }
     }
 }
@@ -191,8 +191,8 @@ pub fn unix_timestamp_seconds() -> Result<u64, std::time::SystemTimeError> {
 mod tests {
     use super::*;
 
-    fn sample_request() -> PutStreamRequest {
-        PutStreamRequest {
+    fn sample_request() -> PutRoomRequest {
+        PutRoomRequest {
             ticket: "bootstrap-ticket".into(),
             ttl_seconds: DEFAULT_TTL_SECONDS,
             capabilities: Capabilities::default(),
@@ -200,25 +200,25 @@ mod tests {
     }
 
     #[test]
-    fn put_and_get_stream_round_trip() {
-        let mut registry = StreamRegistry::new();
+    fn put_and_get_room_round_trip() {
+        let mut registry = RoomRegistry::new();
         let response = registry
             .put("demo-room", sample_request(), 1_000)
             .expect("put should succeed");
 
-        assert_eq!(response.stream_id, "demo-room");
-        assert_eq!(response.status, StreamStatus::Waiting);
+        assert_eq!(response.room_id, "demo-room");
+        assert_eq!(response.status, RoomStatus::Waiting);
 
         let resolved = registry
             .get("demo-room", 1_001)
-            .expect("get should resolve existing stream");
+            .expect("get should resolve existing room");
         assert_eq!(resolved.ticket, "bootstrap-ticket");
         assert_eq!(resolved.capabilities, Capabilities::default());
     }
 
     #[test]
-    fn registry_rejects_duplicate_live_stream() {
-        let mut registry = StreamRegistry::new();
+    fn registry_rejects_duplicate_live_room() {
+        let mut registry = RoomRegistry::new();
         registry
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");
@@ -228,29 +228,29 @@ mod tests {
         let result = registry.put("demo-room", conflicting, 1_100);
         assert_eq!(
             result,
-            Err(RegistryError::StreamAlreadyExists {
-                stream_id: "demo-room".into(),
+            Err(RegistryError::RoomAlreadyExists {
+                room_id: "demo-room".into(),
             })
         );
     }
 
     #[test]
     fn registry_allows_reuse_after_expiry() {
-        let mut registry = StreamRegistry::new();
+        let mut registry = RoomRegistry::new();
         registry
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");
 
         let response = registry
             .put("demo-room", sample_request(), 1_601)
-            .expect("expired stream id should become reusable");
+            .expect("expired room id should become reusable");
 
         assert_eq!(response.expires_at_epoch_seconds, 2_201);
     }
 
     #[test]
-    fn registry_refreshes_live_stream_when_ticket_matches() {
-        let mut registry = StreamRegistry::new();
+    fn registry_refreshes_live_room_when_ticket_matches() {
+        let mut registry = RoomRegistry::new();
         registry
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");
@@ -259,7 +259,7 @@ mod tests {
         refresh.ttl_seconds = 1200;
         let response = registry
             .put("demo-room", refresh, 1_100)
-            .expect("matching ticket should refresh existing stream");
+            .expect("matching ticket should refresh existing room");
 
         assert_eq!(response.expires_at_epoch_seconds, 2_300);
         assert_eq!(registry.len(), 1);
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn registry_purges_expired_entries() {
-        let mut registry = StreamRegistry::new();
+        let mut registry = RoomRegistry::new();
         registry
             .put("demo-1", sample_request(), 1_000)
             .expect("first put should succeed");
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn ttl_is_capped_to_maximum() {
-        let mut registry = StreamRegistry::new();
+        let mut registry = RoomRegistry::new();
         let mut request = sample_request();
         request.ttl_seconds = MAX_TTL_SECONDS + 500;
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn zero_ttl_is_rejected() {
-        let mut registry = StreamRegistry::new();
+        let mut registry = RoomRegistry::new();
         let mut request = sample_request();
         request.ttl_seconds = 0;
 

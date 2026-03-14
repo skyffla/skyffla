@@ -7,7 +7,7 @@ use tokio::process::Command;
 mod support;
 
 use support::{
-    fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer, PROCESS_TIMEOUT,
+    fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -46,7 +46,7 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
         .context("failed to write stdio payload into host stdin")?;
     drop(host_stdin);
 
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
     join.arg("join")
@@ -152,7 +152,7 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         .context("failed to write stdio payload into host stdin")?;
     drop(host_stdin);
 
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
     join.arg("join")
@@ -240,7 +240,7 @@ async fn stdio_rejects_session_mode_mismatch_during_handshake() -> Result<()> {
         .stderr(Stdio::piped());
     let host = host.spawn().context("failed to spawn stdio host process")?;
 
-    wait_for_stream_ready(&server.url, &room).await?;
+    wait_for_room_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
     join.arg("join")

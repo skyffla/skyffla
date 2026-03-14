@@ -2,7 +2,7 @@ use anyhow::Context;
 use iroh::EndpointAddr;
 use reqwest::Client;
 use serde_json::json;
-use skyffla_rendezvous::GetStreamResponse;
+use skyffla_rendezvous::GetRoomResponse;
 use skyffla_session::{state_changed_event, SessionEvent, SessionMachine};
 use skyffla_transport::{IrohTransport, PeerTicket, TransportOptions};
 
@@ -12,7 +12,7 @@ use crate::config::{Role, SessionArgs, SessionConfig};
 use crate::net::local_discovery::{
     enable_local_discovery, resolve_local_join_decision, LocalAnnouncement, LocalJoinDecision,
 };
-use crate::net::rendezvous::{delete_stream, register_stream, resolve_stream, RegisterStreamError};
+use crate::net::rendezvous::{delete_room, register_room, resolve_room, RegisterRoomError};
 use crate::runtime::machine::run_machine_host;
 use crate::runtime::session::run_connected_session;
 
@@ -40,13 +40,13 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
     let ticket = transport
         .local_ticket()
         .map_err(|error| CliError::transport(error.to_string()))?;
-    register_stream(&client, &config, &ticket)
+    register_room(&client, &config, &ticket)
         .await
         .map_err(|error| match error {
-            RegisterStreamError::AlreadyHosted { stream_id, .. } => {
-                CliError::rendezvous(format!("stream {stream_id} is already hosted"))
+            RegisterRoomError::AlreadyHosted { room_id, .. } => {
+                CliError::rendezvous(format!("room {room_id} is already hosted"))
             }
-            RegisterStreamError::Other(error) => CliError::rendezvous(error.to_string()),
+            RegisterRoomError::Other(error) => CliError::rendezvous(error.to_string()),
         })?;
     wait_for_incoming_peer(&config, &sink, &mut session, &client, transport, false).await
 }
@@ -72,7 +72,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     let transport = IrohTransport::bind_with_options(TransportOptions { local_only: false })
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
-    let peer = resolve_stream(&client, &config)
+    let peer = resolve_room(&client, &config)
         .await
         .map_err(|error| CliError::rendezvous(error.to_string()))?;
     if let Some(peer) = peer {
@@ -82,7 +82,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     let ticket = transport
         .local_ticket()
         .map_err(|error| CliError::transport(error.to_string()))?;
-    match register_stream(&client, &config, &ticket).await {
+    match register_room(&client, &config, &ticket).await {
         Ok(()) => {
             config.role = Role::Host;
             sink.emit_runtime_event(state_changed_event(
@@ -95,18 +95,18 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
             ));
             wait_for_incoming_peer(&config, &sink, &mut session, &client, transport, true).await
         }
-        Err(RegisterStreamError::AlreadyHosted { stream_id, .. }) => {
-            let peer = resolve_stream(&client, &config)
+        Err(RegisterRoomError::AlreadyHosted { room_id, .. }) => {
+            let peer = resolve_room(&client, &config)
                 .await
                 .map_err(|error| CliError::rendezvous(error.to_string()))?
                 .ok_or_else(|| {
                     CliError::rendezvous(format!(
-                        "stream {stream_id} became hosted while joining; retry"
+                        "room {room_id} became hosted while joining; retry"
                     ))
                 })?;
             connect_to_registered_peer(&config, &sink, &mut session, transport, peer).await
         }
-        Err(RegisterStreamError::Other(error)) => Err(CliError::rendezvous(error.to_string())),
+        Err(RegisterRoomError::Other(error)) => Err(CliError::rendezvous(error.to_string())),
     }
 }
 
@@ -115,7 +115,7 @@ async fn connect_to_registered_peer(
     sink: &EventSink,
     session: &mut SessionMachine,
     transport: IrohTransport,
-    peer: GetStreamResponse,
+    peer: GetRoomResponse,
 ) -> Result<(), CliError> {
     connect_to_endpoint_addr(
         config,
@@ -233,25 +233,25 @@ async fn wait_for_incoming_peer(
     if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
-            "stream_id": config.stream_id,
+            "room_id": config.stream_id,
             "server": config.rendezvous_server,
             "created_by_join": created_by_join,
         }));
     } else if created_by_join {
         eprintln!(
-            "no host found on stream {}; you are now waiting for a peer via {}",
+            "no host found for room {}; you are now waiting for a peer via {}",
             config.stream_id, config.rendezvous_server
         );
     } else {
         eprintln!(
-            "waiting for peer on stream {} via {}",
+            "waiting for peer on room {} via {}",
             config.stream_id, config.rendezvous_server
         );
     }
 
     if config.machine {
         let result = run_machine_host(config, sink, session, &transport).await;
-        let delete_result = delete_stream(client, config)
+        let delete_result = delete_room(client, config)
             .await
             .map_err(|error| CliError::rendezvous(error.to_string()));
         transport.close().await;
@@ -264,7 +264,7 @@ async fn wait_for_incoming_peer(
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
     let result = run_connected_session(config, sink, session, &transport, connection, true).await;
-    let delete_result = delete_stream(client, config)
+    let delete_result = delete_room(client, config)
         .await
         .map_err(|error| CliError::rendezvous(error.to_string()));
     transport.close().await;
@@ -289,18 +289,18 @@ async fn wait_for_incoming_peer_local(
     if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
-            "stream_id": config.stream_id,
+            "room_id": config.stream_id,
             "created_by_join": created_by_join,
             "discovery": "mdns",
         }));
     } else if created_by_join {
         eprintln!(
-            "no local host found on stream {}; you are now advertising on the local network",
+            "no local host found for room {}; you are now advertising on the local network",
             config.stream_id
         );
     } else {
         eprintln!(
-            "waiting for local peer on stream {} via mDNS discovery",
+            "waiting for local peer on room {} via mDNS discovery",
             config.stream_id
         );
     }
