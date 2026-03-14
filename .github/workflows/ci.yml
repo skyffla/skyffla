@@ -4,18 +4,32 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "frontend/**"
-      - "**/*.md"
-      - "LICENSE"
   pull_request:
-    paths-ignore:
-      - "frontend/**"
-      - "**/*.md"
-      - "LICENSE"
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Detect Rust and CLI changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust:
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "rust-toolchain.toml"
+              - "crates/**"
+              - ".github/workflows/ci.yml"
+
   quality:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -37,6 +51,8 @@ jobs:
         run: cargo test --workspace --locked
 
   smoke-build:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -55,3 +71,11 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --bins --locked
+
+  skipped:
+    needs: changes
+    if: needs.changes.outputs.rust != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Skip Rust CI for frontend-only changes
+        run: echo "No Rust or CLI changes detected; skipping cargo checks and binary builds."

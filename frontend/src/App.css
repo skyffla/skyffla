@@ -118,7 +118,16 @@
 }
 
 .lede {
+  display: inline-grid;
+  justify-self: center;
+  gap: 0.15rem;
+  padding-left: 1.25rem;
   text-align: left;
+  text-transform: lowercase;
+}
+
+.lede li {
+  margin: 0;
 }
 
 .contentGrid {
@@ -144,10 +153,37 @@
   gap: 0.8rem;
 }
 
-.messageCard h2 {
+.installCard {
+  gap: 0.8rem;
+  width: min(100%, 24rem);
+  padding: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 248, 228, 0.68)),
+    rgba(255, 255, 255, 0.56);
+}
+
+.sectionLabel {
   margin: 0;
-  color: var(--ink-900);
-  font: 400 clamp(1.05rem, 1.8vw, 1.3rem) / 1.3 var(--font-display);
+  color: rgba(44, 26, 0, 0.72);
+  font: 400 clamp(0.85rem, 1.2vw, 0.98rem) / 1.1 var(--font-body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.messageCard p.sectionLabel {
+  color: rgba(44, 26, 0, 0.72);
+  font: 400 clamp(0.85rem, 1.2vw, 0.98rem) / 1.1 var(--font-body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.installHeader {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.installHint {
+  margin-top: 0.1rem;
 }
 
 .messageCard code,
@@ -157,18 +193,82 @@
 }
 
 .commandBlock {
-  padding: 0.9rem 1rem;
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem 0.9rem;
+  background: linear-gradient(180deg, rgba(72, 45, 0, 0.96), rgba(41, 25, 0, 0.94));
+  border-color: rgba(255, 219, 122, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 243, 203, 0.14),
+    0 12px 24px rgba(111, 67, 0, 0.12);
 }
 
-.commandBlock pre {
-  margin: 0;
-  white-space: pre-wrap;
-  color: var(--ink-900);
+.commandLine {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  color: var(--gold-100);
+}
+
+.commandText {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.commandPrompt {
+  color: #8de0a3;
+}
+
+.commandBlock code {
+  color: inherit;
+  font-size: 1.12rem;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.copyButton {
+  width: 2.2rem;
+  height: 2.2rem;
+  padding: 0;
+  border: 1px solid rgba(255, 219, 122, 0.22);
+  border-radius: 0.85rem;
+  background: rgba(255, 244, 214, 0.1);
+  color: var(--gold-100);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.copyIcon {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  background: rgba(255, 244, 214, 0.2);
+  border-color: rgba(255, 219, 122, 0.4);
+  transform: translateY(-1px);
+}
+
+.copyButton.is-copied {
+  background: rgba(141, 224, 163, 0.16);
+  border-color: rgba(141, 224, 163, 0.38);
+  color: #c7ffd5;
 }
 
 .actions {
-  display: grid;
-  justify-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 0.85rem;
 }
 
@@ -198,6 +298,11 @@
 .githubMark {
   width: 1.15rem;
   height: 1.15rem;
+}
+
+.xMark {
+  width: 1rem;
+  height: 1rem;
 }
 
 @keyframes swing {
@@ -234,10 +339,20 @@
   .heroCard {
     border-radius: 1.6rem;
   }
+
+  .commandBlock code {
+    font-size: 1rem;
+  }
+
+  .copyButton {
+    width: 2rem;
+    height: 2rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .primaryAction,
+  .copyButton,
   .shovelButton.is-animated {
     transition: none;
     animation: none;
