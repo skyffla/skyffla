@@ -68,6 +68,10 @@ impl RoomEngine {
         &self.members
     }
 
+    pub fn member(&self, member_id: &MemberId) -> Option<&Member> {
+        self.members.get(member_id)
+    }
+
     pub fn join(
         &mut self,
         name: impl Into<String>,
@@ -159,18 +163,31 @@ impl RoomEngine {
         self.require_member(from)?;
 
         let text = text.into();
+        let from_name = self.member_name(from)?;
         let event = MachineEvent::Chat {
             from: from.clone(),
+            from_name,
             to: to.clone(),
             text,
         };
         event.validate()?;
 
+        self.route_event(from, to, event)
+    }
+
+    pub fn route_event(
+        &self,
+        sender: &MemberId,
+        to: Route,
+        event: MachineEvent,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        self.require_member(sender)?;
+
         match to {
             Route::All => Ok(self
                 .members
                 .keys()
-                .filter(|member_id| *member_id != from)
+                .filter(|member_id| *member_id != sender)
                 .cloned()
                 .map(|recipient| RoutedEvent {
                     recipient,
@@ -179,7 +196,7 @@ impl RoomEngine {
                 .collect()),
             Route::Member { member_id } => {
                 self.require_member(&member_id)?;
-                if &member_id == from {
+                if &member_id == sender {
                     return Ok(vec![]);
                 }
                 Ok(vec![RoutedEvent {
@@ -198,6 +215,14 @@ impl RoomEngine {
                 member_id: member_id.clone(),
             })
         }
+    }
+
+    pub fn member_name(&self, member_id: &MemberId) -> Result<String, RoomEngineError> {
+        self.member(member_id)
+            .map(|member| member.name.clone())
+            .ok_or_else(|| RoomEngineError::UnknownMember {
+                member_id: member_id.clone(),
+            })
     }
 }
 
@@ -313,6 +338,12 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| matches!(event.event, MachineEvent::Chat { .. })));
+        assert!(events.iter().all(|event| {
+            matches!(
+                &event.event,
+                MachineEvent::Chat { from_name, .. } if from_name == "beta"
+            )
+        }));
     }
 
     #[test]

@@ -2,9 +2,9 @@ use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use skyffla_protocol::room::{
-    MachineCommand, MachineEvent, MemberId, RoomId, Route, MACHINE_PROTOCOL_VERSION,
+    MachineCommand, MachineEvent, MemberId, RoomId, MACHINE_PROTOCOL_VERSION,
 };
-use skyffla_session::room::{RoomEngine, RoomEngineError, RoutedEvent};
+use skyffla_session::room::{RoomEngine, RoutedEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::app::sink::EventSink;
@@ -214,19 +214,22 @@ async fn handle_host_command(
             size,
             mime,
         } => {
+            let from_name = room.member_name(sender).map_err(room_error)?;
             let event = MachineEvent::ChannelOpened {
                 channel_id,
                 kind,
                 from: sender.clone(),
+                from_name,
                 to: to.clone(),
                 name,
                 size,
                 mime,
             };
-            let routed = route_event(room, sender, to, event).map_err(room_error)?;
+            let routed = room.route_event(sender, to, event).map_err(room_error)?;
             deliver_routed_events(sender, peer_member, routed, stdout, send).await
         }
         MachineCommand::AcceptChannel { channel_id } => {
+            let member_name = room.member_name(sender).map_err(room_error)?;
             deliver_channel_reply(
                 sender,
                 peer_member,
@@ -235,11 +238,13 @@ async fn handle_host_command(
                 MachineEvent::ChannelAccepted {
                     channel_id,
                     member_id: sender.clone(),
+                    member_name,
                 },
             )
             .await
         }
         MachineCommand::RejectChannel { channel_id, reason } => {
+            let member_name = room.member_name(sender).map_err(room_error)?;
             deliver_channel_reply(
                 sender,
                 peer_member,
@@ -248,12 +253,14 @@ async fn handle_host_command(
                 MachineEvent::ChannelRejected {
                     channel_id,
                     member_id: sender.clone(),
+                    member_name,
                     reason,
                 },
             )
             .await
         }
         MachineCommand::SendChannelData { channel_id, body } => {
+            let from_name = room.member_name(sender).map_err(room_error)?;
             deliver_channel_reply(
                 sender,
                 peer_member,
@@ -262,12 +269,14 @@ async fn handle_host_command(
                 MachineEvent::ChannelData {
                     channel_id,
                     from: sender.clone(),
+                    from_name,
                     body,
                 },
             )
             .await
         }
         MachineCommand::CloseChannel { channel_id, reason } => {
+            let member_name = room.member_name(sender).map_err(room_error)?;
             deliver_channel_reply(
                 sender,
                 peer_member,
@@ -276,46 +285,11 @@ async fn handle_host_command(
                 MachineEvent::ChannelClosed {
                     channel_id,
                     member_id: sender.clone(),
+                    member_name,
                     reason,
                 },
             )
             .await
-        }
-    }
-}
-
-fn route_event(
-    room: &RoomEngine,
-    sender: &MemberId,
-    route: Route,
-    event: MachineEvent,
-) -> Result<Vec<RoutedEvent>, RoomEngineError> {
-    match route {
-        Route::All => Ok(room
-            .members()
-            .keys()
-            .filter(|member_id| *member_id != sender)
-            .cloned()
-            .map(|recipient| RoutedEvent {
-                recipient,
-                event: event.clone(),
-            })
-            .collect()),
-        Route::Member { member_id } => {
-            if room.members().contains_key(&member_id) {
-                if &member_id == sender {
-                    Ok(vec![])
-                } else {
-                    Ok(vec![RoutedEvent {
-                        recipient: member_id,
-                        event,
-                    }])
-                }
-            } else {
-                Err(RoomEngineError::UnknownMember {
-                    member_id,
-                })
-            }
         }
     }
 }

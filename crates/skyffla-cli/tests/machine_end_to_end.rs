@@ -104,6 +104,7 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
     assert!(contains_event(&join_events, "member_snapshot"));
     assert!(join_events.iter().any(|event| {
         event.get("type") == Some(&Value::String("chat".into()))
+            && event.get("from_name") == Some(&Value::String("host".into()))
             && event.get("text") == Some(&Value::String("hello machine room".into()))
     }));
 

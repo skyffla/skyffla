@@ -234,6 +234,7 @@ pub enum MachineEvent {
     },
     Chat {
         from: MemberId,
+        from_name: String,
         to: Route,
         text: String,
     },
@@ -241,6 +242,7 @@ pub enum MachineEvent {
         channel_id: ChannelId,
         kind: ChannelKind,
         from: MemberId,
+        from_name: String,
         to: Route,
         name: Option<String>,
         size: Option<u64>,
@@ -249,20 +251,24 @@ pub enum MachineEvent {
     ChannelAccepted {
         channel_id: ChannelId,
         member_id: MemberId,
+        member_name: String,
     },
     ChannelRejected {
         channel_id: ChannelId,
         member_id: MemberId,
+        member_name: String,
         reason: Option<String>,
     },
     ChannelData {
         channel_id: ChannelId,
         from: MemberId,
+        from_name: String,
         body: String,
     },
     ChannelClosed {
         channel_id: ChannelId,
         member_id: MemberId,
+        member_name: String,
         reason: Option<String>,
     },
     Error {
@@ -313,9 +319,17 @@ impl MachineEvent {
                 }
                 Ok(())
             }
-            Self::Chat { from, to, text } => {
+            Self::Chat {
+                from,
+                from_name,
+                to,
+                text,
+            } => {
                 if from.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_id" });
+                }
+                if from_name.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "member_name" });
                 }
                 to.validate()?;
                 if text.trim().is_empty() {
@@ -326,6 +340,7 @@ impl MachineEvent {
             Self::ChannelOpened {
                 channel_id,
                 from,
+                from_name,
                 to,
                 ..
             } => {
@@ -335,20 +350,26 @@ impl MachineEvent {
                 if from.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_id" });
                 }
+                if from_name.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "member_name" });
+                }
                 to.validate()
             }
             Self::ChannelAccepted {
                 channel_id,
                 member_id,
+                member_name,
             }
             | Self::ChannelRejected {
                 channel_id,
                 member_id,
+                member_name,
                 ..
             }
             | Self::ChannelClosed {
                 channel_id,
                 member_id,
+                member_name,
                 ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -357,11 +378,15 @@ impl MachineEvent {
                 if member_id.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_id" });
                 }
+                if member_name.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "member_name" });
+                }
                 Ok(())
             }
             Self::ChannelData {
                 channel_id,
                 from,
+                from_name,
                 body,
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -369,6 +394,9 @@ impl MachineEvent {
                 }
                 if from.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_id" });
+                }
+                if from_name.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "member_name" });
                 }
                 if body.is_empty() {
                     return Err(RoomProtocolError::EmptyChannelData);
@@ -477,6 +505,7 @@ mod tests {
         let json = r#"{
             "type":"chat",
             "from":"m2",
+            "from_name":"beta",
             "to":{"type":"all"},
             "text":"hello"
         }"#;
@@ -486,6 +515,7 @@ mod tests {
             event,
             MachineEvent::Chat {
                 from: MemberId::new("m2").expect("valid member id"),
+                from_name: "beta".into(),
                 to: Route::All,
                 text: "hello".into(),
             }
