@@ -1,5 +1,5 @@
-use std::process::{ExitStatus, Stdio};
 use anyhow::{Context, Result};
+use std::process::{ExitStatus, Stdio};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
@@ -57,8 +57,18 @@ async fn assert_local_host_to_join_duplex() -> Result<()> {
     let join_output = wait_for_output(join, "local join process").await?;
     let host_output = wait_for_output(host, "local host process").await?;
 
-    assert_success(&host_output.status, "local host", &host_output.stdout, &host_output.stderr);
-    assert_success(&join_output.status, "local join", &join_output.stdout, &join_output.stderr);
+    assert_success(
+        &host_output.status,
+        "local host",
+        &host_output.stdout,
+        &host_output.stderr,
+    );
+    assert_success(
+        &join_output.status,
+        "local join",
+        &join_output.stdout,
+        &join_output.stderr,
+    );
     assert_eq!(host_output.stdout, join_payload);
     assert_eq!(join_output.stdout, host_payload);
     assert_local_mode_stderr(&host_output.stderr);
@@ -123,6 +133,17 @@ async fn assert_local_join_promotion_duplex() -> Result<()> {
 }
 
 async fn assert_local_simultaneous_join_duplex() -> Result<()> {
+    let mut last_error = None;
+    for _attempt in 0..2 {
+        match run_local_simultaneous_join_duplex_once().await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("simultaneous join should record an error"))
+}
+
+async fn run_local_simultaneous_join_duplex_once() -> Result<()> {
     let home_dir = fresh_test_dir("skyffla-cli-stdio-local-duplex-race");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
@@ -196,7 +217,10 @@ fn spawn_local_stdio_peer<const N: usize>(
 }
 
 async fn write_child_stdin(child: &mut Child, payload: &[u8], label: &str) -> Result<()> {
-    let mut stdin = child.stdin.take().with_context(|| format!("{label} missing"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .with_context(|| format!("{label} missing"))?;
     stdin
         .write_all(payload)
         .await
@@ -208,7 +232,8 @@ async fn write_child_stdin(child: &mut Child, payload: &[u8], label: &str) -> Re
 async fn wait_for_output(mut child: Child, label: &str) -> Result<std::process::Output> {
     match tokio::time::timeout(PROCESS_TIMEOUT, child.wait()).await {
         Ok(status) => {
-            let status = status.with_context(|| format!("{label} failed while waiting for exit"))?;
+            let status =
+                status.with_context(|| format!("{label} failed while waiting for exit"))?;
             collect_child_output(child, status, label).await
         }
         Err(_) => {

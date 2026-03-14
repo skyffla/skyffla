@@ -36,8 +36,24 @@ pub struct RoomEngine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChannelState {
+    opener: MemberId,
     kind: ChannelKind,
     participants: BTreeSet<MemberId>,
+    name: Option<String>,
+    size: Option<u64>,
+    mime: Option<String>,
+    blob: Option<BlobRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomChannel {
+    pub opener: MemberId,
+    pub kind: ChannelKind,
+    pub participants: BTreeSet<MemberId>,
+    pub name: Option<String>,
+    pub size: Option<u64>,
+    pub mime: Option<String>,
+    pub blob: Option<BlobRef>,
 }
 
 impl RoomEngine {
@@ -79,6 +95,18 @@ impl RoomEngine {
 
     pub fn member(&self, member_id: &MemberId) -> Option<&Member> {
         self.members.get(member_id)
+    }
+
+    pub fn channel(&self, channel_id: &ChannelId) -> Option<RoomChannel> {
+        self.channels.get(channel_id).map(|channel| RoomChannel {
+            opener: channel.opener.clone(),
+            kind: channel.kind.clone(),
+            participants: channel.participants.clone(),
+            name: channel.name.clone(),
+            size: channel.size,
+            mime: channel.mime.clone(),
+            blob: channel.blob.clone(),
+        })
     }
 
     pub fn join(
@@ -217,8 +245,13 @@ impl RoomEngine {
         self.channels.insert(
             channel_id,
             ChannelState {
+                opener: from.clone(),
                 kind,
                 participants: participants.clone(),
+                name: event_name(&event),
+                size: event_size(&event),
+                mime: event_mime(&event),
+                blob: event_blob(&event),
             },
         );
 
@@ -389,13 +422,13 @@ impl RoomEngine {
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(sender)?;
         event.validate()?;
-        let channel = self
-            .channels
-            .get(channel_id)
-            .ok_or_else(|| RoomEngineError::UnknownChannel {
-                channel_id: channel_id.clone(),
-            })?;
-        if channel.kind == ChannelKind::File {
+        let channel =
+            self.channels
+                .get(channel_id)
+                .ok_or_else(|| RoomEngineError::UnknownChannel {
+                    channel_id: channel_id.clone(),
+                })?;
+        if matches!(event, MachineEvent::ChannelData { .. }) && channel.kind == ChannelKind::File {
             return Err(RoomEngineError::ChannelDataUnsupported {
                 channel_id: channel_id.clone(),
                 kind: channel.kind.clone(),
@@ -422,14 +455,54 @@ impl RoomEngine {
     }
 }
 
+fn event_name(event: &MachineEvent) -> Option<String> {
+    match event {
+        MachineEvent::ChannelOpened { name, .. } => name.clone(),
+        _ => None,
+    }
+}
+
+fn event_size(event: &MachineEvent) -> Option<u64> {
+    match event {
+        MachineEvent::ChannelOpened { size, .. } => *size,
+        _ => None,
+    }
+}
+
+fn event_mime(event: &MachineEvent) -> Option<String> {
+    match event {
+        MachineEvent::ChannelOpened { mime, .. } => mime.clone(),
+        _ => None,
+    }
+}
+
+fn event_blob(event: &MachineEvent) -> Option<BlobRef> {
+    match event {
+        MachineEvent::ChannelOpened { blob, .. } => blob.clone(),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomEngineError {
     Protocol(RoomProtocolError),
-    UnknownMember { member_id: MemberId },
-    UnknownChannel { channel_id: ChannelId },
-    ChannelAlreadyOpen { channel_id: ChannelId },
-    MemberNotInChannel { member_id: MemberId, channel_id: ChannelId },
-    ChannelDataUnsupported { channel_id: ChannelId, kind: ChannelKind },
+    UnknownMember {
+        member_id: MemberId,
+    },
+    UnknownChannel {
+        channel_id: ChannelId,
+    },
+    ChannelAlreadyOpen {
+        channel_id: ChannelId,
+    },
+    MemberNotInChannel {
+        member_id: MemberId,
+        channel_id: ChannelId,
+    },
+    ChannelDataUnsupported {
+        channel_id: ChannelId,
+        kind: ChannelKind,
+    },
     HostCannotLeaveRoom,
 }
 
@@ -560,7 +633,9 @@ mod tests {
             .expect("chat succeeds");
 
         assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|event| event.recipient == member_id("m1")));
+        assert!(events
+            .iter()
+            .any(|event| event.recipient == member_id("m1")));
         assert!(events
             .iter()
             .any(|event| event.recipient == gamma.member.member_id));
@@ -601,7 +676,8 @@ mod tests {
         let beta = room.join("beta", None).expect("beta joins");
         let gamma = room.join("gamma", None).expect("gamma joins");
 
-        room.leave(&gamma.member.member_id, None).expect("gamma leaves");
+        room.leave(&gamma.member.member_id, None)
+            .expect("gamma leaves");
 
         let events = room
             .send_chat(&beta.member.member_id, Route::All, "after leave")
@@ -646,6 +722,43 @@ mod tests {
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].recipient, member_id("m3"));
         assert!(matches!(data[0].event, MachineEvent::ChannelData { .. }));
+    }
+
+    #[test]
+    fn file_channel_accept_routes_but_inline_data_stays_rejected() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("file1"),
+            ChannelKind::File,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            Some("report.txt".into()),
+            Some(5),
+            Some("text/plain".into()),
+            Some(BlobRef {
+                hash: "abc123".into(),
+                format: BlobFormat::Blob,
+            }),
+        )
+        .expect("file channel opens");
+
+        let accepted = room
+            .accept_channel(&beta.member.member_id, &channel_id("file1"))
+            .expect("file channel accepts");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].recipient, member_id("m1"));
+
+        let late_data =
+            room.send_channel_data(&beta.member.member_id, &channel_id("file1"), "raw".into());
+        assert!(matches!(
+            late_data,
+            Err(RoomEngineError::ChannelDataUnsupported { .. })
+        ));
     }
 
     #[test]
@@ -697,7 +810,11 @@ mod tests {
         .expect("channel opens");
 
         let rejected = room
-            .reject_channel(&beta.member.member_id, &channel_id("c1"), Some("nope".into()))
+            .reject_channel(
+                &beta.member.member_id,
+                &channel_id("c1"),
+                Some("nope".into()),
+            )
             .expect("channel rejects");
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].recipient, member_id("m1"));
@@ -707,7 +824,11 @@ mod tests {
         ));
 
         let err = room
-            .send_channel_data(&beta.member.member_id, &channel_id("c1"), "still open?".into())
+            .send_channel_data(
+                &beta.member.member_id,
+                &channel_id("c1"),
+                "still open?".into(),
+            )
             .expect_err("rejected channel should be gone");
         assert!(matches!(err, RoomEngineError::UnknownChannel { .. }));
     }
@@ -737,7 +858,10 @@ mod tests {
             .expect("channel closes");
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].recipient, beta.member.member_id);
-        assert!(matches!(closed[0].event, MachineEvent::ChannelClosed { .. }));
+        assert!(matches!(
+            closed[0].event,
+            MachineEvent::ChannelClosed { .. }
+        ));
 
         let err = room
             .send_channel_data(&host_member, &channel_id("c1"), "after close".into())
@@ -765,7 +889,9 @@ mod tests {
             .expect("channel opens");
 
         assert_eq!(opened.len(), 2);
-        assert!(opened.iter().any(|event| event.recipient == member_id("m1")));
+        assert!(opened
+            .iter()
+            .any(|event| event.recipient == member_id("m1")));
         assert!(opened
             .iter()
             .any(|event| event.recipient == gamma.member.member_id));

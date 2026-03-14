@@ -4074,7 +4074,6 @@ dependencies = [
  "futures-util",
  "hex",
  "iroh",
- "iroh-blobs",
  "rand_core 0.6.4",
  "reqwest 0.12.28",
  "serde",
@@ -4122,6 +4121,7 @@ name = "skyffla-transport"
 version = "0.2.0"
 dependencies = [
  "iroh",
+ "iroh-blobs",
  "serde_json",
  "skyffla-protocol",
  "tokio",

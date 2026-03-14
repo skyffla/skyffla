@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, Mutex};
 
 mod support;
 
-use support::{fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer, PROCESS_TIMEOUT};
+use support::{
+    fresh_test_dir, unique_room_name, wait_for_stream_ready, TestServer, PROCESS_TIMEOUT,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<()> {
@@ -78,15 +80,19 @@ async fn machine_host_accepts_two_joiners_and_broadcasts_to_both() -> Result<()>
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"").await?;
+    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
     host.expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
     host.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
     beta.expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"host\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
 
     host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello everyone"}"#)
@@ -97,12 +103,13 @@ async fn machine_host_accepts_two_joiners_and_broadcasts_to_both() -> Result<()>
             && event.get("text") == Some(&Value::String("hello everyone".into()))
     })
     .await?;
-    gamma.expect_event("broadcast chat", |event| {
-        event.get("type") == Some(&Value::String("chat".into()))
-            && event.get("from_name") == Some(&Value::String("host".into()))
-            && event.get("text") == Some(&Value::String("hello everyone".into()))
-    })
-    .await?;
+    gamma
+        .expect_event("broadcast chat", |event| {
+            event.get("type") == Some(&Value::String("chat".into()))
+                && event.get("from_name") == Some(&Value::String("host".into()))
+                && event.get("text") == Some(&Value::String("hello everyone".into()))
+        })
+        .await?;
 
     host.shutdown().await?;
     beta.shutdown().await?;
@@ -131,11 +138,14 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
     beta.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
     let beta_stderr = beta.stderr_lines().await;
     let beta_events = beta.events().await;
@@ -152,16 +162,19 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let beta_events = beta.events().await;
     assert!(
-        !beta_events.iter().any(|event| event.get("type") == Some(&Value::String("error".into()))),
+        !beta_events
+            .iter()
+            .any(|event| event.get("type") == Some(&Value::String("error".into()))),
         "beta emitted an unexpected error after direct chat:\n{}",
         beta.debug_dump().await
     );
-    gamma.expect_event("direct beta->gamma chat", |event| {
-        event.get("type") == Some(&Value::String("chat".into()))
-            && event.get("from_name") == Some(&Value::String("beta".into()))
-            && event.get("text") == Some(&Value::String("secret hello".into()))
-    })
-    .await?;
+    gamma
+        .expect_event("direct beta->gamma chat", |event| {
+            event.get("type") == Some(&Value::String("chat".into()))
+                && event.get("from_name") == Some(&Value::String("beta".into()))
+                && event.get("text") == Some(&Value::String("secret hello".into()))
+        })
+        .await?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let host_events = host.events().await;
@@ -244,11 +257,14 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
     beta.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
     let beta_stderr = beta.stderr_lines().await;
     let beta_events = beta.events().await;
@@ -262,11 +278,12 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
         ),
     )
     .await?;
-    gamma.expect_event("channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
+    gamma
+        .expect_event("channel_opened", |event| {
+            event.get("type") == Some(&Value::String("channel_opened".into()))
+                && event.get("channel_id") == Some(&Value::String("c1".into()))
+        })
+        .await?;
 
     gamma
         .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"sketch line"}"#)
@@ -357,6 +374,82 @@ async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let source_path = fresh_test_dir("skyffla-cli-machine-file-source").join("report.txt");
+    let export_path = fresh_test_dir("skyffla-cli-machine-file-export").join("report.txt");
+    std::fs::create_dir_all(
+        source_path
+            .parent()
+            .context("source path should have a parent")?,
+    )?;
+    std::fs::create_dir_all(
+        export_path
+            .parent()
+            .context("export path should have a parent")?,
+    )?;
+    std::fs::write(&source_path, b"mesh file payload")?;
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_stream_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
+
+    host.send(&format!(
+        r#"{{"type":"send_file","channel_id":"f1","to":{{"type":"member","member_id":"m2"}},"path":{}}}"#,
+        serde_json::to_string(&source_path.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("file opened from host", |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.pointer("/blob/hash").is_some()
+    })
+    .await?;
+
+    beta.send(r#"{"type":"accept_channel","channel_id":"f1"}"#)
+        .await?;
+    beta.expect_event("file ready", |event| {
+        event.get("type") == Some(&Value::String("channel_file_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+    })
+    .await?;
+
+    beta.send(&format!(
+        r#"{{"type":"export_channel_file","channel_id":"f1","path":{}}}"#,
+        serde_json::to_string(&export_path.display().to_string())?
+    ))
+    .await?;
+    beta.expect_event("file exported", |event| {
+        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+    })
+    .await?;
+
+    assert_eq!(std::fs::read(&export_path)?, b"mesh file payload");
+
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -376,11 +469,14 @@ async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<(
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"").await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"").await?;
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    host.expect_stderr_contains("\"member_name\":\"gamma\"")
+        .await?;
     beta.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
     let beta_stderr = beta.stderr_lines().await;
     let beta_events = beta.events().await;
@@ -394,11 +490,12 @@ async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<(
         ),
     )
     .await?;
-    gamma.expect_event("channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
+    gamma
+        .expect_event("channel_opened", |event| {
+            event.get("type") == Some(&Value::String("channel_opened".into()))
+                && event.get("channel_id") == Some(&Value::String("c1".into()))
+        })
+        .await?;
 
     gamma
         .send(r#"{"type":"reject_channel","channel_id":"c1","reason":"busy"}"#)
@@ -458,23 +555,23 @@ async fn machine_broadcast_channel_data_reaches_host_and_other_joiners() -> Resu
 
     beta.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
 
-    beta.send(
-        r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#,
-    )
-    .await?;
+    beta.send(r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#)
+        .await?;
     host.expect_event("broadcast channel_opened", |event| {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
     })
     .await?;
-    gamma.expect_event("broadcast channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
+    gamma
+        .expect_event("broadcast channel_opened", |event| {
+            event.get("type") == Some(&Value::String("channel_opened".into()))
+                && event.get("channel_id") == Some(&Value::String("c1".into()))
+        })
+        .await?;
 
     gamma
         .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"fanout line"}"#)

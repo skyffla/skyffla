@@ -92,7 +92,14 @@ pub(crate) async fn run_connected_session(
         remote_addr: connection_status.remote_addr.clone(),
     });
     if let Some(message) = &config.outgoing_message {
-        let mut ui = build_ui(config, transport, &identity.fingerprint, &peer, &connection_status, peer_trust)?;
+        let mut ui = build_ui(
+            config,
+            transport,
+            &identity.fingerprint,
+            &peer,
+            &connection_status,
+            peer_trust,
+        )?;
         send_chat_message(&session_id, &mut send, message, None, Some(sink))
             .await
             .map_err(|error| CliError::protocol(error.to_string()))?;
@@ -120,12 +127,28 @@ pub(crate) async fn run_connected_session(
             &mut recv,
             Some(identity.fingerprint.clone()),
             local_ticket.encoded,
+            peer.peer_ticket.clone(),
         )
         .await?;
     } else if config.stdio {
-        run_stdio_session(sink, &session_id, &connection, &mut send, &mut recv, is_host).await?;
+        run_stdio_session(
+            sink,
+            &session_id,
+            &connection,
+            &mut send,
+            &mut recv,
+            is_host,
+        )
+        .await?;
     } else {
-        let mut ui = build_ui(config, transport, &identity.fingerprint, &peer, &connection_status, peer_trust)?;
+        let mut ui = build_ui(
+            config,
+            transport,
+            &identity.fingerprint,
+            &peer,
+            &connection_status,
+            peer_trust,
+        )?;
         run_interactive_chat_loop(
             config,
             &session_id,

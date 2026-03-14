@@ -1,14 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
+    BlobRef, ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
     MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_session::room::{RoomEngine, RoutedEvent};
-use skyffla_session::{state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer};
+use skyffla_session::{
+    state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
+};
 use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -27,17 +30,27 @@ struct JoinState {
     self_member: Option<MemberId>,
     host_member: Option<MemberId>,
     members: BTreeMap<MemberId, Member>,
+    member_tickets: BTreeMap<MemberId, String>,
     channels: BTreeMap<ChannelId, JoinChannelState>,
     peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
     local_name: String,
     local_fingerprint: Option<String>,
     local_ticket: String,
+    pending_host_ticket: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct JoinChannelState {
+    opener: MemberId,
     kind: ChannelKind,
     participants: BTreeSet<MemberId>,
+    blob: Option<BlobRef>,
+    local_file_ready: bool,
+}
+
+#[derive(Debug, Default)]
+struct HostState {
+    ready_file_channels: BTreeSet<ChannelId>,
 }
 
 #[derive(Debug)]
@@ -79,6 +92,9 @@ enum HostInput {
     PeerProtocolError {
         message: String,
     },
+    LocalEvent {
+        event: MachineEvent,
+    },
 }
 
 #[derive(Debug)]
@@ -97,6 +113,9 @@ enum JoinPeerInput {
     },
     ProtocolError {
         message: String,
+    },
+    LocalEvent {
+        event: MachineEvent,
     },
 }
 
@@ -147,6 +166,7 @@ pub(crate) async fn run_machine_host(
     let mut machine_state_entered = false;
     let mut local_input_closed = false;
     let mut peers = BTreeMap::<MemberId, PeerHandle>::new();
+    let mut host_state = HostState::default();
 
     while let Some(input) = host_rx.recv().await {
         if matches!(
@@ -159,6 +179,8 @@ pub(crate) async fn run_machine_host(
                 &mut room,
                 &mut stdout,
                 &mut peers,
+                &mut host_state,
+                transport,
                 &mut machine_state_entered,
                 &mut local_input_closed,
                 input,
@@ -190,6 +212,7 @@ pub(crate) async fn run_machine_join_session(
     recv: &mut RecvStream,
     local_fingerprint: Option<String>,
     local_ticket: String,
+    host_ticket: Option<String>,
 ) -> Result<(), CliError> {
     let mut stdout = tokio::io::stdout();
     let mut input_closed = false;
@@ -200,11 +223,13 @@ pub(crate) async fn run_machine_join_session(
         self_member: None,
         host_member: None,
         members: BTreeMap::new(),
+        member_tickets: BTreeMap::new(),
         channels: BTreeMap::new(),
         peer_links: BTreeMap::new(),
         local_name: config.peer_name.clone(),
         local_fingerprint,
         local_ticket,
+        pending_host_ticket: host_ticket,
     };
 
     let accept_handle = spawn_join_accept_loop(
@@ -225,6 +250,8 @@ pub(crate) async fn run_machine_join_session(
                     &mut join_state,
                     &mut stdout,
                     send,
+                    transport,
+                    peer_tx.clone(),
                 )
                 .await?;
             }
@@ -292,14 +319,26 @@ async fn handle_host_input(
     room: &mut RoomEngine,
     stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
+    host_state: &mut HostState,
+    transport: &IrohTransport,
     machine_state_entered: &mut bool,
     local_input_closed: &mut bool,
     input: HostInput,
 ) -> Result<LoopControl, CliError> {
     match input {
         HostInput::LocalCommand(command) => {
-            if let Err(error) =
-                handle_host_command(room, host_member, command.clone(), stdout, peers).await
+            if let Err(error) = handle_host_command(
+                room,
+                host_member,
+                command.clone(),
+                stdout,
+                peers,
+                host_state,
+                transport,
+                host_tx,
+                true,
+            )
+            .await
             {
                 emit_event(
                     stdout,
@@ -352,6 +391,10 @@ async fn handle_host_input(
                     command.clone(),
                     stdout,
                     peers,
+                    host_state,
+                    transport,
+                    host_tx,
+                    false,
                 )
                 .await
                 {
@@ -361,6 +404,7 @@ async fn handle_host_input(
             Ok(LoopControl::Continue)
         }
         HostInput::PeerEvent { event } => {
+            apply_host_event(host_state, &event);
             emit_event(stdout, &event).await?;
             Ok(LoopControl::Continue)
         }
@@ -378,6 +422,11 @@ async fn handle_host_input(
         }
         HostInput::PeerProtocolError { message } => {
             emit_event(stdout, &local_error("peer_protocol_error", &message)).await?;
+            Ok(LoopControl::Continue)
+        }
+        HostInput::LocalEvent { event } => {
+            apply_host_event(host_state, &event);
+            emit_event(stdout, &event).await?;
             Ok(LoopControl::Continue)
         }
     }
@@ -412,7 +461,11 @@ async fn handle_host_peer_connected(
     let ticket = connected.peer.peer_ticket.clone();
 
     let (authority_tx, authority_rx) = mpsc::unbounded_channel();
-    spawn_link_writer(connected.authority_send, authority_rx, "authority link message");
+    spawn_link_writer(
+        connected.authority_send,
+        authority_rx,
+        "authority link message",
+    );
     spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
     let peer_handle = PeerHandle {
         authority_sender: authority_tx.clone(),
@@ -426,11 +479,17 @@ async fn handle_host_peer_connected(
     for event in join_dispatch.to_joiner {
         send_link_message(&authority_tx, AuthorityLinkMessage::MachineEvent { event })?;
     }
-    deliver_routed_events(host_member, join_dispatch.to_existing_members, stdout, peers).await?;
+    deliver_routed_events(
+        host_member,
+        join_dispatch.to_existing_members,
+        stdout,
+        peers,
+    )
+    .await?;
 
     emit_peer_runtime_events(sink, &connected.peer, &connected.connection_status);
-    if let Some(trust) = remember_peer(&connected.peer)
-        .map_err(|error| CliError::local_io(error.to_string()))?
+    if let Some(trust) =
+        remember_peer(&connected.peer).map_err(|error| CliError::local_io(error.to_string()))?
     {
         sink.emit_runtime_event(RuntimeEvent::PeerTrust {
             status: trust.status.to_string(),
@@ -459,16 +518,28 @@ async fn handle_join_stdin_input(
     join_state: &mut JoinState,
     stdout: &mut tokio::io::Stdout,
     authority_send: &mut SendStream,
+    transport: &IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
 ) -> Result<bool, CliError> {
     match input {
         Some(JoinStdinInput::LocalCommand(command)) => {
             if join_state.self_member.is_none() {
-                emit_event(stdout, &local_error("room_not_ready", "machine room is not ready yet"))
-                    .await?;
+                emit_event(
+                    stdout,
+                    &local_error("room_not_ready", "machine room is not ready yet"),
+                )
+                .await?;
                 return Ok(false);
             }
-            if let Err(error) =
-                handle_join_command(join_state, authority_send, command.clone(), stdout).await
+            if let Err(error) = handle_join_command(
+                join_state,
+                authority_send,
+                command.clone(),
+                stdout,
+                transport,
+                peer_tx,
+            )
+            .await
             {
                 emit_event(
                     stdout,
@@ -509,6 +580,9 @@ async fn handle_join_authority_message(
             ticket,
             connect,
         }) => {
+            join_state
+                .member_tickets
+                .insert(member.member_id.clone(), ticket.clone());
             if connect
                 && !join_state.peer_links.contains_key(&member.member_id)
                 && join_state
@@ -552,7 +626,13 @@ async fn handle_join_peer_input(
 ) -> Result<(), CliError> {
     match peer_input {
         Some(JoinPeerInput::Connected { member, sender }) => {
-            join_state.peer_links.insert(member.member_id.clone(), sender);
+            join_state
+                .members
+                .entry(member.member_id.clone())
+                .or_insert_with(|| member.clone());
+            join_state
+                .peer_links
+                .insert(member.member_id.clone(), sender);
             sink.emit_json_event(serde_json::json!({
                 "event": "room_link_connected",
                 "member_id": member.member_id,
@@ -591,14 +671,16 @@ async fn handle_join_peer_input(
         Some(JoinPeerInput::ProtocolError { message }) => {
             emit_event(stdout, &local_error("peer_protocol_error", &message)).await?;
         }
+        Some(JoinPeerInput::LocalEvent { event }) => {
+            apply_machine_event(join_state, &event);
+            emit_event(stdout, &event).await?;
+        }
         None => {}
     }
     Ok(())
 }
 
-fn spawn_host_stdin_task(
-    host_tx: mpsc::UnboundedSender<HostInput>,
-) -> tokio::task::JoinHandle<()> {
+fn spawn_host_stdin_task(host_tx: mpsc::UnboundedSender<HostInput>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
@@ -656,8 +738,8 @@ fn spawn_join_stdin_task(
                             }
                         }
                         Err(error) => {
-                            let _ = join_tx
-                                .send(JoinStdinInput::LocalInputError(error.to_string()));
+                            let _ =
+                                join_tx.send(JoinStdinInput::LocalInputError(error.to_string()));
                         }
                     }
                 }
@@ -967,7 +1049,7 @@ fn spawn_join_host_peer_accept(
                         message: error.to_string(),
                     });
                 }
-            }
+            },
             Err(error) => {
                 let _ = peer_tx.send(JoinPeerInput::ProtocolError {
                     message: error.to_string(),
@@ -1146,7 +1228,10 @@ fn spawn_outbound_peer_link(
         let (sender, rx) = mpsc::unbounded_channel();
         spawn_link_writer(send, rx, "peer link message");
         spawn_join_peer_reader(recv, target.member_id.clone(), peer_tx.clone(), true);
-        let _ = peer_tx.send(JoinPeerInput::Connected { member: target, sender });
+        let _ = peer_tx.send(JoinPeerInput::Connected {
+            member: target,
+            sender,
+        });
     });
 }
 
@@ -1201,6 +1286,60 @@ fn spawn_join_peer_reader(
             }
         }
     })
+}
+
+fn spawn_join_blob_download(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    blob: BlobRef,
+) {
+    tokio::spawn(async move {
+        match transport.fetch_blob(&provider, &blob).await {
+            Ok(()) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::ChannelFileReady { channel_id, blob },
+                });
+            }
+            Err(error) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "blob_fetch_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
+}
+
+fn spawn_host_blob_download(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    blob: BlobRef,
+) {
+    tokio::spawn(async move {
+        match transport.fetch_blob(&provider, &blob).await {
+            Ok(()) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::ChannelFileReady { channel_id, blob },
+                });
+            }
+            Err(error) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "blob_fetch_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
 }
 
 fn introduce_member_to_existing_peers(
@@ -1290,6 +1429,7 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
         }
         MachineEvent::MemberLeft { member_id, .. } => {
             state.members.remove(member_id);
+            state.member_tickets.remove(member_id);
             state.peer_links.remove(member_id);
             for channel in state.channels.values_mut() {
                 channel.participants.remove(member_id);
@@ -1300,16 +1440,25 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             kind,
             from,
             to,
+            blob,
             ..
         } => {
             if let Ok(participants) = event_participants(state, from, to) {
                 state.channels.insert(
                     channel_id.clone(),
                     JoinChannelState {
+                        opener: from.clone(),
                         kind: kind.clone(),
                         participants,
+                        blob: blob.clone(),
+                        local_file_ready: state.self_member.as_ref() == Some(from),
                     },
                 );
+            }
+        }
+        MachineEvent::ChannelFileReady { channel_id, .. } => {
+            if let Some(channel) = state.channels.get_mut(channel_id) {
+                channel.local_file_ready = true;
             }
         }
         MachineEvent::ChannelClosed { channel_id, .. } => {
@@ -1327,6 +1476,8 @@ async fn handle_join_command(
     authority_send: &mut SendStream,
     command: MachineCommand,
     stdout: &mut tokio::io::Stdout,
+    transport: &IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
 ) -> Result<(), CliError> {
     command.validate().map_err(protocol_error)?;
     let self_member = state
@@ -1351,6 +1502,80 @@ async fn handle_join_command(
             .await?;
             Ok(())
         }
+        MachineCommand::SendFile {
+            channel_id,
+            to,
+            path,
+            name,
+            mime,
+        } => {
+            let path_ref = Path::new(&path);
+            if !path_ref.is_file() {
+                return Err(CliError::runtime(format!(
+                    "path {} is not a regular file",
+                    path_ref.display()
+                )));
+            }
+            let blob = transport
+                .import_blob_path(path_ref)
+                .await
+                .map_err(|error| CliError::transport(error.to_string()))?;
+            let size = std::fs::metadata(path_ref)
+                .map_err(|error| CliError::local_io(error.to_string()))?
+                .len();
+            let name = name.or_else(|| {
+                path_ref
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+            let open = MachineCommand::OpenChannel {
+                channel_id,
+                kind: ChannelKind::File,
+                to,
+                name,
+                size: Some(size),
+                mime,
+                blob: Some(blob),
+            };
+            let MachineCommand::OpenChannel {
+                channel_id,
+                kind,
+                to,
+                name,
+                size,
+                mime,
+                blob,
+            } = open
+            else {
+                unreachable!("send_file should always lower to open_channel");
+            };
+            let local_event = MachineEvent::ChannelOpened {
+                channel_id: channel_id.clone(),
+                kind: kind.clone(),
+                from: self_member,
+                from_name: state.local_name.clone(),
+                to: to.clone(),
+                name: name.clone(),
+                size,
+                mime: mime.clone(),
+                blob: blob.clone(),
+            };
+            send_peer_command(
+                authority_send,
+                &MachineCommand::OpenChannel {
+                    channel_id,
+                    kind,
+                    to,
+                    name,
+                    size,
+                    mime,
+                    blob,
+                },
+            )
+            .await?;
+            apply_machine_event(state, &local_event);
+            Ok(())
+        }
         MachineCommand::SendChannelData { channel_id, body } => {
             let event = MachineEvent::ChannelData {
                 channel_id: channel_id.clone(),
@@ -1367,7 +1592,91 @@ async fn handle_join_command(
             .await?;
             Ok(())
         }
-        other => send_peer_command(authority_send, &other).await,
+        MachineCommand::OpenChannel {
+            channel_id,
+            kind,
+            to,
+            name,
+            size,
+            mime,
+            blob,
+        } => {
+            let local_event = MachineEvent::ChannelOpened {
+                channel_id: channel_id.clone(),
+                kind: kind.clone(),
+                from: self_member,
+                from_name: state.local_name.clone(),
+                to: to.clone(),
+                name: name.clone(),
+                size,
+                mime: mime.clone(),
+                blob: blob.clone(),
+            };
+            send_peer_command(
+                authority_send,
+                &MachineCommand::OpenChannel {
+                    channel_id,
+                    kind,
+                    to,
+                    name,
+                    size,
+                    mime,
+                    blob,
+                },
+            )
+            .await?;
+            apply_machine_event(state, &local_event);
+            Ok(())
+        }
+        MachineCommand::AcceptChannel { channel_id } => {
+            send_peer_command(
+                authority_send,
+                &MachineCommand::AcceptChannel {
+                    channel_id: channel_id.clone(),
+                },
+            )
+            .await?;
+            if let Some((provider, blob)) =
+                join_pending_file_download(state, &self_member, &channel_id)?
+            {
+                spawn_join_blob_download(transport.clone(), peer_tx, provider, channel_id, blob);
+            }
+            Ok(())
+        }
+        MachineCommand::RejectChannel { channel_id, reason } => {
+            let command = MachineCommand::RejectChannel {
+                channel_id: channel_id.clone(),
+                reason,
+            };
+            send_peer_command(authority_send, &command).await?;
+            state.channels.remove(&channel_id);
+            Ok(())
+        }
+        MachineCommand::CloseChannel { channel_id, reason } => {
+            let command = MachineCommand::CloseChannel {
+                channel_id: channel_id.clone(),
+                reason,
+            };
+            send_peer_command(authority_send, &command).await?;
+            state.channels.remove(&channel_id);
+            Ok(())
+        }
+        MachineCommand::ExportChannelFile { channel_id, path } => {
+            let blob = join_exportable_blob(state, &self_member, &channel_id)?;
+            let size = transport
+                .export_blob(&blob, Path::new(&path))
+                .await
+                .map_err(|error| CliError::transport(error.to_string()))?;
+            emit_event(
+                stdout,
+                &MachineEvent::ChannelFileExported {
+                    channel_id,
+                    path,
+                    size,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -1479,18 +1788,191 @@ fn join_channel_recipients(
         .collect())
 }
 
+fn join_pending_file_download(
+    state: &JoinState,
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+) -> Result<Option<(PeerTicket, BlobRef)>, CliError> {
+    let Some(channel) = state.channels.get(channel_id) else {
+        return Err(CliError::runtime(format!(
+            "unknown channel {}",
+            channel_id.as_str()
+        )));
+    };
+    if channel.kind != ChannelKind::File || channel.local_file_ready {
+        return Ok(None);
+    }
+    if !channel.participants.contains(self_member) {
+        return Err(CliError::runtime(format!(
+            "member {} is not part of channel {}",
+            self_member.as_str(),
+            channel_id.as_str()
+        )));
+    }
+    let blob = channel.blob.clone().ok_or_else(|| {
+        CliError::runtime(format!(
+            "file channel {} is missing blob metadata",
+            channel_id.as_str()
+        ))
+    })?;
+    let ticket = state
+        .member_tickets
+        .get(&channel.opener)
+        .cloned()
+        .ok_or_else(|| {
+            CliError::runtime(format!(
+                "no ticket known for file provider {}",
+                channel.opener.as_str()
+            ))
+        })?;
+    Ok(Some((PeerTicket { encoded: ticket }, blob)))
+}
+
+fn join_exportable_blob(
+    state: &JoinState,
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+) -> Result<BlobRef, CliError> {
+    let channel = state
+        .channels
+        .get(channel_id)
+        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
+    if channel.kind != ChannelKind::File {
+        return Err(CliError::runtime(format!(
+            "channel {} is not a file channel",
+            channel_id.as_str()
+        )));
+    }
+    if !channel.participants.contains(self_member) {
+        return Err(CliError::runtime(format!(
+            "member {} is not part of channel {}",
+            self_member.as_str(),
+            channel_id.as_str()
+        )));
+    }
+    if !channel.local_file_ready {
+        return Err(CliError::runtime(format!(
+            "file channel {} is not ready yet",
+            channel_id.as_str()
+        )));
+    }
+    channel.blob.clone().ok_or_else(|| {
+        CliError::runtime(format!(
+            "file channel {} is missing blob metadata",
+            channel_id.as_str()
+        ))
+    })
+}
+
+fn host_pending_file_download(
+    room: &RoomEngine,
+    peers: &BTreeMap<MemberId, PeerHandle>,
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+) -> Result<Option<(PeerTicket, BlobRef)>, CliError> {
+    let Some(channel) = room.channel(channel_id) else {
+        return Err(CliError::runtime(format!(
+            "unknown channel {}",
+            channel_id.as_str()
+        )));
+    };
+    if channel.kind != ChannelKind::File || channel.opener == *self_member {
+        return Ok(None);
+    }
+    if !channel.participants.contains(self_member) {
+        return Err(CliError::runtime(format!(
+            "member {} is not part of channel {}",
+            self_member.as_str(),
+            channel_id.as_str()
+        )));
+    }
+    let blob = channel.blob.ok_or_else(|| {
+        CliError::runtime(format!(
+            "file channel {} is missing blob metadata",
+            channel_id.as_str()
+        ))
+    })?;
+    let ticket = peers
+        .get(&channel.opener)
+        .and_then(|peer| peer.ticket.clone())
+        .ok_or_else(|| {
+            CliError::runtime(format!(
+                "no ticket known for file provider {}",
+                channel.opener.as_str()
+            ))
+        })?;
+    Ok(Some((PeerTicket { encoded: ticket }, blob)))
+}
+
+fn host_exportable_blob(
+    room: &RoomEngine,
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+    host_state: &HostState,
+) -> Result<BlobRef, CliError> {
+    let channel = room
+        .channel(channel_id)
+        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
+    if channel.kind != ChannelKind::File {
+        return Err(CliError::runtime(format!(
+            "channel {} is not a file channel",
+            channel_id.as_str()
+        )));
+    }
+    if !channel.participants.contains(self_member) {
+        return Err(CliError::runtime(format!(
+            "member {} is not part of channel {}",
+            self_member.as_str(),
+            channel_id.as_str()
+        )));
+    }
+    if !host_state.ready_file_channels.contains(channel_id) {
+        return Err(CliError::runtime(format!(
+            "file channel {} is not ready yet",
+            channel_id.as_str()
+        )));
+    }
+    channel.blob.ok_or_else(|| {
+        CliError::runtime(format!(
+            "file channel {} is missing blob metadata",
+            channel_id.as_str()
+        ))
+    })
+}
+
+fn apply_host_event(state: &mut HostState, event: &MachineEvent) {
+    match event {
+        MachineEvent::ChannelFileReady { channel_id, .. } => {
+            state.ready_file_channels.insert(channel_id.clone());
+        }
+        MachineEvent::ChannelRejected { channel_id, .. }
+        | MachineEvent::ChannelClosed { channel_id, .. } => {
+            state.ready_file_channels.remove(channel_id);
+        }
+        _ => {}
+    }
+}
+
 fn event_matches_sender(member_id: &MemberId, event: &MachineEvent) -> bool {
     match event {
         MachineEvent::Chat { from, .. }
         | MachineEvent::ChannelOpened { from, .. }
         | MachineEvent::ChannelData { from, .. } => from == member_id,
-        MachineEvent::ChannelAccepted { member_id: from, .. }
-        | MachineEvent::ChannelRejected { member_id: from, .. }
-        | MachineEvent::ChannelClosed { member_id: from, .. } => from == member_id,
+        MachineEvent::ChannelAccepted {
+            member_id: from, ..
+        }
+        | MachineEvent::ChannelRejected {
+            member_id: from, ..
+        }
+        | MachineEvent::ChannelClosed {
+            member_id: from, ..
+        } => from == member_id,
         MachineEvent::RoomWelcome { .. }
         | MachineEvent::MemberSnapshot { .. }
         | MachineEvent::MemberJoined { .. }
         | MachineEvent::MemberLeft { .. }
+        | MachineEvent::ChannelFileReady { .. }
+        | MachineEvent::ChannelFileExported { .. }
         | MachineEvent::Error { .. } => true,
     }
 }
@@ -1501,6 +1983,10 @@ async fn handle_host_command(
     command: MachineCommand,
     stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
+    host_state: &mut HostState,
+    transport: &IrohTransport,
+    host_tx: &mpsc::UnboundedSender<HostInput>,
+    local_command: bool,
 ) -> Result<(), CliError> {
     command.validate().map_err(protocol_error)?;
 
@@ -1523,10 +2009,6 @@ async fn handle_host_command(
                 .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
-        MachineCommand::AcceptChannel { channel_id } => {
-            let routed = room.accept_channel(sender, &channel_id).map_err(room_error)?;
-            deliver_routed_events(room.host_member(), routed, stdout, peers).await
-        }
         MachineCommand::RejectChannel { channel_id, reason } => {
             let routed = room
                 .reject_channel(sender, &channel_id, reason)
@@ -1543,6 +2025,92 @@ async fn handle_host_command(
             let routed = room
                 .close_channel(sender, &channel_id, reason)
                 .map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
+        }
+        MachineCommand::SendFile {
+            channel_id,
+            to,
+            path,
+            name,
+            mime,
+        } => {
+            if !local_command {
+                return Err(CliError::usage(
+                    "send_file is only valid as a local machine command",
+                ));
+            }
+            let path_ref = Path::new(&path);
+            if !path_ref.is_file() {
+                return Err(CliError::runtime(format!(
+                    "path {} is not a regular file",
+                    path_ref.display()
+                )));
+            }
+            let blob = transport
+                .import_blob_path(path_ref)
+                .await
+                .map_err(|error| CliError::transport(error.to_string()))?;
+            let size = std::fs::metadata(path_ref)
+                .map_err(|error| CliError::local_io(error.to_string()))?
+                .len();
+            let name = name.or_else(|| {
+                path_ref
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+            });
+            let routed = room
+                .open_channel(
+                    sender,
+                    channel_id.clone(),
+                    ChannelKind::File,
+                    to,
+                    name,
+                    Some(size),
+                    mime,
+                    Some(blob),
+                )
+                .map_err(room_error)?;
+            host_state.ready_file_channels.insert(channel_id.clone());
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
+        }
+        MachineCommand::ExportChannelFile { channel_id, path } => {
+            if !local_command {
+                return Err(CliError::usage(
+                    "export_channel_file is only valid as a local machine command",
+                ));
+            }
+            let blob = host_exportable_blob(room, sender, &channel_id, host_state)?;
+            let size = transport
+                .export_blob(&blob, Path::new(&path))
+                .await
+                .map_err(|error| CliError::transport(error.to_string()))?;
+            emit_event(
+                stdout,
+                &MachineEvent::ChannelFileExported {
+                    channel_id,
+                    path,
+                    size,
+                },
+            )
+            .await
+        }
+        MachineCommand::AcceptChannel { channel_id } => {
+            let routed = room
+                .accept_channel(sender, &channel_id)
+                .map_err(room_error)?;
+            if local_command {
+                if let Some((provider, blob)) =
+                    host_pending_file_download(room, peers, sender, &channel_id)?
+                {
+                    spawn_host_blob_download(
+                        transport.clone(),
+                        host_tx.clone(),
+                        provider,
+                        channel_id.clone(),
+                        blob,
+                    );
+                }
+            }
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
     }
@@ -1570,10 +2138,7 @@ async fn deliver_routed_events(
                     stdout,
                     &local_error(
                         "peer_not_connected",
-                        &format!(
-                            "no direct room link to {}",
-                            routed.recipient.as_str()
-                        ),
+                        &format!("no direct room link to {}", routed.recipient.as_str()),
                     ),
                 )
                 .await?;
@@ -1615,10 +2180,18 @@ fn track_join_state(state: &mut JoinState, event: &MachineEvent) {
         } => {
             state.self_member = Some(self_member.clone());
             state.host_member = Some(host_member.clone());
+            if let Some(ticket) = &state.pending_host_ticket {
+                state
+                    .member_tickets
+                    .insert(host_member.clone(), ticket.clone());
+            }
         }
         MachineEvent::MemberSnapshot { members } => {
             if let Some(host_member) = &state.host_member {
-                if let Some(member) = members.iter().find(|member| &member.member_id == host_member) {
+                if let Some(member) = members
+                    .iter()
+                    .find(|member| &member.member_id == host_member)
+                {
                     state.host_member = Some(member.member_id.clone());
                 }
             }
@@ -1646,19 +2219,19 @@ fn command_error_event(code: &str, message: &str, channel_id: Option<ChannelId>)
 fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
     match command {
         MachineCommand::SendChat { .. } => None,
-        MachineCommand::OpenChannel { channel_id, .. }
+        MachineCommand::SendFile { channel_id, .. }
+        | MachineCommand::OpenChannel { channel_id, .. }
         | MachineCommand::AcceptChannel { channel_id }
         | MachineCommand::RejectChannel { channel_id, .. }
         | MachineCommand::SendChannelData { channel_id, .. }
-        | MachineCommand::CloseChannel { channel_id, .. } => Some(channel_id.clone()),
+        | MachineCommand::CloseChannel { channel_id, .. }
+        | MachineCommand::ExportChannelFile { channel_id, .. } => Some(channel_id.clone()),
     }
 }
 
-async fn emit_event(
-    stdout: &mut tokio::io::Stdout,
-    event: &MachineEvent,
-) -> Result<(), CliError> {
-    let line = serde_json::to_string(event).map_err(|error| CliError::local_io(error.to_string()))?;
+async fn emit_event(stdout: &mut tokio::io::Stdout, event: &MachineEvent) -> Result<(), CliError> {
+    let line =
+        serde_json::to_string(event).map_err(|error| CliError::local_io(error.to_string()))?;
     stdout
         .write_all(line.as_bytes())
         .await
@@ -1677,7 +2250,10 @@ async fn emit_event(
     Ok(())
 }
 
-async fn send_peer_command(send: &mut SendStream, command: &MachineCommand) -> Result<(), CliError> {
+async fn send_peer_command(
+    send: &mut SendStream,
+    command: &MachineCommand,
+) -> Result<(), CliError> {
     write_framed(
         send,
         &AuthorityLinkMessage::MachineCommand {
@@ -1689,10 +2265,7 @@ async fn send_peer_command(send: &mut SendStream, command: &MachineCommand) -> R
     .map_err(|error| CliError::protocol(error.to_string()))
 }
 
-fn send_link_message<T>(
-    sender: &mpsc::UnboundedSender<T>,
-    message: T,
-) -> Result<(), CliError> {
+fn send_link_message<T>(sender: &mpsc::UnboundedSender<T>, message: T) -> Result<(), CliError> {
     sender
         .send(message)
         .map_err(|_| CliError::protocol("room link channel closed"))
