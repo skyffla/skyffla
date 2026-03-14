@@ -39,6 +39,16 @@ Skyffla should have one canonical room/session engine in Rust.
 
 Everything else is an adapter on top of that.
 
+The protocol must be treated as a first-class design artifact:
+
+- clean
+- minimal
+- logically separate from runtime code
+- logically separate from transport code
+- documented clearly enough to be consumed by wrappers without guesswork
+
+The protocol should not be an incidental byproduct of the CLI implementation.
+
 ### Core concepts
 
 - `Room`
@@ -99,6 +109,13 @@ There must be one canonical event/command model that all frontends consume:
 - Python wrapper
 
 No frontend gets its own semantics.
+
+This event/command model should be:
+
+- documented as a public contract
+- stable enough for wrappers to rely on
+- small enough to understand without reading runtime internals
+- explicit about ownership, routing, and lifecycle
 
 ## Control Plane vs Data Plane
 
@@ -450,6 +467,26 @@ It should define:
 
 It should become the source for machine schemas used by wrappers.
 
+It should be kept logically separate from:
+
+- transport implementation details
+- CLI/TUI behavior
+- runtime orchestration code
+
+Protocol types should describe the model and wire contract, not the local implementation strategy.
+
+The protocol crate should be well documented.
+
+At minimum, it should clearly document:
+
+- room lifecycle
+- member lifecycle
+- route semantics
+- channel lifecycle
+- command and event meanings
+- which actions are host-authoritative vs direct member-to-member
+- how wrappers are expected to consume the machine API
+
 ### Room/session engine
 
 Owns runtime semantics:
@@ -576,10 +613,12 @@ Goals:
 - define room command and event schema
 - define route and member identity types
 - define channel lifecycle types
+- write clear protocol docs alongside the types
 
 Output:
 
 - canonical Rust protocol types for room-native operation
+- protocol documentation that can serve as the wrapper contract
 - serialization tests for all command/event families
 
 Tests:
@@ -718,6 +757,7 @@ In `skyffla-protocol`:
 - serialization round trips
 - envelope validation
 - route and member validation
+- documentation-level examples that round-trip against real protocol types
 
 ### Engine tests
 
@@ -787,6 +827,7 @@ The clean design is:
 - direct member-to-member messaging
 - direct sender fanout for broadcast
 - one canonical Rust room protocol
+- protocol kept clean, logically separate, and well documented
 - one room/session engine
 - TUI and `machine` as adapters
 - wrappers on top of the `machine` API
