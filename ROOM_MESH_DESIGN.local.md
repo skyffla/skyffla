@@ -95,6 +95,12 @@ V1 channel kinds:
 - `file`
 - `clipboard`
 
+Important distinction:
+
+- `machine` channels are a Skyffla-native data path
+- `file` and folder payloads should reuse `iroh-blobs` for the data plane
+- `clipboard` can stay Skyffla-native unless it later benefits from the same blob path
+
 The key rule is:
 
 - room messages are one thing
@@ -186,6 +192,20 @@ V1 rule:
 
 - file, clipboard payload, and machine/raw payloads should be peer-to-peer when possible
 
+But not all payload kinds should be implemented the same way.
+
+The pragmatic split is:
+
+- Skyffla owns the room/control plane
+- Skyffla-native peer links carry chat and `machine` channel traffic
+- `iroh-blobs` should carry file and folder bytes
+
+This is important because Skyffla already has an older 1:1 custom file/folder
+path, and that is not the right foundation for mesh. The room protocol should
+authorize and coordinate file/folder exchange, but the actual content transfer
+should delegate to `iroh-blobs` rather than reinventing verified,
+content-addressed transfer again.
+
 This means:
 
 1. sender asks host to open a channel
@@ -193,6 +213,11 @@ This means:
 3. recipients accept or reject
 4. host introduces peers as needed
 5. actual payload moves directly between members
+
+For `machine` channels, that means Skyffla peer links.
+
+For `file` or folder channels, that means a blob transfer keyed by blob or
+collection metadata, not a custom raw byte stream invented in the room runtime.
 
 For `route = all`, the sender fans out to one direct peer channel per accepted recipient.
 
@@ -442,6 +467,11 @@ That keeps a clean split:
 
 - `machine` = machine control and event API
 - `pipe` = raw stdin payload into a room channel
+
+For files and folders, there should also be a clean split:
+
+- Skyffla `send`/`pipe` UX and room targeting stay in Skyffla
+- the file/folder data plane should use `iroh-blobs`
 
 This is cleaner than overloading one top-level mode for both jobs.
 
@@ -721,7 +751,8 @@ Goals:
 
 Output:
 
-- peer-to-peer payload path under room control
+- peer-to-peer `machine` payload path under room control
+- room-coordinated channel lifecycle that can later back blob transfers cleanly
 
 Tests:
 
@@ -731,12 +762,40 @@ Tests:
 - failure isolation for one rejected or disconnected recipient
 - direct chat path and direct payload path coexist without host relay confusion
 
-### Phase 6: `pipe`
+Non-goals for this phase:
+
+- do not build a new custom mesh file/folder byte-stream implementation
+- do not port the old 1:1 file/folder transfer path into rooms
+
+### Phase 6: Blob-backed files and folders
+
+Goals:
+
+- integrate `iroh-blobs` for file and folder payload transfer
+- keep Skyffla room UX/control semantics around offer, accept, reject, and targeting
+- represent file/folder payloads as room-authorized channels that resolve to blob metadata
+- support folders via blob collections rather than custom tar-stream logic in the mesh runtime
+
+Output:
+
+- Skyffla-controlled file/folder UX with `iroh-blobs` as the data plane
+- clear separation between room authorization and blob transfer
+
+Tests:
+
+- offer file to one member, accept, transfer by blob metadata
+- offer file to all, per-recipient acceptance and independent success/failure
+- offer folder/collection and verify collection metadata round-trips
+- rejecting one recipient does not affect the others
+- resuming or reusing already-present content works when supported by `iroh-blobs`
+
+### Phase 7: `pipe`
 
 Goals:
 
 - restore Unix-style raw stdin payload support as a separate surface
 - map raw stdin to a room channel
+- keep this focused on `machine`/raw payloads, not as a replacement for blob-backed file transfer
 
 Output:
 
@@ -748,7 +807,7 @@ Tests:
 - `pipe --to all`
 - buffered stdin replay for multi-recipient fanout if required
 
-### Phase 7: Python wrapper
+### Phase 8: Python wrapper
 
 Goals:
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    ChannelId, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
+    ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
     MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
@@ -27,12 +27,18 @@ struct JoinState {
     self_member: Option<MemberId>,
     host_member: Option<MemberId>,
     members: BTreeMap<MemberId, Member>,
-    channels: BTreeMap<ChannelId, BTreeSet<MemberId>>,
+    channels: BTreeMap<ChannelId, JoinChannelState>,
     peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
     pending_host_peer_link: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     local_name: String,
     local_fingerprint: Option<String>,
     local_ticket: String,
+}
+
+#[derive(Debug, Clone)]
+struct JoinChannelState {
+    kind: ChannelKind,
+    participants: BTreeSet<MemberId>,
 }
 
 #[derive(Debug)]
@@ -1150,18 +1156,25 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
         MachineEvent::MemberLeft { member_id, .. } => {
             state.members.remove(member_id);
             state.peer_links.remove(member_id);
-            for participants in state.channels.values_mut() {
-                participants.remove(member_id);
+            for channel in state.channels.values_mut() {
+                channel.participants.remove(member_id);
             }
         }
         MachineEvent::ChannelOpened {
             channel_id,
+            kind,
             from,
             to,
             ..
         } => {
             if let Ok(participants) = event_participants(state, from, to) {
-                state.channels.insert(channel_id.clone(), participants);
+                state.channels.insert(
+                    channel_id.clone(),
+                    JoinChannelState {
+                        kind: kind.clone(),
+                        participants,
+                    },
+                );
             }
         }
         MachineEvent::ChannelClosed { channel_id, .. } => {
@@ -1317,19 +1330,26 @@ fn event_participants(
 fn join_channel_recipients(
     self_member: &MemberId,
     channel_id: &ChannelId,
-    channels: &BTreeMap<ChannelId, BTreeSet<MemberId>>,
+    channels: &BTreeMap<ChannelId, JoinChannelState>,
 ) -> Result<Vec<MemberId>, CliError> {
-    let participants = channels
+    let channel = channels
         .get(channel_id)
         .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
-    if !participants.contains(self_member) {
+    if channel.kind == ChannelKind::File {
+        return Err(CliError::runtime(format!(
+            "channel {} is blob-backed and does not accept inline channel data",
+            channel_id.as_str()
+        )));
+    }
+    if !channel.participants.contains(self_member) {
         return Err(CliError::runtime(format!(
             "member {} is not part of channel {}",
             self_member.as_str(),
             channel_id.as_str()
         )));
     }
-    Ok(participants
+    Ok(channel
+        .participants
         .iter()
         .filter(|member_id| *member_id != self_member)
         .cloned()
@@ -1377,9 +1397,10 @@ async fn handle_host_command(
             name,
             size,
             mime,
+            blob,
         } => {
             let routed = room
-                .open_channel(sender, channel_id, kind, to, name, size, mime)
+                .open_channel(sender, channel_id, kind, to, name, size, mime, blob)
                 .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }

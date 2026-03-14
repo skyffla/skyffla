@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use skyffla_protocol::room::{
-    ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError, Route,
-    MACHINE_PROTOCOL_VERSION,
+    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError,
+    Route, MACHINE_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,7 @@ pub struct RoomEngine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChannelState {
+    kind: ChannelKind,
     participants: BTreeSet<MemberId>,
 }
 
@@ -192,6 +193,7 @@ impl RoomEngine {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        blob: Option<BlobRef>,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(from)?;
         if self.channels.contains_key(&channel_id) {
@@ -202,17 +204,23 @@ impl RoomEngine {
         let participants = self.channel_participants(from, &to)?;
         let event = MachineEvent::ChannelOpened {
             channel_id: channel_id.clone(),
-            kind,
+            kind: kind.clone(),
             from: from.clone(),
             from_name,
             to,
             name,
             size,
             mime,
+            blob,
         };
         event.validate()?;
-        self.channels
-            .insert(channel_id, ChannelState { participants: participants.clone() });
+        self.channels.insert(
+            channel_id,
+            ChannelState {
+                kind,
+                participants: participants.clone(),
+            },
+        );
 
         Ok(participants
             .into_iter()
@@ -387,6 +395,12 @@ impl RoomEngine {
             .ok_or_else(|| RoomEngineError::UnknownChannel {
                 channel_id: channel_id.clone(),
             })?;
+        if channel.kind == ChannelKind::File {
+            return Err(RoomEngineError::ChannelDataUnsupported {
+                channel_id: channel_id.clone(),
+                kind: channel.kind.clone(),
+            });
+        }
         if !channel.participants.contains(sender) {
             return Err(RoomEngineError::MemberNotInChannel {
                 member_id: sender.clone(),
@@ -415,6 +429,7 @@ pub enum RoomEngineError {
     UnknownChannel { channel_id: ChannelId },
     ChannelAlreadyOpen { channel_id: ChannelId },
     MemberNotInChannel { member_id: MemberId, channel_id: ChannelId },
+    ChannelDataUnsupported { channel_id: ChannelId, kind: ChannelKind },
     HostCannotLeaveRoom,
 }
 
@@ -442,6 +457,14 @@ impl fmt::Display for RoomEngineError {
                     channel_id.as_str()
                 )
             }
+            Self::ChannelDataUnsupported { channel_id, kind } => {
+                write!(
+                    f,
+                    "channel {} of kind {:?} does not support inline channel data",
+                    channel_id.as_str(),
+                    kind
+                )
+            }
             Self::HostCannotLeaveRoom => write!(f, "host cannot leave its own room"),
         }
     }
@@ -457,7 +480,7 @@ impl From<RoomProtocolError> for RoomEngineError {
 
 #[cfg(test)]
 mod tests {
-    use skyffla_protocol::room::{ChannelKind, MachineEvent};
+    use skyffla_protocol::room::{BlobFormat, ChannelKind, MachineEvent};
 
     use super::*;
 
@@ -606,6 +629,7 @@ mod tests {
                 Some("demo".into()),
                 None,
                 None,
+                None,
             )
             .expect("channel opens");
 
@@ -639,6 +663,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("channel opens");
 
@@ -664,6 +689,7 @@ mod tests {
             Route::Member {
                 member_id: beta.member.member_id.clone(),
             },
+            None,
             None,
             None,
             None,
@@ -702,6 +728,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("channel opens");
 
@@ -733,6 +760,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("channel opens");
 
@@ -752,5 +780,37 @@ mod tests {
         assert!(routed
             .iter()
             .any(|event| event.recipient == beta.member.member_id));
+    }
+
+    #[test]
+    fn file_channels_require_blob_metadata_and_reject_inline_data() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("c1"),
+            ChannelKind::File,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            Some("report.pdf".into()),
+            Some(1024),
+            Some("application/pdf".into()),
+            Some(BlobRef {
+                hash: "abc123".into(),
+                format: BlobFormat::Blob,
+            }),
+        )
+        .expect("file channel opens");
+
+        let err = room
+            .send_channel_data(&host_member, &channel_id("c1"), "raw bytes".into())
+            .expect_err("file channels should not accept inline data");
+        assert!(matches!(
+            err,
+            RoomEngineError::ChannelDataUnsupported { .. }
+        ));
     }
 }

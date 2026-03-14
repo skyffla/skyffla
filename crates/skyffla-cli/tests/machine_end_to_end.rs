@@ -639,6 +639,115 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let bin = env!("CARGO_BIN_EXE_skyffla");
+
+    let mut host = Command::new(bin);
+    host.arg("host")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("host")
+        .arg("--json")
+        .env("HOME", &host_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut host = host.spawn().context("failed to spawn host process")?;
+
+    wait_for_stream_ready(&server.url, &room).await?;
+
+    let mut beta = Command::new(bin);
+    beta.arg("join")
+        .arg(&room)
+        .arg("machine")
+        .arg("--server")
+        .arg(&server.url)
+        .arg("--name")
+        .arg("beta")
+        .arg("--json")
+        .env("HOME", &beta_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut beta = beta.spawn().context("failed to spawn beta process")?;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
+    host_stdin
+        .write_all(
+            br#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","blob":{"hash":"abc123","format":"blob"}}"#,
+        )
+        .await
+        .context("failed to write host file channel command")?;
+    host_stdin.write_all(b"\n").await?;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    host_stdin
+        .write_all(br#"{"type":"send_channel_data","channel_id":"c1","body":"raw bytes"}"#)
+        .await
+        .context("failed to write host inline file data command")?;
+    host_stdin.write_all(b"\n").await?;
+    drop(host_stdin);
+    drop(beta.stdin.take());
+
+    let beta_output = tokio::time::timeout(PROCESS_TIMEOUT, beta.wait_with_output())
+        .await
+        .context("beta process watchdog timed out")?
+        .context("beta process failed while waiting for output")?;
+    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
+        .await
+        .context("host process watchdog timed out")?
+        .context("host process failed while waiting for output")?;
+
+    server.abort();
+
+    assert!(host_output.status.success());
+    assert!(beta_output.status.success());
+
+    let host_events = parse_json_lines(&host_output.stdout)?;
+    let beta_events = parse_json_lines(&beta_output.stdout)?;
+
+    assert!(beta_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+            && event.pointer("/blob/hash") == Some(&Value::String("abc123".into()))
+    }));
+    assert!(host_events.iter().any(|event| {
+        event.get("type") == Some(&Value::String("error".into()))
+            && event.get("code") == Some(&Value::String("command_failed".into()))
+            && event.get("channel_id") == Some(&Value::String("c1".into()))
+    }));
+    assert!(
+        !beta_events.iter().any(|event| {
+            event.get("type") == Some(&Value::String("channel_data".into()))
+                && event.get("body") == Some(&Value::String("raw bytes".into()))
+        }),
+        "beta unexpectedly saw inline file channel data:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&beta_output.stdout),
+        String::from_utf8_lossy(&beta_output.stderr)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());

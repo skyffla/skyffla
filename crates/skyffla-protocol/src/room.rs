@@ -27,6 +27,8 @@ pub enum RoomProtocolError {
     EmptyChatMessage,
     EmptyChannelData,
     EmptyMemberSnapshot,
+    MissingBlobRef,
+    UnexpectedBlobRef,
 }
 
 impl fmt::Display for RoomProtocolError {
@@ -36,6 +38,8 @@ impl fmt::Display for RoomProtocolError {
             Self::EmptyChatMessage => write!(f, "chat message must not be empty"),
             Self::EmptyChannelData => write!(f, "channel data must not be empty"),
             Self::EmptyMemberSnapshot => write!(f, "member snapshot must not be empty"),
+            Self::MissingBlobRef => write!(f, "file channels require blob metadata"),
+            Self::UnexpectedBlobRef => write!(f, "blob metadata is only allowed for file channels"),
         }
     }
 }
@@ -126,6 +130,28 @@ pub enum ChannelKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlobFormat {
+    Blob,
+    Collection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlobRef {
+    pub hash: String,
+    pub format: BlobFormat,
+}
+
+impl BlobRef {
+    pub fn validate(&self) -> Result<(), RoomProtocolError> {
+        if self.hash.trim().is_empty() {
+            return Err(RoomProtocolError::EmptyIdentifier { kind: "blob_hash" });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Member {
     pub member_id: MemberId,
     pub name: String,
@@ -158,6 +184,7 @@ pub enum MachineCommand {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        blob: Option<BlobRef>,
     },
     AcceptChannel {
         channel_id: ChannelId,
@@ -186,11 +213,18 @@ impl MachineCommand {
                 }
                 Ok(())
             }
-            Self::OpenChannel { channel_id, to, .. } => {
+            Self::OpenChannel {
+                channel_id,
+                kind,
+                to,
+                blob,
+                ..
+            } => {
                 if channel_id.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
                 }
-                to.validate()
+                to.validate()?;
+                validate_channel_blob(kind, blob.as_ref())
             }
             Self::AcceptChannel { channel_id }
             | Self::RejectChannel { channel_id, .. }
@@ -247,6 +281,7 @@ pub enum MachineEvent {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        blob: Option<BlobRef>,
     },
     ChannelAccepted {
         channel_id: ChannelId,
@@ -339,9 +374,11 @@ impl MachineEvent {
             }
             Self::ChannelOpened {
                 channel_id,
+                kind,
                 from,
                 from_name,
                 to,
+                blob,
                 ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -353,7 +390,8 @@ impl MachineEvent {
                 if from_name.trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_name" });
                 }
-                to.validate()
+                to.validate()?;
+                validate_channel_blob(kind, blob.as_ref())
             }
             Self::ChannelAccepted {
                 channel_id,
@@ -413,6 +451,22 @@ impl MachineEvent {
                 Ok(())
             }
         }
+    }
+}
+
+fn validate_channel_blob(
+    kind: &ChannelKind,
+    blob: Option<&BlobRef>,
+) -> Result<(), RoomProtocolError> {
+    match kind {
+        ChannelKind::File => match blob {
+            Some(blob) => blob.validate(),
+            None => Err(RoomProtocolError::MissingBlobRef),
+        },
+        ChannelKind::Machine | ChannelKind::Clipboard => match blob {
+            Some(_) => Err(RoomProtocolError::UnexpectedBlobRef),
+            None => Ok(()),
+        },
     }
 }
 
@@ -546,7 +600,59 @@ mod tests {
                 name: Some("agent-link".into()),
                 size: None,
                 mime: None,
+                blob: None,
             }
         );
+    }
+
+    #[test]
+    fn documented_file_channel_command_with_blob_round_trips() {
+        let json = r#"{
+            "type":"open_channel",
+            "channel_id":"c8",
+            "kind":"file",
+            "to":{"type":"member","member_id":"m2"},
+            "name":"report.pdf",
+            "size":1234,
+            "mime":"application/pdf",
+            "blob":{"hash":"abc123","format":"blob"}
+        }"#;
+
+        let command: MachineCommand =
+            serde_json::from_str(json).expect("file open_channel command should parse");
+
+        assert_eq!(
+            command,
+            MachineCommand::OpenChannel {
+                channel_id: ChannelId::new("c8").expect("valid channel id"),
+                kind: ChannelKind::File,
+                to: Route::Member {
+                    member_id: MemberId::new("m2").expect("valid member id"),
+                },
+                name: Some("report.pdf".into()),
+                size: Some(1234),
+                mime: Some("application/pdf".into()),
+                blob: Some(BlobRef {
+                    hash: "abc123".into(),
+                    format: BlobFormat::Blob,
+                }),
+            }
+        );
+        command.validate().expect("file channel should validate");
+    }
+
+    #[test]
+    fn file_channel_requires_blob_ref() {
+        let command = MachineCommand::OpenChannel {
+            channel_id: ChannelId::new("c1").expect("valid channel id"),
+            kind: ChannelKind::File,
+            to: Route::All,
+            name: Some("report.pdf".into()),
+            size: None,
+            mime: None,
+            blob: None,
+        };
+
+        assert_eq!(command.validate(), Err(RoomProtocolError::MissingBlobRef));
     }
 }
