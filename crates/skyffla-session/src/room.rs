@@ -242,13 +242,13 @@ impl RoomEngine {
     }
 
     pub fn reject_channel(
-        &self,
+        &mut self,
         member_id: &MemberId,
         channel_id: &ChannelId,
         reason: Option<String>,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         let member_name = self.member_name(member_id)?;
-        self.route_channel_event(
+        let routed = self.route_channel_event(
             member_id,
             channel_id,
             MachineEvent::ChannelRejected {
@@ -257,7 +257,9 @@ impl RoomEngine {
                 member_name,
                 reason,
             },
-        )
+        )?;
+        self.channels.remove(channel_id);
+        Ok(routed)
     }
 
     pub fn send_channel_data(
@@ -647,5 +649,40 @@ mod tests {
         assert_eq!(routed.len(), 1);
         assert_eq!(routed[0].recipient, beta.member.member_id);
         assert!(matches!(routed[0].event, MachineEvent::ChannelData { .. }));
+    }
+
+    #[test]
+    fn rejecting_channel_removes_it_from_future_routing() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("c1"),
+            ChannelKind::Machine,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("channel opens");
+
+        let rejected = room
+            .reject_channel(&beta.member.member_id, &channel_id("c1"), Some("nope".into()))
+            .expect("channel rejects");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].recipient, member_id("m1"));
+        assert!(matches!(
+            rejected[0].event,
+            MachineEvent::ChannelRejected { .. }
+        ));
+
+        let err = room
+            .send_channel_data(&beta.member.member_id, &channel_id("c1"), "still open?".into())
+            .expect_err("rejected channel should be gone");
+        assert!(matches!(err, RoomEngineError::UnknownChannel { .. }));
     }
 }

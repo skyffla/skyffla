@@ -146,14 +146,21 @@ pub(crate) async fn run_machine_host(
     while let Some(input) = host_rx.recv().await {
         match input {
             HostInput::LocalCommand(command) => {
-                handle_host_command(
+                if let Err(error) = handle_host_command(
                     &mut room,
                     &host_member,
-                    command,
+                    command.clone(),
                     &mut stdout,
                     &mut peers,
                 )
-                .await?;
+                .await
+                {
+                    emit_event(
+                        &mut stdout,
+                        &command_error_event("command_failed", &error.to_string(), command_channel_id(&command)),
+                    )
+                    .await?;
+                }
             }
             HostInput::LocalInputClosed => break,
             HostInput::PeerConnected(connected) => {
@@ -215,8 +222,22 @@ pub(crate) async fn run_machine_host(
             }
             HostInput::PeerCommand { member_id, command } => {
                 if peers.contains_key(&member_id) {
-                    handle_host_command(&mut room, &member_id, command, &mut stdout, &mut peers)
-                        .await?;
+                    if let Err(error) = handle_host_command(
+                        &mut room,
+                        &member_id,
+                        command.clone(),
+                        &mut stdout,
+                        &mut peers,
+                    )
+                    .await
+                    {
+                        send_command_error_to_peer(
+                            &member_id,
+                            &command,
+                            &error.to_string(),
+                            &peers,
+                        )?;
+                    }
                 }
             }
             HostInput::PeerEvent { event } => {
@@ -315,7 +336,19 @@ pub(crate) async fn run_machine_join_session(
                             continue;
                         }
                         let command = parse_command(&line)?;
-                        handle_join_command(&mut join_state, send, command, &mut stdout).await?;
+                        if let Err(error) =
+                            handle_join_command(&mut join_state, send, command.clone(), &mut stdout).await
+                        {
+                            emit_event(
+                                &mut stdout,
+                                &command_error_event(
+                                    "command_failed",
+                                    &error.to_string(),
+                                    command_channel_id(&command),
+                                ),
+                            )
+                            .await?;
+                        }
                     }
                     None => {
                         input_closed = true;
@@ -1023,6 +1056,9 @@ fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
         MachineEvent::ChannelClosed { channel_id, .. } => {
             state.channels.remove(channel_id);
         }
+        MachineEvent::ChannelRejected { channel_id, .. } => {
+            state.channels.remove(channel_id);
+        }
         _ => {}
     }
 }
@@ -1326,6 +1362,25 @@ fn local_error(code: &str, message: &str) -> MachineEvent {
     }
 }
 
+fn command_error_event(code: &str, message: &str, channel_id: Option<ChannelId>) -> MachineEvent {
+    MachineEvent::Error {
+        code: code.into(),
+        message: message.into(),
+        channel_id,
+    }
+}
+
+fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
+    match command {
+        MachineCommand::SendChat { .. } => None,
+        MachineCommand::OpenChannel { channel_id, .. }
+        | MachineCommand::AcceptChannel { channel_id }
+        | MachineCommand::RejectChannel { channel_id, .. }
+        | MachineCommand::SendChannelData { channel_id, .. }
+        | MachineCommand::CloseChannel { channel_id, .. } => Some(channel_id.clone()),
+    }
+}
+
 async fn emit_event(
     stdout: &mut tokio::io::Stdout,
     event: &MachineEvent,
@@ -1368,6 +1423,23 @@ fn send_link_message(
     sender
         .send(message)
         .map_err(|_| CliError::protocol("room link channel closed"))
+}
+
+fn send_command_error_to_peer(
+    member_id: &MemberId,
+    command: &MachineCommand,
+    message: &str,
+    peers: &BTreeMap<MemberId, PeerHandle>,
+) -> Result<(), CliError> {
+    let Some(peer) = peers.get(member_id) else {
+        return Ok(());
+    };
+    send_link_message(
+        &peer.authority_sender,
+        RoomLinkMessage::MachineEvent {
+            event: command_error_event("command_failed", message, command_channel_id(command)),
+        },
+    )
 }
 
 fn protocol_error(error: impl ToString) -> CliError {
