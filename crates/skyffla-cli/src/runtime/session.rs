@@ -111,7 +111,16 @@ pub(crate) async fn run_connected_session(
         }
     } else if config.machine {
         debug_assert!(!is_host, "machine host path should use run_machine_host");
-        run_machine_join_session(&session_id, sink, &mut send, &mut recv).await?;
+        run_machine_join_session(
+            config,
+            sink,
+            transport,
+            &mut send,
+            &mut recv,
+            Some(identity.fingerprint.clone()),
+            local_ticket.encoded,
+        )
+        .await?;
     } else if config.stdio {
         run_stdio_session(sink, &session_id, &connection, &mut send, &mut recv, is_host).await?;
     } else {
