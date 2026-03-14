@@ -4,13 +4,26 @@ This file tracks the remaining work in the order we should tackle it.
 
 ## Current Priority Order
 
-1. Finish file and folder work
-2. Port the TUI onto the room engine
-3. Write the wrapper-facing `machine` protocol spec
-4. Build the thin Python wrapper
-5. Add `pipe` as a separate raw payload surface
+1. Tighten rendezvous around room terminology and contract
+2. Finish file and folder work
+3. Port the TUI onto the room engine
+4. Write the wrapper-facing `machine` protocol spec
+5. Build the thin Python wrapper
+6. Add `pipe` as a separate raw payload surface
 
-## 1. File / Folder Work
+## 1. Rendezvous Cleanup
+
+- [ ] Rename rendezvous API and docs conceptually from `stream` to `room`
+- [ ] Keep exact room-id lookup semantics explicit
+- [ ] Verify host registration remains one live host per room id
+- [ ] Keep rendezvous free of room roster, chat, or channel semantics
+- [ ] Update CLI/client naming where appropriate without widening rendezvous responsibilities
+
+Exit criteria:
+
+- rendezvous is clearly documented and tested as a minimal room host locator
+- naming aligns with the room-first architecture
+## 2. File / Folder Work
 
 - [x] Blob-backed single-file channels in `machine`
 - [ ] Add folder / collection channels on top of `iroh-blobs`
@@ -26,7 +39,7 @@ Exit criteria:
 - one member can send a file to multiple recipients with independent success/failure
 - file and folder channels do not use inline `channel_data`
 
-## 2. TUI on Room Engine
+## 3. TUI on Room Engine
 
 - [ ] Replace remaining 1:1 assumptions in the interactive runtime
 - [ ] Show room id, self member id, and host member id
@@ -43,7 +56,7 @@ Exit criteria:
 - direct chat and broadcast chat both work
 - file offers can be accepted and exported from the TUI
 
-## 3. Wrapper-Facing Machine Spec
+## 4. Wrapper-Facing Machine Spec
 
 - [ ] Write a standalone `machine` protocol document
 - [ ] Document all command and event shapes
@@ -55,7 +68,7 @@ Exit criteria:
 
 - a wrapper author can implement against the spec without reading runtime internals
 
-## 4. Python Wrapper
+## 5. Python Wrapper
 
 - [ ] Create a `uv`-managed Python project
 - [ ] Add thin process management for `skyffla ... machine`
@@ -70,7 +83,7 @@ Exit criteria:
 - the wrapper does not reimplement room or transport semantics
 - typed Python events match the Rust `machine` schema
 
-## 5. Raw `pipe`
+## 6. Raw `pipe`
 
 - [ ] Define the final `pipe` CLI surface
 - [ ] Map stdin payloads onto room-native channels

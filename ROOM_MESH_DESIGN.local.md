@@ -31,6 +31,7 @@ Implemented so far:
 - direct `machine` channel traffic over peer links
 - in-band machine errors instead of process-level failures
 - blob-backed single-file channels in `machine` mode via `iroh-blobs`
+- rendezvous already acts as a minimal exact-key host locator
 
 Not implemented yet:
 
@@ -40,6 +41,7 @@ Not implemented yet:
 - a standalone wrapper-facing `machine` protocol spec
 - thin Python wrapper over the `machine` API
 - raw `pipe` on top of the room model
+- rendezvous naming and contract cleanup from `stream` to `room`
 
 ## Naming
 
@@ -312,6 +314,16 @@ So the rendezvous contract is:
 3. rendezvous returns the current host for room `X`, if present
 
 This makes rendezvous a keyed host locator, not a room directory.
+
+Current implementation status:
+
+- the current rendezvous service already behaves mostly like this
+- it stores one live host registration per exact key
+- it does not expose room listing or directory APIs
+- the main remaining work is contract cleanup:
+  - rename `stream` terminology to `room`
+  - document the room-first rendezvous contract clearly
+  - keep capabilities aligned with the room-native client surfaces
 
 Rendezvous should not own room semantics such as:
 
@@ -906,14 +918,15 @@ Tests:
 
 From the current state, the recommended order is:
 
-1. finish file-related work
+1. tighten rendezvous naming and contract around rooms
+2. finish file-related work
    - folder / collection support
    - multiparty file fanout and rejection coverage
    - file UX polish outside raw `machine` command entry
-2. port the TUI onto the room engine
-3. document the wrapper-facing `machine` contract cleanly
-4. build the thin Python wrapper on top of that contract
-5. add raw `pipe` as a separate surface after the wrapper-facing contract is stable
+3. port the TUI onto the room engine
+4. document the wrapper-facing `machine` contract cleanly
+5. build the thin Python wrapper on top of that contract
+6. add raw `pipe` as a separate surface after the wrapper-facing contract is stable
 
 ## Test Strategy
 
