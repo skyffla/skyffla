@@ -3,6 +3,8 @@ pub mod room;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use skyffla_protocol::SessionMode;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPeer {
     pub session_id: String,
@@ -43,6 +45,7 @@ pub enum SessionState {
     Negotiating { session_id: String },
     Interactive { session_id: String },
     Stdio { session_id: String },
+    Machine { session_id: String },
     Closing,
     Closed,
     Failed { reason: String },
@@ -54,7 +57,10 @@ pub enum SessionEvent {
     JoinRequested { stream_id: String },
     TransportConnecting,
     PeerConnected { session_id: String },
-    Negotiated { session_id: String, stdio: bool },
+    Negotiated {
+        session_id: String,
+        session_mode: SessionMode,
+    },
     CloseRequested,
     Closed,
     Failed { reason: String },
@@ -110,15 +116,22 @@ impl SessionMachine {
             (SessionState::Connecting { .. }, SessionEvent::PeerConnected { session_id }) => {
                 SessionState::Negotiating { session_id }
             }
-            (SessionState::Negotiating { .. }, SessionEvent::Negotiated { session_id, stdio }) => {
-                if stdio {
-                    SessionState::Stdio { session_id }
-                } else {
+            (
+                SessionState::Negotiating { .. },
+                SessionEvent::Negotiated {
+                    session_id,
+                    session_mode,
+                },
+            ) => match session_mode {
+                SessionMode::Stdio => SessionState::Stdio { session_id },
+                SessionMode::Machine => SessionState::Machine { session_id },
+                SessionMode::Interactive | SessionMode::Message => {
                     SessionState::Interactive { session_id }
                 }
-            }
+            },
             (SessionState::Interactive { .. }, SessionEvent::CloseRequested)
             | (SessionState::Stdio { .. }, SessionEvent::CloseRequested)
+            | (SessionState::Machine { .. }, SessionEvent::CloseRequested)
             | (SessionState::Hosting { .. }, SessionEvent::CloseRequested)
             | (SessionState::Joining { .. }, SessionEvent::CloseRequested)
             | (SessionState::Connecting { .. }, SessionEvent::CloseRequested)
@@ -275,7 +288,7 @@ mod tests {
         machine
             .transition(SessionEvent::Negotiated {
                 session_id: "s1".into(),
-                stdio: false,
+                session_mode: SessionMode::Interactive,
             })
             .expect("interactive negotiation should be accepted");
 

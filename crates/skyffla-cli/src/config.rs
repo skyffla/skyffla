@@ -28,7 +28,9 @@ pub(crate) enum Command {
 
 #[derive(Args, Clone)]
 pub(crate) struct SessionArgs {
-    pub(crate) stream_id: Option<String>,
+    pub(crate) room_id: Option<String>,
+    #[arg(value_enum)]
+    pub(crate) surface: Option<ClientSurface>,
     #[arg(
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
@@ -53,6 +55,11 @@ pub(crate) struct SessionArgs {
     pub(crate) reject_all: bool,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientSurface {
+    Machine,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Role {
     Host,
@@ -67,6 +74,7 @@ pub(crate) struct SessionConfig {
     pub(crate) peer_name: String,
     pub(crate) outgoing_message: Option<String>,
     pub(crate) stdio: bool,
+    pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
     pub(crate) auto_accept_policy: AutoAcceptPolicy,
@@ -77,10 +85,10 @@ impl SessionConfig {
     pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
         validate_stdio_message_flags(args.stdio, args.message.as_deref())
             .map_err(|error| CliError::usage(error.to_string()))?;
-        let stream_id = resolve_stream_id(args.stream_id, std::env::var("SKYFFLA_STREAM_ID").ok())
+        let stream_id = resolve_stream_id(args.room_id, std::env::var("SKYFFLA_STREAM_ID").ok())
             .ok_or_else(|| {
                 CliError::usage(
-                    "missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID",
+                    "missing room id: pass it as an argument or set SKYFFLA_STREAM_ID",
                 )
             })?;
         validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
@@ -104,6 +112,7 @@ impl SessionConfig {
             ),
             outgoing_message: args.message,
             stdio: args.stdio,
+            machine: matches!(args.surface, Some(ClientSurface::Machine)),
             json_events: args.json,
             local_mode: args.local,
             auto_accept_policy,
@@ -112,7 +121,9 @@ impl SessionConfig {
     }
 
     pub(crate) fn session_mode(&self) -> SessionMode {
-        if self.stdio {
+        if self.machine {
+            SessionMode::Machine
+        } else if self.stdio {
             SessionMode::Stdio
         } else if self.outgoing_message.is_some() {
             SessionMode::Message

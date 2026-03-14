@@ -5,6 +5,7 @@ use iroh::endpoint::{ReadError, ReadExactError, RecvStream, SendStream};
 use skyffla_protocol::{
     decode_frame, encode_frame, ControlMessage, DataStreamHeader, Envelope, ErrorMessage,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::AsyncWriteExt;
 
 static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -32,36 +33,47 @@ pub(crate) async fn send_transfer_error(
 }
 
 pub(crate) async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()> {
-    let bytes = encode_frame(envelope)?;
-    send.write_all(&bytes)
-        .await
-        .context("failed to write envelope bytes")?;
-    send.flush()
-        .await
-        .context("failed to flush envelope bytes")?;
-    Ok(())
+    write_framed(send, envelope, "envelope").await
 }
 
 pub(crate) async fn write_data_header(
     send: &mut SendStream,
     header: &DataStreamHeader,
 ) -> Result<()> {
-    let bytes = encode_frame(header)?;
+    write_framed(send, header, "data header").await
+}
+
+pub(crate) async fn write_framed<T>(
+    send: &mut SendStream,
+    value: &T,
+    label: &str,
+) -> Result<()>
+where
+    T: Serialize,
+{
+    let bytes = encode_frame(value)?;
     send.write_all(&bytes)
         .await
-        .context("failed to write data header bytes")?;
+        .with_context(|| format!("failed to write {label} bytes"))?;
     send.flush()
         .await
-        .context("failed to flush data header bytes")?;
+        .with_context(|| format!("failed to flush {label} bytes"))?;
     Ok(())
 }
 
 pub(crate) async fn read_envelope(recv: &mut RecvStream) -> Result<Option<Envelope>> {
-    read_framed_message(recv, "envelope").await
+    read_framed(recv, "envelope").await
 }
 
 pub(crate) async fn read_data_header(recv: &mut RecvStream) -> Result<Option<DataStreamHeader>> {
-    read_framed_message(recv, "data header").await
+    read_framed(recv, "data header").await
+}
+
+pub(crate) async fn read_framed<T>(recv: &mut RecvStream, label: &str) -> Result<Option<T>>
+where
+    T: DeserializeOwned,
+{
+    read_framed_message(recv, label).await
 }
 
 pub(crate) fn next_message_id() -> String {
@@ -71,7 +83,7 @@ pub(crate) fn next_message_id() -> String {
 
 async fn read_framed_message<T>(recv: &mut RecvStream, label: &str) -> Result<Option<T>>
 where
-    T: serde::de::DeserializeOwned,
+    T: DeserializeOwned,
 {
     let mut prefix = [0_u8; 4];
     match recv.read_exact(&mut prefix).await {

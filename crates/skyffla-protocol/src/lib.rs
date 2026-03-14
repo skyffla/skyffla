@@ -24,6 +24,7 @@ pub enum SessionMode {
     Interactive,
     Message,
     Stdio,
+    Machine,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
