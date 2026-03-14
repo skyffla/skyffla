@@ -6,7 +6,7 @@ use skyffla_protocol::room::{
     ChannelId, MachineCommand, MachineEvent, Member, MemberId, RoomId, Route,
     MACHINE_PROTOCOL_VERSION,
 };
-use skyffla_protocol::room_link::RoomLinkMessage;
+use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_session::room::{RoomEngine, RoutedEvent};
 use skyffla_session::{state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer};
 use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
@@ -28,8 +28,8 @@ struct JoinState {
     host_member: Option<MemberId>,
     members: BTreeMap<MemberId, Member>,
     channels: BTreeMap<ChannelId, BTreeSet<MemberId>>,
-    peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<RoomLinkMessage>>,
-    pending_host_peer_link: Option<mpsc::UnboundedSender<RoomLinkMessage>>,
+    peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
+    pending_host_peer_link: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     local_name: String,
     local_fingerprint: Option<String>,
     local_ticket: String,
@@ -47,8 +47,8 @@ struct ConnectedPeer {
 
 #[derive(Debug)]
 struct PeerHandle {
-    authority_sender: mpsc::UnboundedSender<RoomLinkMessage>,
-    peer_sender: mpsc::UnboundedSender<RoomLinkMessage>,
+    authority_sender: mpsc::UnboundedSender<AuthorityLinkMessage>,
+    peer_sender: mpsc::UnboundedSender<PeerLinkMessage>,
     member: Member,
     ticket: Option<String>,
 }
@@ -77,7 +77,7 @@ enum HostInput {
 enum JoinPeerInput {
     Connected {
         member: Member,
-        sender: mpsc::UnboundedSender<RoomLinkMessage>,
+        sender: mpsc::UnboundedSender<PeerLinkMessage>,
     },
     Event {
         member_id: MemberId,
@@ -198,7 +198,7 @@ pub(crate) async fn run_machine_join_session(
         .map_err(|error| CliError::transport(error.to_string()))?;
     let (host_peer_tx, host_peer_rx) = mpsc::unbounded_channel();
     join_state.pending_host_peer_link = Some(host_peer_tx.clone());
-    spawn_room_link_writer(host_peer_send, host_peer_rx);
+    spawn_link_writer(host_peer_send, host_peer_rx, "peer link message");
     spawn_join_peer_reader(host_peer_recv, member_id_placeholder(), peer_tx.clone(), false);
 
     let accept_handle = spawn_join_accept_loop(
@@ -222,7 +222,7 @@ pub(crate) async fn run_machine_join_session(
                 )
                 .await?;
             }
-            message = read_room_link_message(recv), if !peer_closed => {
+            message = read_authority_link_message(recv), if !peer_closed => {
                 peer_closed = handle_join_authority_message(
                     config,
                     transport,
@@ -385,10 +385,10 @@ async fn handle_host_peer_connected(
     let ticket = connected.peer.peer_ticket.clone();
 
     let (authority_tx, authority_rx) = mpsc::unbounded_channel();
-    spawn_room_link_writer(connected.authority_send, authority_rx);
+    spawn_link_writer(connected.authority_send, authority_rx, "authority link message");
     spawn_host_authority_reader(connected.authority_recv, member_id.clone(), host_tx.clone());
     let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-    spawn_room_link_writer(connected.peer_send, peer_rx);
+    spawn_link_writer(connected.peer_send, peer_rx, "peer link message");
     spawn_host_peer_reader(connected.peer_recv, member_id.clone(), host_tx.clone());
     let peer_handle = PeerHandle {
         authority_sender: authority_tx.clone(),
@@ -400,7 +400,7 @@ async fn handle_host_peer_connected(
     peers.insert(member_id, peer_handle);
 
     for event in join_dispatch.to_joiner {
-        send_link_message(&authority_tx, RoomLinkMessage::MachineEvent { event })?;
+        send_link_message(&authority_tx, AuthorityLinkMessage::MachineEvent { event })?;
     }
     deliver_routed_events(host_member, join_dispatch.to_existing_members, stdout, peers).await?;
 
@@ -464,16 +464,16 @@ async fn handle_join_authority_message(
     join_state: &mut JoinState,
     stdout: &mut tokio::io::Stdout,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
-    message: Option<RoomLinkMessage>,
+    message: Option<AuthorityLinkMessage>,
 ) -> Result<bool, CliError> {
     match message {
-        Some(RoomLinkMessage::MachineEvent { event }) => {
+        Some(AuthorityLinkMessage::MachineEvent { event }) => {
             apply_machine_event(join_state, &event);
             attach_pending_host_peer_link(join_state);
             emit_event(stdout, &event).await?;
             Ok(false)
         }
-        Some(RoomLinkMessage::PeerIntroduction {
+        Some(AuthorityLinkMessage::PeerConnect {
             member,
             ticket,
             connect,
@@ -506,7 +506,7 @@ async fn handle_join_authority_message(
             }
             Ok(false)
         }
-        Some(RoomLinkMessage::MachineCommand { .. }) => Err(CliError::protocol(
+        Some(AuthorityLinkMessage::MachineCommand { .. }) => Err(CliError::protocol(
             "joiner received unexpected command on authority link",
         )),
         None => Ok(true),
@@ -694,20 +694,17 @@ async fn accept_machine_peer(
     })
 }
 
-fn spawn_room_link_writer(
+fn spawn_link_writer<T>(
     mut send: SendStream,
-    mut rx: mpsc::UnboundedReceiver<RoomLinkMessage>,
-) -> tokio::task::JoinHandle<()> {
+    mut rx: mpsc::UnboundedReceiver<T>,
+    label: &'static str,
+) -> tokio::task::JoinHandle<()>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if write_framed(
-                &mut send,
-                &message,
-                "room link message",
-            )
-            .await
-            .is_err()
-            {
+            if write_framed(&mut send, &message, label).await.is_err() {
                 break;
             }
         }
@@ -722,8 +719,8 @@ fn spawn_host_authority_reader(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match read_room_link_message(&mut recv).await {
-                Ok(Some(RoomLinkMessage::MachineCommand { command })) => {
+            match read_authority_link_message(&mut recv).await {
+                Ok(Some(AuthorityLinkMessage::MachineCommand { command })) => {
                     if host_tx
                         .send(HostInput::PeerCommand {
                             member_id: member_id.clone(),
@@ -734,12 +731,12 @@ fn spawn_host_authority_reader(
                         break;
                     }
                 }
-                Ok(Some(RoomLinkMessage::MachineEvent { event })) => {
+                Ok(Some(AuthorityLinkMessage::MachineEvent { event })) => {
                     if host_tx.send(HostInput::PeerEvent { event }).is_err() {
                         break;
                     }
                 }
-                Ok(Some(RoomLinkMessage::PeerIntroduction { .. })) => {
+                Ok(Some(AuthorityLinkMessage::PeerConnect { .. })) => {
                     let _ = host_tx.send(HostInput::PeerProtocolError {
                         message: format!(
                             "peer {} sent unexpected peer introduction to host",
@@ -778,8 +775,8 @@ fn spawn_host_peer_reader(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match read_room_link_message(&mut recv).await {
-                Ok(Some(RoomLinkMessage::MachineEvent { event })) => {
+            match read_peer_link_message(&mut recv).await {
+                Ok(Some(PeerLinkMessage::MachineEvent { event })) => {
                     if !event_matches_sender(&member_id, &event) {
                         let _ = host_tx.send(HostInput::PeerProtocolError {
                             message: format!(
@@ -906,8 +903,8 @@ fn spawn_inbound_peer_link(
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
 ) {
     tokio::spawn(async move {
-        match read_room_link_message(&mut recv).await {
-            Ok(Some(RoomLinkMessage::PeerIntroduction { member, .. })) => {
+        match read_peer_link_message(&mut recv).await {
+            Ok(Some(PeerLinkMessage::PeerHello { member })) => {
                 if peer.peer_name != member.name {
                     let _ = peer_tx.send(JoinPeerInput::ProtocolError {
                         message: format!(
@@ -918,7 +915,7 @@ fn spawn_inbound_peer_link(
                     return;
                 }
                 let (sender, rx) = mpsc::unbounded_channel();
-                spawn_room_link_writer(send, rx);
+                spawn_link_writer(send, rx, "peer link message");
                 spawn_join_peer_reader(recv, member.member_id.clone(), peer_tx.clone(), true);
                 let _ = peer_tx.send(JoinPeerInput::Connected { member, sender });
             }
@@ -992,12 +989,10 @@ fn spawn_outbound_peer_link(
 
         if let Err(error) = write_framed(
             &mut send,
-            &RoomLinkMessage::PeerIntroduction {
+            &PeerLinkMessage::PeerHello {
                 member: local_member,
-                ticket: local_ticket,
-                connect: false,
             },
-            "room link message",
+            "peer link message",
         )
         .await
         {
@@ -1008,7 +1003,7 @@ fn spawn_outbound_peer_link(
         }
 
         let (sender, rx) = mpsc::unbounded_channel();
-        spawn_room_link_writer(send, rx);
+        spawn_link_writer(send, rx, "peer link message");
         spawn_join_peer_reader(recv, target.member_id.clone(), peer_tx.clone(), true);
         let _ = peer_tx.send(JoinPeerInput::Connected { member: target, sender });
     });
@@ -1022,8 +1017,8 @@ fn spawn_join_peer_reader(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match read_room_link_message(&mut recv).await {
-                Ok(Some(RoomLinkMessage::MachineEvent { event })) => {
+            match read_peer_link_message(&mut recv).await {
+                Ok(Some(PeerLinkMessage::MachineEvent { event })) => {
                     if peer_tx
                         .send(JoinPeerInput::Event {
                             member_id: member_id.clone(),
@@ -1082,7 +1077,7 @@ fn introduce_member_to_existing_peers(
             .ok_or_else(|| CliError::protocol("existing peer missing ticket"))?;
         send_link_message(
             &new_peer.authority_sender,
-            RoomLinkMessage::PeerIntroduction {
+            AuthorityLinkMessage::PeerConnect {
                 member: existing.member.clone(),
                 ticket: existing_ticket,
                 connect: false,
@@ -1090,7 +1085,7 @@ fn introduce_member_to_existing_peers(
         )?;
         send_link_message(
             &existing.authority_sender,
-            RoomLinkMessage::PeerIntroduction {
+            AuthorityLinkMessage::PeerConnect {
                 member: new_peer.member.clone(),
                 ticket: new_ticket.clone(),
                 connect: true,
@@ -1250,7 +1245,7 @@ async fn send_join_direct_event(
         if let Some(peer) = state.peer_links.get(&recipient) {
             send_link_message(
                 peer,
-                RoomLinkMessage::MachineEvent {
+                PeerLinkMessage::MachineEvent {
                     event: event.clone(),
                 },
             )?;
@@ -1425,7 +1420,7 @@ async fn deliver_routed_events(
         } else if let Some(peer) = peers.get(&routed.recipient) {
             send_link_message(
                 &peer.peer_sender,
-                RoomLinkMessage::MachineEvent {
+                PeerLinkMessage::MachineEvent {
                     event: routed.event,
                 },
             )?;
@@ -1434,10 +1429,18 @@ async fn deliver_routed_events(
     Ok(())
 }
 
-async fn read_room_link_message(
+async fn read_authority_link_message(
     recv: &mut RecvStream,
-) -> Result<Option<RoomLinkMessage>, CliError> {
-    read_framed::<RoomLinkMessage>(recv, "room link message")
+) -> Result<Option<AuthorityLinkMessage>, CliError> {
+    read_framed::<AuthorityLinkMessage>(recv, "authority link message")
+        .await
+        .map_err(|error| CliError::protocol(error.to_string()))
+}
+
+async fn read_peer_link_message(
+    recv: &mut RecvStream,
+) -> Result<Option<PeerLinkMessage>, CliError> {
+    read_framed::<PeerLinkMessage>(recv, "peer link message")
         .await
         .map_err(|error| CliError::protocol(error.to_string()))
 }
@@ -1523,18 +1526,18 @@ async fn emit_event(
 async fn send_peer_command(send: &mut SendStream, command: &MachineCommand) -> Result<(), CliError> {
     write_framed(
         send,
-        &RoomLinkMessage::MachineCommand {
+        &AuthorityLinkMessage::MachineCommand {
             command: command.clone(),
         },
-        "room link command",
+        "authority link command",
     )
     .await
     .map_err(|error| CliError::protocol(error.to_string()))
 }
 
-fn send_link_message(
-    sender: &mpsc::UnboundedSender<RoomLinkMessage>,
-    message: RoomLinkMessage,
+fn send_link_message<T>(
+    sender: &mpsc::UnboundedSender<T>,
+    message: T,
 ) -> Result<(), CliError> {
     sender
         .send(message)
@@ -1552,7 +1555,7 @@ fn send_command_error_to_peer(
     };
     send_link_message(
         &peer.authority_sender,
-        RoomLinkMessage::MachineEvent {
+        AuthorityLinkMessage::MachineEvent {
             event: command_error_event("command_failed", message, command_channel_id(command)),
         },
     )

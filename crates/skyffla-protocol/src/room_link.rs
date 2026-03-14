@@ -1,18 +1,19 @@
-//! Internal room link protocol.
+//! Internal room link protocols.
 //!
-//! These messages travel between room members on Skyffla-controlled links.
-//! They are distinct from the public `room` machine API:
+//! These messages travel between Skyffla processes on links that are managed by
+//! the room runtime. They are distinct from the public machine API:
 //!
 //! - `room` is the wrapper-facing stdin/stdout contract.
-//! - `room_link` is the internal peer protocol used to coordinate authority
-//!   links and peer introductions between Skyffla processes.
+//! - `room_link` is the internal protocol used to coordinate authority links
+//!   and peer links between Skyffla processes.
 //!
-//! Keeping this separate lets runtimes evolve without pushing transport or
-//! membership details into wrapper-facing machine events.
+//! Keeping these separate lets the CLI/runtime evolve without pushing transport
+//! or membership details into wrapper-facing machine events.
 //!
-//! `room_link` is intentionally setup/control oriented. Ordinary room chat and
-//! other peer-delivered messages should move over established peer links, not
-//! over the host authority protocol.
+//! The split is intentional:
+//!
+//! - authority links carry setup, membership, and host-authoritative commands
+//! - peer links carry peer introductions and direct member-delivered events
 
 use serde::{Deserialize, Serialize};
 
@@ -20,26 +21,26 @@ use crate::room::{MachineCommand, MachineEvent, Member};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RoomLinkMessage {
+pub enum AuthorityLinkMessage {
     MachineCommand {
         command: MachineCommand,
     },
     MachineEvent {
         event: MachineEvent,
     },
-    PeerIntroduction {
+    PeerConnect {
         member: Member,
         ticket: String,
         connect: bool,
     },
 }
 
-impl RoomLinkMessage {
+impl AuthorityLinkMessage {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::MachineCommand { command } => command.validate().map_err(|err| err.to_string()),
             Self::MachineEvent { event } => event.validate().map_err(|err| err.to_string()),
-            Self::PeerIntroduction {
+            Self::PeerConnect {
                 member,
                 ticket,
                 ..
@@ -54,6 +55,26 @@ impl RoomLinkMessage {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PeerLinkMessage {
+    PeerHello {
+        member: Member,
+    },
+    MachineEvent {
+        event: MachineEvent,
+    },
+}
+
+impl PeerLinkMessage {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::PeerHello { member } => member.validate().map_err(|err| err.to_string()),
+            Self::MachineEvent { event } => event.validate().map_err(|err| err.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::room::{MemberId, Route};
@@ -61,8 +82,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn machine_command_round_trips_via_json() {
-        let message = RoomLinkMessage::MachineCommand {
+    fn authority_command_round_trips_via_json() {
+        let message = AuthorityLinkMessage::MachineCommand {
             command: MachineCommand::SendChat {
                 to: Route::All,
                 text: "hello".into(),
@@ -70,15 +91,15 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&message).expect("serialize");
-        let decoded: RoomLinkMessage = serde_json::from_str(&encoded).expect("deserialize");
+        let decoded: AuthorityLinkMessage = serde_json::from_str(&encoded).expect("deserialize");
 
         assert_eq!(decoded, message);
-        decoded.validate().expect("valid message");
+        decoded.validate().expect("valid authority message");
     }
 
     #[test]
-    fn peer_introduction_requires_non_empty_ticket() {
-        let message = RoomLinkMessage::PeerIntroduction {
+    fn authority_peer_connect_requires_non_empty_ticket() {
+        let message = AuthorityLinkMessage::PeerConnect {
             member: Member {
                 member_id: MemberId::new("m2").expect("member id"),
                 name: "beta".into(),
@@ -92,5 +113,22 @@ mod tests {
             message.validate(),
             Err("peer ticket must not be empty".into())
         );
+    }
+
+    #[test]
+    fn peer_hello_round_trips_via_json() {
+        let message = PeerLinkMessage::PeerHello {
+            member: Member {
+                member_id: MemberId::new("m2").expect("member id"),
+                name: "beta".into(),
+                fingerprint: None,
+            },
+        };
+
+        let encoded = serde_json::to_string(&message).expect("serialize");
+        let decoded: PeerLinkMessage = serde_json::from_str(&encoded).expect("deserialize");
+
+        assert_eq!(decoded, message);
+        decoded.validate().expect("valid peer message");
     }
 }
