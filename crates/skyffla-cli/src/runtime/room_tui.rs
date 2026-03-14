@@ -76,6 +76,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                         }
                         Ok(RoomTuiInput::Send(command)) => {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
+                            apply_local_command_feedback(&mut state, &mut ui, &command);
                         }
                         Err(error) => ui.system(error.to_string()),
                     }
@@ -140,6 +141,9 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                         }
                         Ok(RoomTuiInput::Send(command)) => {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
+                            for line in local_command_feedback_lines(&state, &command) {
+                                emit_scripted_line(&line).await?;
+                            }
                         }
                         Err(error) => emit_scripted_line(&format!("error: {error}")).await?,
                     },
@@ -403,6 +407,29 @@ fn parse_route(value: &str) -> Result<Route, CliError> {
         member_id: MemberId::new(value.to_string())
             .map_err(|error| CliError::usage(error.to_string()))?,
     })
+}
+
+fn apply_local_command_feedback(state: &mut RoomTuiState, ui: &mut UiState, command: &MachineCommand) {
+    for line in local_command_feedback_lines(state, command) {
+        ui.system(line);
+    }
+}
+
+fn local_command_feedback_lines(state: &RoomTuiState, command: &MachineCommand) -> Vec<String> {
+    match command {
+        MachineCommand::SendChat { to, text } => match to {
+            Route::All => vec![format!("you: {text}")],
+            Route::Member { member_id } => {
+                let target = state
+                    .members
+                    .get(member_id)
+                    .map(|name| format!("{name} ({})", member_id.as_str()))
+                    .unwrap_or_else(|| member_id.as_str().to_string());
+                vec![format!("you -> {target}: {text}")]
+            }
+        },
+        _ => Vec::new(),
+    }
 }
 
 fn split_shell_words(line: &str) -> Result<Vec<String>, CliError> {

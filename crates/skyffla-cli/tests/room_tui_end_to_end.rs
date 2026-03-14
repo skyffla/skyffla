@@ -35,6 +35,7 @@ async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
     join.expect_line_contains("members:").await?;
 
     host.send_line("hello room").await?;
+    host.expect_line_contains("you: hello room").await?;
     join.expect_line_contains("host: hello room").await?;
 
     host.shutdown().await?;
@@ -67,6 +68,7 @@ async fn room_tui_supports_direct_message_command() -> Result<()> {
     join.expect_line_contains("direct room link ready: host (m1)")
         .await?;
     join.send_line("/msg m1 secret hello").await?;
+    join.expect_line_contains("you -> host (m1): secret hello").await?;
     host.expect_line_contains("join -> m1: secret hello").await?;
 
     host.shutdown().await?;
