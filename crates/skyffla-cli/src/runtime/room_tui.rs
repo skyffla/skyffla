@@ -14,6 +14,7 @@ use skyffla_protocol::room::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration as TokioDuration};
 
 use crate::cli_error::CliError;
 use crate::config::{Role, SessionConfig};
@@ -60,7 +61,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                     match parse_room_tui_input(&line, &mut state) {
                         Ok(RoomTuiInput::Quit) => {
                             let _ = request_backend_leave(&mut backend).await;
-                            let _ = backend.child.wait().await;
+                            let _ = shutdown_backend_child(&mut backend).await;
                             break;
                         }
                         Ok(RoomTuiInput::Help) => {
@@ -91,7 +92,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                         }
                         ui.render();
                         if terminal_event {
-                            let _ = backend.child.wait().await;
+                            let _ = shutdown_backend_child(&mut backend).await;
                             break;
                         }
                     }
@@ -135,7 +136,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                     Ok(Some(line)) => match parse_room_tui_input(&line, &mut state) {
                         Ok(RoomTuiInput::Quit) => {
                             let _ = request_backend_leave(&mut backend).await;
-                            let _ = backend.child.wait().await;
+                            let _ = shutdown_backend_child(&mut backend).await;
                             break;
                         }
                         Ok(RoomTuiInput::Help) => {
@@ -176,7 +177,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                             }
                         }
                         if terminal_event {
-                            let _ = backend.child.wait().await;
+                            let _ = shutdown_backend_child(&mut backend).await;
                             break;
                         }
                     }
@@ -337,6 +338,22 @@ async fn send_machine_command(
 async fn request_backend_leave(backend: &mut RoomBackend) -> Result<(), CliError> {
     send_machine_command(backend.stdin.as_mut(), &MachineCommand::LeaveRoom).await?;
     backend.stdin.take();
+    Ok(())
+}
+
+async fn shutdown_backend_child(backend: &mut RoomBackend) -> Result<(), CliError> {
+    backend.stdin.take();
+    match timeout(TokioDuration::from_secs(1), backend.child.wait()).await {
+        Ok(result) => {
+            let _status = result
+                .context("room backend failed while waiting for shutdown")
+                .map_err(|error| CliError::runtime(error.to_string()))?;
+        }
+        Err(_) => {
+            let _ = backend.child.kill().await;
+            let _ = timeout(TokioDuration::from_secs(1), backend.child.wait()).await;
+        }
+    };
     Ok(())
 }
 

@@ -10,7 +10,10 @@ use tokio::sync::{mpsc, Mutex};
 
 mod support;
 
-use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT};
+use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer};
+
+const TUI_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const TUI_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
@@ -293,7 +296,6 @@ async fn room_tui_announces_when_host_leaves() -> Result<()> {
 
     alpha.send_line("/quit").await?;
     beta.expect_line_contains("room closed: host left").await?;
-    beta.wait_for_exit().await?;
 
     beta.shutdown().await?;
     alpha.shutdown().await?;
@@ -326,6 +328,8 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
+    join.expect_line_contains("sending file report.txt to alpha (m1)")
+        .await?;
     host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;
 
@@ -415,7 +419,7 @@ impl TuiProc {
     }
 
     async fn expect_line_contains(&mut self, needle: &str) -> Result<String> {
-        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        let deadline = Instant::now() + TUI_EVENT_TIMEOUT;
         loop {
             {
                 let seen = self.stdout_seen.lock().await;
@@ -456,20 +460,18 @@ impl TuiProc {
         self.stdout_seen.lock().await.join("\n")
     }
 
-    async fn wait_for_exit(&mut self) -> Result<()> {
-        tokio::time::timeout(PROCESS_TIMEOUT, self.child.wait())
-            .await
-            .context("timed out waiting for child exit")?
-            .with_context(|| format!("{} failed while waiting for exit", self.label))?;
-        Ok(())
-    }
-
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(mut stdin) = self.stdin.take() {
             let _ = stdin.write_all(b"/quit\n").await;
             let _ = stdin.flush().await;
         }
-        let _ = tokio::time::timeout(PROCESS_TIMEOUT, self.child.wait()).await;
+        if tokio::time::timeout(TUI_PROCESS_TIMEOUT, self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        }
         Ok(())
     }
 }

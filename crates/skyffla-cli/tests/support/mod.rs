@@ -10,14 +10,29 @@ use iroh::address_lookup::MdnsAddressLookup;
 use skyffla_rendezvous::app::{build_router, AppState, IpRateLimiter};
 use skyffla_rendezvous::store::InMemoryRoomStore;
 use skyffla_transport::{IrohTransport, TransportError};
+use tokio::process::Command;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_secs(5);
-pub const LOCAL_JOIN_PROMOTION_DELAY: Duration = Duration::from_secs(2);
+pub const LOCAL_DISCOVERY_JOIN_ELECTION_WINDOW_MS: u64 = 300;
+pub const LOCAL_DISCOVERY_HOST_ANNOUNCEMENT_GRACE_MS: u64 = 300;
+pub const LOCAL_DISCOVERY_BOOTSTRAP_DELAY: Duration = Duration::from_millis(900);
+pub const LOCAL_JOIN_PROMOTION_DELAY: Duration = Duration::from_millis(900);
+
+pub fn apply_local_discovery_test_env(command: &mut Command) {
+    command
+        .env(
+            "SKYFFLA_LOCAL_JOIN_ELECTION_WINDOW_MS",
+            LOCAL_DISCOVERY_JOIN_ELECTION_WINDOW_MS.to_string(),
+        )
+        .env(
+            "SKYFFLA_LOCAL_HOST_ANNOUNCEMENT_GRACE_MS",
+            LOCAL_DISCOVERY_HOST_ANNOUNCEMENT_GRACE_MS.to_string(),
+        );
+}
 
 pub async fn bind_transport_or_skip() -> Option<IrohTransport> {
     match IrohTransport::bind().await {

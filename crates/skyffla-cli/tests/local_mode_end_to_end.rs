@@ -9,8 +9,9 @@ use tokio::time::sleep;
 mod support;
 
 use support::{
-    acquire_local_discovery_test_guard, assert_local_mode_stderr, fresh_test_dir,
-    local_discovery_available, unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY, PROCESS_TIMEOUT,
+    acquire_local_discovery_test_guard, apply_local_discovery_test_env, assert_local_mode_stderr,
+    fresh_test_dir, local_discovery_available, unique_room_name,
+    LOCAL_DISCOVERY_BOOTSTRAP_DELAY, PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -51,6 +52,7 @@ async fn assert_local_multi_host_resolution() -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut first_host);
     let mut first_host = first_host
         .spawn()
         .context("failed to spawn first local host process")?;
@@ -70,6 +72,7 @@ async fn assert_local_multi_host_resolution() -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut second_host);
     let mut second_host = second_host
         .spawn()
         .context("failed to spawn second local host process")?;
@@ -110,6 +113,7 @@ async fn assert_local_multi_host_resolution() -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut join);
     let join = join.spawn().context("failed to spawn local join process")?;
 
     let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())

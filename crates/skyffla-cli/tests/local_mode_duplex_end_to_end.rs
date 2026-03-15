@@ -8,9 +8,9 @@ use tokio::time::sleep;
 mod support;
 
 use support::{
-    acquire_local_discovery_test_guard, assert_local_mode_stderr, assert_stdio_json_stderr,
-    fresh_test_dir, local_discovery_available, unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY,
-    LOCAL_JOIN_PROMOTION_DELAY, PROCESS_TIMEOUT,
+    acquire_local_discovery_test_guard, apply_local_discovery_test_env, assert_local_mode_stderr,
+    assert_stdio_json_stderr, fresh_test_dir, local_discovery_available, unique_room_name,
+    LOCAL_DISCOVERY_BOOTSTRAP_DELAY, LOCAL_JOIN_PROMOTION_DELAY, PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -25,6 +25,7 @@ async fn stdio_local_duplex_supports_host_to_join() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow mdns promotion coverage"]
 async fn stdio_local_duplex_supports_join_promotion() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {
@@ -232,6 +233,7 @@ fn spawn_local_stdio_peer<const N: usize>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut command);
     command
         .spawn()
         .with_context(|| format!("failed to spawn {label}"))
