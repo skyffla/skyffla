@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-15
+
 - Add the first published Python wrapper under `wrappers/python`, including async and sync room clients, typed machine models, runnable chat examples, and smoke coverage against the local `skyffla` binary.
 - Add a dedicated `machine --local` end-to-end test and wire the release flow so the Python package version tracks the CLI release version.
 - Add a gated PyPI publish workflow so GitHub Actions can build and verify the wrapper on every release tag but only upload to PyPI once `PUBLISH_PYTHON_PACKAGE=1` is enabled.
