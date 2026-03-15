@@ -34,43 +34,45 @@ data that the artists save to `png` before sending.
 
 ## Setup
 
-From the repo root:
+Install `skyffla`, then from this directory run:
 
 ```sh
-cargo build --bins
-uv sync --project examples/python
+uv sync
 ```
 
 Then create a local `.env` for this example:
 
 ```sh
-cp examples/python/room-agents-studio/.env.example examples/python/room-agents-studio/.env
+cp room-agents-studio/.env.example room-agents-studio/.env
 ```
 
-Edit `examples/python/room-agents-studio/.env` and set at least:
+Edit `room-agents-studio/.env` and set at least:
 
 ```sh
 OPENAI_API_KEY=...
 ```
+
+If you want to use a local repo build of `skyffla` instead of the installed
+binary, set `SKYFFLA_BIN=../../target/debug/skyffla`.
 
 ## Run With Three Terminals
 
 Terminal 1, start the director:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/director.py image-room --name director
+uv run python room-agents-studio/director.py image-room --name director
 ```
 
 Terminal 2, start the first artist:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/artist.py image-room --name artist-outline
+uv run python room-agents-studio/artist.py image-room --name artist-outline
 ```
 
 Terminal 3, start the second artist:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/artist.py image-room --name artist-shading
+uv run python room-agents-studio/artist.py image-room --name artist-shading
 ```
 
 These commands use the normal rendezvous-backed room flow, so the example works
@@ -108,7 +110,7 @@ These tend to work well because they imply a strong focal scene:
 ## Configuration
 
 The example loads environment variables from
-`examples/python/room-agents-studio/.env`, but a globally exported
+`room-agents-studio/.env`, but a globally exported
 `OPENAI_API_KEY` also works.
 
 - `OPENAI_API_KEY`: required
@@ -125,7 +127,7 @@ The example loads environment variables from
 - `POSTER_THEME`: shared creative flavor for director briefs
 - `GALLERY_HOST`: defaults to `127.0.0.1`
 - `GALLERY_PORT`: defaults to `8765`
-- `DEMO_OUTPUT_DIR`: defaults to `examples/python/room-agents-studio/output`
+- `DEMO_OUTPUT_DIR`: defaults to `room-agents-studio/output`
 
 ## Output
 
@@ -139,6 +141,4 @@ The demo writes files under this directory by default:
 - The browser is the main shared view now; terminals are mostly for agent logs.
 - The first implementation uses simple polling rather than SSE or websockets.
 - The example installs `skyffla` from PyPI through
-  `examples/python/pyproject.toml`.
-- The binary and package versions must still match. If you run against the repo
-  build, use the current repo release version.
+  `pyproject.toml`.

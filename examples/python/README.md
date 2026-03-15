@@ -6,20 +6,21 @@ from PyPI so the setup stays close to what an external user would do.
 
 ## Setup
 
-From the repo root:
+Install `skyffla` first, for example with Homebrew:
 
 ```sh
-cargo build --bins
-uv sync --project examples/python
+brew install skyffla
 ```
 
-The examples use the published Python wrapper, but they still need a matching
-`skyffla` CLI binary. When running from the repo checkout, point them at the
-locally built binary:
+Then change into this directory:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla
+cd examples/python
+uv sync
 ```
+
+If you want to run against a local repo build instead of the installed binary,
+set `SKYFFLA_BIN`, for example `SKYFFLA_BIN=../../target/debug/skyffla`.
 
 ## Included Examples
 
@@ -32,15 +33,15 @@ SKYFFLA_BIN=target/debug/skyffla
 Simple chat:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/simple-chat/main.py join demo-room --local
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/simple-chat/main.py join demo-room --local
+uv run python simple-chat/main.py join demo-room --local
+uv run python simple-chat/main.py join demo-room --local
 ```
 
 Chat plus machine channel:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/sync-chat-and-channel/main.py host demo-room
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/sync-chat-and-channel/main.py join demo-room
+uv run python sync-chat-and-channel/main.py host demo-room
+uv run python sync-chat-and-channel/main.py join demo-room
 ```
 
 Poster studio:

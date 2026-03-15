@@ -3,16 +3,18 @@
 Synchronous example that sends one room chat message and one machine-channel
 message.
 
-From the repo root:
+Install `skyffla`, then from this directory run:
 
 ```sh
-cargo build --bins
-uv sync --project examples/python
+uv sync
 ```
 
 Run two terminals:
 
 ```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/sync-chat-and-channel/main.py host demo-room
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/sync-chat-and-channel/main.py join demo-room
+uv run python sync-chat-and-channel/main.py host demo-room
+uv run python sync-chat-and-channel/main.py join demo-room
 ```
+
+If you want to use a local repo build of `skyffla` instead of the installed
+binary, set `SKYFFLA_BIN=../../target/debug/skyffla`.
