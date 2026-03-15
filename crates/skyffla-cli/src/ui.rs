@@ -14,26 +14,11 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use skyffla_protocol::Offer;
 
-use crate::accept_policy::AutoAcceptPolicy;
 use crate::local_state::{load_local_state, local_state_file_path, update_local_state};
-
-pub(crate) enum UserInput {
-    Chat(String),
-    SendFile(PathBuf),
-    SendClipboard,
-    Accept,
-    Reject,
-    Cancel(Option<String>),
-    AutoAccept(Option<bool>),
-    Help,
-    Quit,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TransferStateUi {
-    Pending,
     AwaitingDecision,
-    Streaming,
     Completed,
     Rejected,
     Cancelled,
@@ -43,8 +28,6 @@ pub(crate) enum TransferStateUi {
 pub(crate) struct TransferUi {
     pub(crate) id: String,
     pub(crate) state: TransferStateUi,
-    pub(crate) bytes_done: u64,
-    pub(crate) bytes_total: Option<u64>,
 }
 
 struct EventLine {
@@ -59,8 +42,6 @@ pub(crate) struct UiState {
     pub(crate) self_member_id: Option<String>,
     pub(crate) host_member_id: Option<String>,
     pub(crate) room_members: BTreeMap<String, String>,
-    pub(crate) auto_accept_policy: AutoAcceptPolicy,
-    pub(crate) auto_accept_source: String,
     events: Vec<EventLine>,
     pub(crate) transfers: Vec<TransferUi>,
     pub(crate) pending_offer: Option<Offer>,
@@ -96,13 +77,7 @@ impl Drop for TerminalUiGuard {
 }
 
 impl UiState {
-    pub(crate) fn new(
-        stream_id: &str,
-        local_name: &str,
-        peer_name: &str,
-        auto_accept_policy: AutoAcceptPolicy,
-        auto_accept_source: &str,
-    ) -> Result<Self> {
+    pub(crate) fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Result<Self> {
         let state_path = local_state_file_path();
         let state = load_local_state(&state_path)?;
         Ok(Self {
@@ -112,8 +87,6 @@ impl UiState {
             self_member_id: None,
             host_member_id: None,
             room_members: BTreeMap::new(),
-            auto_accept_policy,
-            auto_accept_source: auto_accept_source.to_string(),
             events: Vec::new(),
             transfers: Vec::new(),
             pending_offer: None,
@@ -143,7 +116,10 @@ impl UiState {
         self.host_member_id = Some(host_member_id.into());
     }
 
-    pub(crate) fn replace_room_members(&mut self, members: impl IntoIterator<Item = (String, String)>) {
+    pub(crate) fn replace_room_members(
+        &mut self,
+        members: impl IntoIterator<Item = (String, String)>,
+    ) {
         self.room_members = members.into_iter().collect();
     }
 
@@ -167,12 +143,6 @@ impl UiState {
         }
     }
 
-    pub(crate) fn mark_transfer_streaming(&mut self, transfer_id: &str) {
-        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
-            transfer.state = TransferStateUi::Streaming;
-        }
-    }
-
     pub(crate) fn mark_transfer_completed(&mut self, transfer_id: &str) {
         if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
             transfer.state = TransferStateUi::Completed;
@@ -188,46 +158,6 @@ impl UiState {
     pub(crate) fn mark_transfer_cancelled(&mut self, transfer_id: &str) {
         if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
             transfer.state = TransferStateUi::Cancelled;
-        }
-    }
-
-    pub(crate) fn cancellable_transfer_ids(&self) -> Vec<String> {
-        self.transfers
-            .iter()
-            .filter(|transfer| {
-                matches!(
-                    transfer.state,
-                    TransferStateUi::Pending
-                        | TransferStateUi::AwaitingDecision
-                        | TransferStateUi::Streaming
-                )
-            })
-            .map(|transfer| transfer.id.clone())
-            .collect()
-    }
-
-    pub(crate) fn has_transfer(&self, transfer_id: &str) -> bool {
-        self.transfers
-            .iter()
-            .any(|transfer| transfer.id == transfer_id)
-    }
-
-    pub(crate) fn update_transfer_progress(
-        &mut self,
-        transfer_id: &str,
-        done: u64,
-        total: Option<u64>,
-    ) {
-        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
-            transfer.bytes_done = done;
-            if total.is_some() {
-                transfer.bytes_total = total;
-            }
-            if transfer.state == TransferStateUi::Pending
-                || transfer.state == TransferStateUi::AwaitingDecision
-            {
-                transfer.state = TransferStateUi::Streaming;
-            }
         }
     }
 
@@ -295,14 +225,6 @@ impl UiState {
             Show
         );
         let _ = stdout.flush();
-    }
-
-    pub(crate) fn auto_accept_status_line(&self) -> String {
-        format!(
-            "auto-accept effective: {} ({})",
-            self.auto_accept_policy.describe(),
-            self.auto_accept_source
-        )
     }
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> Option<String> {
@@ -496,95 +418,6 @@ impl UiState {
             clip_line(&members, width),
         ]
     }
-}
-
-pub(crate) fn parse_user_input(input: &str) -> UserInput {
-    let trimmed = input.trim();
-    match trimmed {
-        "q" => return UserInput::Quit,
-        "y" => return UserInput::Accept,
-        "n" => return UserInput::Reject,
-        _ => {}
-    }
-    if trimmed == "/quit" {
-        UserInput::Quit
-    } else if trimmed == "/help" {
-        UserInput::Help
-    } else if trimmed == "/clip" {
-        UserInput::SendClipboard
-    } else if trimmed == "/cancel" {
-        UserInput::Cancel(None)
-    } else if let Some(transfer_id) = trimmed.strip_prefix("/cancel ") {
-        UserInput::Cancel(Some(transfer_id.trim().to_string()))
-    } else if trimmed == "/autoaccept" {
-        UserInput::AutoAccept(None)
-    } else if trimmed == "/autoaccept on" {
-        UserInput::AutoAccept(Some(true))
-    } else if trimmed == "/autoaccept off" {
-        UserInput::AutoAccept(Some(false))
-    } else if trimmed == "/accept" {
-        UserInput::Accept
-    } else if trimmed == "/reject" {
-        UserInput::Reject
-    } else if let Some(path) = trimmed.strip_prefix("/send ") {
-        UserInput::SendFile(expand_user_path(path.trim()))
-    } else {
-        UserInput::Chat(trimmed.to_string())
-    }
-}
-
-pub(crate) fn help_lines() -> &'static [&'static str] {
-    &[
-        "commands:",
-        "/help  show this help",
-        "/send <path>  offer a file or folder",
-        "/clip  offer clipboard text",
-        "/accept  accept the pending file offer",
-        "/reject  reject the pending file offer",
-        "/cancel [id]  cancel an active transfer",
-        "/autoaccept on|off  set the persisted default for file and clipboard offers",
-        "/quit  close the session",
-        "shortcuts: q quit, y accept, n reject, ctrl+c close",
-        "editing: up/down history, ctrl+a line start, ctrl+e line end, ctrl+k kill to end",
-    ]
-}
-
-pub(crate) fn resolve_cancel_target(
-    ui: &UiState,
-    requested: Option<&str>,
-) -> std::result::Result<Option<String>, String> {
-    match requested.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(transfer_id) => {
-            if !ui.has_transfer(transfer_id) {
-                return Err(format!("unknown transfer {}", transfer_id));
-            }
-            Ok(Some(transfer_id.to_string()))
-        }
-        None => {
-            let cancellable = ui.cancellable_transfer_ids();
-            match cancellable.len() {
-                0 => Ok(None),
-                1 => Ok(cancellable.into_iter().next()),
-                _ => Err("multiple active transfers; use /cancel <transfer-id>".to_string()),
-            }
-        }
-    }
-}
-
-fn expand_user_path(input: &str) -> PathBuf {
-    if input == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(input));
-    }
-
-    if let Some(rest) = input.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-
-    PathBuf::from(input)
 }
 
 fn wrap_prefixed_lines(prefix: &str, text: &str, width: usize) -> Vec<String> {

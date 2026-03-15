@@ -5,7 +5,6 @@ mod config;
 mod local_state;
 mod net;
 mod runtime;
-mod transfers;
 mod ui;
 
 use clap::Parser;

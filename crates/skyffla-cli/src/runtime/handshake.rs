@@ -9,7 +9,6 @@ use skyffla_session::{RuntimeEvent, SessionPeer};
 use crate::app::sink::EventSink;
 use crate::config::SessionConfig;
 use crate::net::framing::{next_message_id, read_envelope, write_envelope};
-use crate::transfers::{describe_offer_size, format_digest_suffix, transfer_kind_label};
 use crate::ui::{TransferStateUi, TransferUi, UiState};
 
 pub(crate) async fn exchange_hello(
@@ -140,8 +139,6 @@ pub(crate) async fn handle_post_handshake_message(
             ui.upsert_transfer(TransferUi {
                 id: offer.transfer_id.clone(),
                 state: TransferStateUi::AwaitingDecision,
-                bytes_done: 0,
-                bytes_total: offer.size,
             });
             ui.system(format!(
                 "incoming {} offer: {}{}. /accept or /reject",
@@ -200,4 +197,34 @@ pub(crate) async fn handle_post_handshake_message(
         }
         other => bail!("unexpected control message after handshake: {:?}", other),
     }
+}
+
+fn transfer_kind_label(kind: &TransferKind) -> &'static str {
+    match kind {
+        TransferKind::File => "file",
+        TransferKind::FolderArchive => "folder",
+        TransferKind::Clipboard => "clipboard",
+        TransferKind::Stdio => "stdio",
+    }
+}
+
+fn describe_offer_size(offer: &skyffla_protocol::Offer) -> String {
+    let mut parts = Vec::new();
+    if let Some(size) = offer.size {
+        parts.push(format!("{size} bytes"));
+    }
+    if let Some(item_count) = offer.item_count {
+        parts.push(format!("{item_count} items"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
+fn format_digest_suffix(digest: Option<&skyffla_protocol::Digest>) -> String {
+    digest
+        .map(|digest| format!(" [{}:{}]", digest.algorithm, digest.value_hex))
+        .unwrap_or_default()
 }

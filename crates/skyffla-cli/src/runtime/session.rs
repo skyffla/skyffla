@@ -11,7 +11,6 @@ use crate::config::SessionConfig;
 use crate::local_state::local_state_file_path;
 use crate::net::framing::read_envelope;
 use crate::runtime::handshake::{exchange_hello, handle_post_handshake_message, send_chat_message};
-use crate::runtime::interactive::run_interactive_chat_loop;
 use crate::runtime::machine::run_machine_join_session;
 use crate::runtime::stdio::run_stdio_session;
 use crate::ui::UiState;
@@ -141,24 +140,9 @@ pub(crate) async fn run_connected_session(
         )
         .await?;
     } else {
-        let mut ui = build_ui(
-            config,
-            transport,
-            &identity.fingerprint,
-            &peer,
-            &connection_status,
-            peer_trust,
-        )?;
-        run_interactive_chat_loop(
-            config,
-            &session_id,
-            &connection,
-            &mut send,
-            &mut recv,
-            &mut ui,
-        )
-        .await
-        .map_err(|error| CliError::runtime(error.to_string()))?;
+        return Err(CliError::runtime(
+            "interactive sessions should use the room TUI adapter",
+        ));
     }
 
     sink.emit_runtime_event(state_changed_event(
@@ -189,8 +173,6 @@ fn build_ui(
         &config.stream_id,
         &config.peer_name,
         &transport.endpoint().id().to_string(),
-        config.auto_accept_policy.clone(),
-        config.auto_accept_source,
     )
     .map_err(|error| CliError::local_io(error.to_string()))?;
     ui.peer_name = peer.peer_name.clone();
