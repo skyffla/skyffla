@@ -520,11 +520,7 @@ fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineComma
                 text: text.clone(),
             }],
             Route::Member { member_id } => {
-                let target = state
-                    .members
-                    .get(member_id)
-                    .map(|name| format!("{name} ({})", member_id.as_str()))
-                    .unwrap_or_else(|| member_id.as_str().to_string());
+                let target = state.display_member(member_id);
                 vec![RoomLine::Chat {
                     speaker: format!("you -> {target}"),
                     text: text.clone(),
@@ -549,11 +545,7 @@ fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineComma
             });
             let route = match to {
                 Route::All => "all".to_string(),
-                Route::Member { member_id } => state
-                    .members
-                    .get(member_id)
-                    .map(|display| format!("{display} ({})", member_id.as_str()))
-                    .unwrap_or_else(|| member_id.as_str().to_string()),
+                Route::Member { member_id } => state.display_member(member_id),
             };
             vec![RoomLine::System(format!(
                 "sending {} {} to {}",
@@ -666,7 +658,7 @@ impl RoomTuiState {
             return "members: (waiting)".to_string();
         }
         let mut parts = Vec::new();
-        for (member_id, name) in &self.members {
+        for member_id in self.members.keys() {
             let marker = if self.self_member.as_ref() == Some(member_id) {
                 "*"
             } else if self.host_member.as_ref() == Some(member_id) {
@@ -674,7 +666,7 @@ impl RoomTuiState {
             } else {
                 ""
             };
-            parts.push(format!("{}{}={}", member_id.as_str(), marker, name));
+            parts.push(format!("{}{}", self.display_member(member_id), marker));
         }
         format!("members: {}", parts.join(", "))
     }
@@ -702,10 +694,37 @@ impl RoomTuiState {
         ))
     }
 
-    fn resolve_member(&self, value: &str) -> Result<MemberId, CliError> {
-        if self.members.contains_key(&MemberId::new(value.to_string()).map_err(|e| CliError::usage(e.to_string()))?) {
-            return MemberId::new(value.to_string()).map_err(|error| CliError::usage(error.to_string()));
+    fn display_member(&self, member_id: &MemberId) -> String {
+        self.members
+            .get(member_id)
+            .map(|name| self.display_member_name(name, member_id))
+            .unwrap_or_else(|| member_id.as_str().to_string())
+    }
+
+    fn display_member_name(&self, name: &str, member_id: &MemberId) -> String {
+        if self
+            .members
+            .values()
+            .filter(|candidate| candidate.as_str() == name)
+            .take(2)
+            .count()
+            > 1
+        {
+            format!("{name} ({})", member_id.as_str())
+        } else {
+            name.to_string()
         }
+    }
+
+    fn display_member_name_with_fallback(&self, name: &str, member_id: &MemberId) -> String {
+        if self.members.contains_key(member_id) {
+            self.display_member(member_id)
+        } else {
+            self.display_member_name(name, member_id)
+        }
+    }
+
+    fn resolve_member(&self, value: &str) -> Result<MemberId, CliError> {
         let mut matches = self
             .members
             .iter()
@@ -714,11 +733,24 @@ impl RoomTuiState {
             })
             .map(|(member_id, _)| member_id.clone())
             .collect::<Vec<_>>();
-        match matches.len() {
+        let name_match = match matches.len() {
             1 => Ok(matches.remove(0)),
             0 => Err(CliError::usage(format!("unknown room member {value}"))),
             _ => Err(CliError::usage(format!("member name {value} is ambiguous"))),
-        }
+        };
+
+        name_match.or_else(|name_error| {
+            let member_id =
+                MemberId::new(value.to_string()).map_err(|error| CliError::usage(error.to_string()))?;
+            if self.self_member.as_ref() == Some(&member_id) {
+                return Err(name_error);
+            }
+            if self.members.contains_key(&member_id) {
+                Ok(member_id)
+            } else {
+                Err(name_error)
+            }
+        })
     }
 
     fn default_send_target(&self) -> Result<MemberId, CliError> {
@@ -849,20 +881,16 @@ fn format_room_event_lines(
                 .members
                 .insert(member.member_id.clone(), member.name.clone());
             (vec![RoomLine::System(format!(
-                "member joined: {} ({})",
-                member.name,
-                member.member_id.as_str()
+                "member joined: {}",
+                state.display_member(&member.member_id)
             ))], None)
         }
         MachineEvent::MemberLeft { member_id, reason } => {
-            let name = state
-                .members
-                .remove(&member_id)
-                .unwrap_or_else(|| member_id.as_str().to_string());
+            let name = state.display_member(&member_id);
+            state.members.remove(&member_id);
             (vec![RoomLine::System(format!(
-                "member left: {} ({}){}",
+                "member left: {}{}",
                 name,
-                member_id.as_str(),
                 reason
                     .as_deref()
                     .map(|value| format!(" - {value}"))
@@ -873,23 +901,25 @@ fn format_room_event_lines(
             (vec![RoomLine::System(format!("room closed: {reason}"))], None)
         }
         MachineEvent::Chat {
+            from,
             from_name,
             to,
             text,
             ..
         } => {
+            let speaker = state.display_member_name_with_fallback(&from_name, &from);
             let target = match to {
                 Route::All => None,
-                Route::Member { member_id } => Some(member_id.as_str().to_string()),
+                Route::Member { member_id } => Some(state.display_member(&member_id)),
             };
             if let Some(target) = target {
                 (vec![RoomLine::Chat {
-                    speaker: format!("{from_name} -> {target}"),
+                    speaker: format!("{speaker} -> {target}"),
                     text,
                 }], None)
             } else {
                 (vec![RoomLine::Chat {
-                    speaker: from_name,
+                    speaker,
                     text,
                 }], None)
             }
@@ -897,6 +927,7 @@ fn format_room_event_lines(
         MachineEvent::ChannelOpened {
             channel_id,
             kind,
+            from,
             from_name,
             to,
             name,
@@ -906,7 +937,7 @@ fn format_room_event_lines(
         } => {
             let route = match &to {
                 Route::All => "all".to_string(),
-                Route::Member { member_id } => member_id.as_str().to_string(),
+                Route::Member { member_id } => state.display_member(member_id),
             };
             if matches!(kind, ChannelKind::File) {
                 let item_kind = match blob.as_ref().map(|blob| &blob.format) {
@@ -939,7 +970,7 @@ fn format_room_event_lines(
                     .unwrap_or_default();
                 let mut message = format!(
                     "{} wants to send {} {}{}",
-                    from_name,
+                    state.display_member_name_with_fallback(&from_name, &from),
                     item_kind_label(item_kind),
                     display_name,
                     size_suffix
@@ -969,7 +1000,8 @@ fn format_room_event_lines(
             let label = state
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
-            (vec![RoomLine::System(format!("{member_name} accepted {label}"))], None)
+            let member = state.display_member_name_with_fallback(&member_name, &member_id);
+            (vec![RoomLine::System(format!("{member} accepted {label}"))], None)
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -985,9 +1017,10 @@ fn format_room_event_lines(
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
+            let member = state.display_member_name_with_fallback(&member_name, &member_id);
             (vec![RoomLine::System(format!(
                 "{} rejected {label}{}",
-                member_name,
+                member,
                 reason
                     .as_deref()
                     .map(|value| format!(" - {value}"))
@@ -996,15 +1029,21 @@ fn format_room_event_lines(
         }
         MachineEvent::ChannelData {
             channel_id,
+            from,
             from_name,
             body,
             ..
         } => (vec![RoomLine::Chat {
-            speaker: format!("{from_name} [{}]", channel_id.as_str()),
+            speaker: format!(
+                "{} [{}]",
+                state.display_member_name_with_fallback(&from_name, &from),
+                channel_id.as_str()
+            ),
             text: body,
         }], None),
         MachineEvent::ChannelClosed {
             channel_id,
+            member_id,
             member_name,
             reason,
             ..
@@ -1014,9 +1053,10 @@ fn format_room_event_lines(
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
+            let member = state.display_member_name_with_fallback(&member_name, &member_id);
             (vec![RoomLine::System(format!(
                 "{label} closed by {}{}",
-                member_name,
+                member,
                 reason
                     .as_deref()
                     .map(|value| format!(" - {value}"))
@@ -1196,6 +1236,35 @@ mod tests {
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    #[test]
+    fn room_member_resolution_prefers_name_but_accepts_id() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        state.self_member = Some(MemberId::new("m1").unwrap());
+        state.members.insert(MemberId::new("m1").unwrap(), "alpha".into());
+        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state.members.insert(MemberId::new("m3").unwrap(), "beta".into());
+
+        assert_eq!(
+            state.resolve_member("m2").unwrap(),
+            MemberId::new("m2").unwrap()
+        );
+        assert!(state.resolve_member("beta").is_err());
+    }
+
+    #[test]
+    fn room_member_display_hides_ids_until_names_collide() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        state.self_member = Some(MemberId::new("m1").unwrap());
+        state.host_member = Some(MemberId::new("m1").unwrap());
+        state.members.insert(MemberId::new("m1").unwrap(), "alpha".into());
+        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        assert_eq!(state.member_roster_line(), "members: alpha*, beta");
+
+        state.members.insert(MemberId::new("m3").unwrap(), "beta".into());
+        assert_eq!(state.display_member(&MemberId::new("m2").unwrap()), "beta (m2)");
+        assert_eq!(state.display_member(&MemberId::new("m3").unwrap()), "beta (m3)");
     }
 
     #[test]

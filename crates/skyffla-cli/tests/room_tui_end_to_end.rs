@@ -33,7 +33,7 @@ async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join (m2)")
+    host.expect_line_contains("member joined: join")
         .await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
@@ -66,16 +66,16 @@ async fn room_tui_supports_direct_message_command() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join (m2)")
+    host.expect_line_contains("member joined: join")
         .await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: host (m1)")
         .await?;
     join.send_line("/msg m1 secret hello").await?;
-    join.expect_line_contains("you -> host (m1): secret hello")
+    join.expect_line_contains("you -> host: secret hello")
         .await?;
-    host.expect_line_contains("join -> m1: secret hello")
+    host.expect_line_contains("join -> host: secret hello")
         .await?;
 
     host.shutdown().await?;
@@ -103,14 +103,14 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
 
-    host.expect_line_contains("member joined: beta (m2)").await?;
+    host.expect_line_contains("member joined: beta").await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
-    join.expect_line_contains("sending file report.txt to alpha (m1)")
+    join.expect_line_contains("sending file report.txt to alpha")
         .await?;
     host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;
@@ -155,13 +155,13 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
 
-    host.expect_line_contains("member joined: beta (m2)").await?;
+    host.expect_line_contains("member joined: beta").await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
     join.send_line(r#"/send m1 ~/artpack"#).await?;
-    join.expect_line_contains("sending folder artpack to alpha (m1)")
+    join.expect_line_contains("sending folder artpack to alpha")
         .await?;
     host.expect_line_contains("beta wants to send folder artpack (9B) - /accept or /reject")
         .await?;
@@ -212,7 +212,7 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     gamma.expect_line_contains("members:").await?;
 
     beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
-    beta.expect_line_contains("sending file secret.txt to alpha (m1)")
+    beta.expect_line_contains("sending file secret.txt to alpha")
         .await?;
     alpha.expect_line_contains("beta wants to send file secret.txt (6B) - /accept or /reject")
         .await?;
@@ -291,7 +291,7 @@ async fn room_tui_announces_when_host_leaves() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = TuiProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    alpha.expect_line_contains("member joined: beta (m2)").await?;
+    alpha.expect_line_contains("member joined: beta").await?;
     beta.expect_line_contains("joined room").await?;
 
     alpha.send_line("/quit").await?;
@@ -323,12 +323,12 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
 
-    host.expect_line_contains("member joined: beta (m2)").await?;
+    host.expect_line_contains("member joined: beta").await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
-    join.expect_line_contains("sending file report.txt to alpha (m1)")
+    join.expect_line_contains("sending file report.txt to alpha")
         .await?;
     host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;

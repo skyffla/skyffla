@@ -395,7 +395,7 @@ impl UiState {
             "members: (waiting)".to_string()
         } else {
             let mut parts = Vec::new();
-            for (member_id, name) in &self.room_members {
+            for member_id in self.room_members.keys() {
                 let marker = if self.self_member_id.as_deref() == Some(member_id.as_str()) {
                     "*"
                 } else if self.host_member_id.as_deref() == Some(member_id.as_str()) {
@@ -403,7 +403,7 @@ impl UiState {
                 } else {
                     ""
                 };
-                parts.push(format!("{member_id}{marker}:{name}"));
+                parts.push(format!("{}{}", self.display_room_member(member_id), marker));
             }
             format!("members: {}", parts.join(", "))
         };
@@ -417,6 +417,28 @@ impl UiState {
             ),
             clip_line(&members, width),
         ]
+    }
+
+    fn display_room_member(&self, member_id: &str) -> String {
+        self.room_members
+            .get(member_id)
+            .map(|name| self.display_room_member_name(name, member_id))
+            .unwrap_or_else(|| member_id.to_string())
+    }
+
+    fn display_room_member_name(&self, name: &str, member_id: &str) -> String {
+        if self
+            .room_members
+            .values()
+            .filter(|candidate| candidate.as_str() == name)
+            .take(2)
+            .count()
+            > 1
+        {
+            format!("{name} ({member_id})")
+        } else {
+            name.to_string()
+        }
     }
 }
 
