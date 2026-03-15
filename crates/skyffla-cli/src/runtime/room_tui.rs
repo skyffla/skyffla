@@ -83,12 +83,17 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
             maybe_event = backend.stdout_rx.recv() => {
                 match maybe_event {
                     Some(event) => {
+                        let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
                         let follow_up = apply_room_event(&mut state, &mut ui, event);
                         if let Some(command) = follow_up {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
                             apply_room_lines(&mut ui, local_command_feedback_lines(&mut state, &command));
                         }
                         ui.render();
+                        if terminal_event {
+                            let _ = backend.child.wait().await;
+                            break;
+                        }
                     }
                     None => break,
                 }
@@ -159,6 +164,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
             maybe_event = backend.stdout_rx.recv() => {
                 match maybe_event {
                     Some(event) => {
+                        let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
                         let (lines, follow_up) = summarize_room_event(&mut state, event);
                         for line in lines {
                             emit_scripted_line(&line).await?;
@@ -168,6 +174,10 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                             for line in stringify_room_lines(local_command_feedback_lines(&mut state, &command)) {
                                 emit_scripted_line(&line).await?;
                             }
+                        }
+                        if terminal_event {
+                            let _ = backend.child.wait().await;
+                            break;
                         }
                     }
                     None => break,

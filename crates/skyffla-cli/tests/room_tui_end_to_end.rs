@@ -293,6 +293,7 @@ async fn room_tui_announces_when_host_leaves() -> Result<()> {
 
     alpha.send_line("/quit").await?;
     beta.expect_line_contains("room closed: host left").await?;
+    beta.wait_for_exit().await?;
 
     beta.shutdown().await?;
     alpha.shutdown().await?;
@@ -453,6 +454,14 @@ impl TuiProc {
 
     async fn debug_dump(&self) -> String {
         self.stdout_seen.lock().await.join("\n")
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<()> {
+        tokio::time::timeout(PROCESS_TIMEOUT, self.child.wait())
+            .await
+            .context("timed out waiting for child exit")?
+            .with_context(|| format!("{} failed while waiting for exit", self.label))?;
+        Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<()> {
