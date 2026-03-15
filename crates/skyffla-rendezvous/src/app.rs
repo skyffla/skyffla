@@ -102,13 +102,7 @@ async fn delete_room(
         );
         api_error
     })?;
-    log_request(
-        "delete",
-        &room_id,
-        client_ip,
-        StatusCode::NO_CONTENT,
-        "ok",
-    );
+    log_request("delete", &room_id, client_ip, StatusCode::NO_CONTENT, "ok");
     Ok(StatusCode::NO_CONTENT)
 }
 

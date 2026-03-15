@@ -54,17 +54,25 @@ pub enum SessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    HostRequested { stream_id: String },
-    JoinRequested { stream_id: String },
+    HostRequested {
+        stream_id: String,
+    },
+    JoinRequested {
+        stream_id: String,
+    },
     TransportConnecting,
-    PeerConnected { session_id: String },
+    PeerConnected {
+        session_id: String,
+    },
     Negotiated {
         session_id: String,
         session_mode: SessionMode,
     },
     CloseRequested,
     Closed,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

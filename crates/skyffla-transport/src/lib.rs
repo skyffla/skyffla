@@ -369,7 +369,11 @@ impl IrohTransport {
         })
     }
 
-    async fn export_collection(&self, blob: &BlobRef, target: &Path) -> Result<u64, TransportError> {
+    async fn export_collection(
+        &self,
+        blob: &BlobRef,
+        target: &Path,
+    ) -> Result<u64, TransportError> {
         std::fs::create_dir_all(target)
             .map_err(|error| TransportError::BlobExport(error.to_string()))?;
         let hash = hash_from_blob_ref(blob)?;
@@ -417,7 +421,9 @@ fn collect_collection_entries_recursive(
     current: &Path,
     entries: &mut Vec<CollectionEntry>,
 ) -> Result<(), TransportError> {
-    for entry in std::fs::read_dir(current).map_err(|error| TransportError::BlobImport(error.to_string()))? {
+    for entry in
+        std::fs::read_dir(current).map_err(|error| TransportError::BlobImport(error.to_string()))?
+    {
         let entry = entry.map_err(|error| TransportError::BlobImport(error.to_string()))?;
         let path = entry.path();
         let file_type = entry

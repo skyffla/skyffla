@@ -56,7 +56,9 @@ fn parse_file_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
                 name,
                 mime,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         "export" => {
@@ -81,7 +83,9 @@ fn parse_file_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
                 .map_err(|error| CliError::usage(error.to_string()))?,
                 path: path.ok_or_else(|| CliError::usage("missing --path"))?,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         other => Err(CliError::usage(format!(
@@ -103,7 +107,9 @@ fn parse_channel_command(tokens: &[String]) -> Result<MachineCommand, CliError> 
                 channel_id: ChannelId::new(channel_id.clone())
                     .map_err(|error| CliError::usage(error.to_string()))?,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         "reject" => {
@@ -114,7 +120,9 @@ fn parse_channel_command(tokens: &[String]) -> Result<MachineCommand, CliError> 
                     .map_err(|error| CliError::usage(error.to_string()))?,
                 reason,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         "close" => {
@@ -125,7 +133,9 @@ fn parse_channel_command(tokens: &[String]) -> Result<MachineCommand, CliError> 
                     .map_err(|error| CliError::usage(error.to_string()))?,
                 reason,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         "send" => {
@@ -137,7 +147,9 @@ fn parse_channel_command(tokens: &[String]) -> Result<MachineCommand, CliError> 
                     .map_err(|error| CliError::usage(error.to_string()))?,
                 body,
             };
-            command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+            command
+                .validate()
+                .map_err(|error| CliError::usage(error.to_string()))?;
             Ok(command)
         }
         other => Err(CliError::usage(format!(
@@ -158,9 +170,9 @@ fn parse_chat_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
         match tokens[idx].as_str() {
             "--to" => {
                 idx += 1;
-                let value = tokens.get(idx).ok_or_else(|| {
-                    CliError::usage("chat command expected a value after --to")
-                })?;
+                let value = tokens
+                    .get(idx)
+                    .ok_or_else(|| CliError::usage("chat command expected a value after --to"))?;
                 to = Some(parse_route(value)?);
                 idx += 1;
             }
@@ -172,7 +184,9 @@ fn parse_chat_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
         to: to.ok_or_else(|| CliError::usage("missing --to"))?,
         text,
     };
-    command.validate().map_err(|error| CliError::usage(error.to_string()))?;
+    command
+        .validate()
+        .map_err(|error| CliError::usage(error.to_string()))?;
     Ok(command)
 }
 

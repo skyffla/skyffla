@@ -179,7 +179,6 @@ pub fn unique_room_name() -> String {
     format!("local-room-{nonce}")
 }
 
-
 pub async fn wait_for_server_ready(server_url: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let health_url = format!("{server_url}/health");
@@ -213,7 +212,10 @@ pub async fn wait_for_room_ready(server_url: &str, room: &str) -> Result<()> {
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("room {room} was not registered within {:?}", CONNECT_TIMEOUT);
+            anyhow::bail!(
+                "room {room} was not registered within {:?}",
+                CONNECT_TIMEOUT
+            );
         }
         sleep(Duration::from_millis(50)).await;
     }

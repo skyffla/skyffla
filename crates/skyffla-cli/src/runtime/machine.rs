@@ -28,10 +28,10 @@ use crate::net::framing::write_framed;
 use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
-    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_download,
-    spawn_host_peer_link, spawn_join_accept_loop, spawn_join_blob_download,
-    spawn_join_host_peer_accept, spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer,
-    HostInput, JoinPeerInput, PeerHandle,
+    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_download, spawn_host_peer_link,
+    spawn_join_accept_loop, spawn_join_blob_download, spawn_join_host_peer_accept,
+    spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput,
+    PeerHandle,
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
@@ -295,10 +295,7 @@ async fn handle_host_input(
             if let Some(peer) = peers.get_mut(&member_id) {
                 let pending_events = std::mem::take(&mut peer.pending_events);
                 for event in pending_events {
-                    send_link_message(
-                        &sender,
-                        PeerLinkMessage::MachineEvent { event },
-                    )?;
+                    send_link_message(&sender, PeerLinkMessage::MachineEvent { event })?;
                 }
                 peer.peer_sender = Some(sender);
                 sink.emit_json_event(serde_json::json!({

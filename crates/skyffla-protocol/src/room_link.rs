@@ -40,11 +40,7 @@ impl AuthorityLinkMessage {
         match self {
             Self::MachineCommand { command } => command.validate().map_err(|err| err.to_string()),
             Self::MachineEvent { event } => event.validate().map_err(|err| err.to_string()),
-            Self::PeerConnect {
-                member,
-                ticket,
-                ..
-            } => {
+            Self::PeerConnect { member, ticket, .. } => {
                 member.validate().map_err(|err| err.to_string())?;
                 if ticket.trim().is_empty() {
                     return Err("peer ticket must not be empty".into());
@@ -58,12 +54,8 @@ impl AuthorityLinkMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerLinkMessage {
-    PeerHello {
-        member: Member,
-    },
-    MachineEvent {
-        event: MachineEvent,
-    },
+    PeerHello { member: Member },
+    MachineEvent { event: MachineEvent },
 }
 
 impl PeerLinkMessage {

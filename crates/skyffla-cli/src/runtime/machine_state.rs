@@ -156,9 +156,9 @@ pub(super) fn join_channel_recipients(
     channel_id: &ChannelId,
     channels: &BTreeMap<ChannelId, JoinChannelState>,
 ) -> Result<Vec<MemberId>, CliError> {
-    let channel = channels.get(channel_id).ok_or_else(|| {
-        CliError::runtime(format!("unknown channel {}", channel_id.as_str()))
-    })?;
+    let channel = channels
+        .get(channel_id)
+        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
     if channel.kind == ChannelKind::File {
         return Err(CliError::runtime(format!(
             "channel {} is blob-backed and does not accept inline channel data",

@@ -30,7 +30,8 @@ async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join (m2)").await?;
+    host.expect_line_contains("member joined: join (m2)")
+        .await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
 
@@ -62,14 +63,17 @@ async fn room_tui_supports_direct_message_command() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join (m2)").await?;
+    host.expect_line_contains("member joined: join (m2)")
+        .await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: host (m1)")
         .await?;
     join.send_line("/msg m1 secret hello").await?;
-    join.expect_line_contains("you -> host (m1): secret hello").await?;
-    host.expect_line_contains("join -> m1: secret hello").await?;
+    join.expect_line_contains("you -> host (m1): secret hello")
+        .await?;
+    host.expect_line_contains("join -> m1: secret hello")
+        .await?;
 
     host.shutdown().await?;
     join.shutdown().await?;
@@ -165,7 +169,12 @@ impl TuiProc {
                 );
             }
 
-            match tokio::time::timeout(remaining.min(std::time::Duration::from_millis(250)), self.stdout_rx.recv()).await {
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(250)),
+                self.stdout_rx.recv(),
+            )
+            .await
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     anyhow::bail!(

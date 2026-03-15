@@ -11,9 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 
 mod support;
 
-use support::{
-    fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT,
-};
+use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<()> {
@@ -511,7 +509,10 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     .await?;
 
     assert_eq!(std::fs::read(export_dir.join("a.txt"))?, b"alpha");
-    assert_eq!(std::fs::read(export_dir.join("nested").join("b.txt"))?, b"beta");
+    assert_eq!(
+        std::fs::read(export_dir.join("nested").join("b.txt"))?,
+        b"beta"
+    );
 
     host.shutdown().await?;
     beta.shutdown().await?;
@@ -559,7 +560,8 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
         .await?;
     beta.expect_stderr_contains("\"member_name\":\"gamma\"")
         .await?;
-    gamma.expect_stderr_contains("\"member_name\":\"beta\"")
+    gamma
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
 
     host.send(&format!(

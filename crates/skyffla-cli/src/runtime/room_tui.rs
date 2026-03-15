@@ -43,14 +43,8 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
     });
 
     let mut backend = spawn_machine_backend(role, config).await?;
-    let mut ui = UiState::new(
-        &config.stream_id,
-        &config.peer_name,
-        "room",
-        config.auto_accept_policy.clone(),
-        config.auto_accept_source,
-    )
-    .map_err(|error| CliError::local_io(error.to_string()))?;
+    let mut ui = UiState::new(&config.stream_id, &config.peer_name, "room")
+        .map_err(|error| CliError::local_io(error.to_string()))?;
     let mut state = RoomTuiState::new(&config.peer_name);
 
     ui.system("room session ready; use /help for commands".to_string());
@@ -884,14 +878,7 @@ mod tests {
     #[test]
     fn room_events_update_roster_and_identity() {
         let mut state = RoomTuiState::new("alpha");
-        let mut ui = UiState::new(
-            "demo-room",
-            "alpha",
-            "room",
-            crate::accept_policy::AutoAcceptPolicy::none(),
-            "default",
-        )
-        .unwrap();
+        let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
 
         apply_room_event(
             &mut state,

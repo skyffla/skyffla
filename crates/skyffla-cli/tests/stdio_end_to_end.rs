@@ -6,9 +6,7 @@ use tokio::process::Command;
 
 mod support;
 
-use support::{
-    fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT,
-};
+use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
@@ -256,7 +254,9 @@ async fn stdio_rejects_session_mode_mismatch_during_handshake() -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let join = join.spawn().context("failed to spawn mismatched join process")?;
+    let join = join
+        .spawn()
+        .context("failed to spawn mismatched join process")?;
 
     let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
         .await

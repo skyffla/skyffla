@@ -88,9 +88,7 @@ impl SessionConfig {
             .map_err(|error| CliError::usage(error.to_string()))?;
         let stream_id = resolve_stream_id(args.room_id, std::env::var("SKYFFLA_STREAM_ID").ok())
             .ok_or_else(|| {
-                CliError::usage(
-                    "missing room id: pass it as an argument or set SKYFFLA_STREAM_ID",
-                )
+                CliError::usage("missing room id: pass it as an argument or set SKYFFLA_STREAM_ID")
             })?;
         validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
         let state_path = local_state_file_path();

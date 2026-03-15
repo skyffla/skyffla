@@ -48,8 +48,18 @@ async fn stdio_host_to_join_streams_bytes_both_directions_end_to_end() -> Result
 
     server.abort();
 
-    assert_success(&host_output.status, "host", &host_output.stdout, &host_output.stderr);
-    assert_success(&join_output.status, "join", &join_output.stdout, &join_output.stderr);
+    assert_success(
+        &host_output.status,
+        "host",
+        &host_output.stdout,
+        &host_output.stderr,
+    );
+    assert_success(
+        &join_output.status,
+        "join",
+        &join_output.stdout,
+        &join_output.stderr,
+    );
     assert_eq!(host_output.stdout, join_payload);
     assert_eq!(join_output.stdout, host_payload);
     assert_stdio_json_stderr(&host_output.stderr);
@@ -95,7 +105,12 @@ async fn stdio_join_to_join_streams_bytes_both_directions_end_to_end() -> Result
 
     server.abort();
 
-    assert_success(&first_output.status, "first join", &first_output.stdout, &first_output.stderr);
+    assert_success(
+        &first_output.status,
+        "first join",
+        &first_output.stdout,
+        &first_output.stderr,
+    );
     assert_success(
         &second_output.status,
         "second join",
@@ -133,7 +148,10 @@ fn spawn_stdio_peer<const N: usize>(
 }
 
 async fn write_child_stdin(child: &mut Child, payload: &[u8], label: &str) -> Result<()> {
-    let mut stdin = child.stdin.take().with_context(|| format!("{label} missing"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .with_context(|| format!("{label} missing"))?;
     stdin
         .write_all(payload)
         .await

@@ -997,7 +997,11 @@ mod tests {
         .expect("channel opens");
 
         let closed = room
-            .close_channel(&gamma.member.member_id, &channel_id("c1"), Some("done".into()))
+            .close_channel(
+                &gamma.member.member_id,
+                &channel_id("c1"),
+                Some("done".into()),
+            )
             .expect("gamma can close");
         assert_eq!(closed.len(), 2);
         assert!(closed.iter().any(|event| event.recipient == host_member));

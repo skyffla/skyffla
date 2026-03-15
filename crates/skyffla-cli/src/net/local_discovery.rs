@@ -122,10 +122,7 @@ struct LocalDiscoveryTiming {
 
 fn local_discovery_timing() -> LocalDiscoveryTiming {
     LocalDiscoveryTiming {
-        join_election_window: duration_from_env(
-            JOIN_ELECTION_WINDOW_ENV,
-            JOIN_ELECTION_WINDOW,
-        ),
+        join_election_window: duration_from_env(JOIN_ELECTION_WINDOW_ENV, JOIN_ELECTION_WINDOW),
         host_announcement_grace: duration_from_env(
             HOST_ANNOUNCEMENT_GRACE_ENV,
             HOST_ANNOUNCEMENT_GRACE,
@@ -158,12 +155,10 @@ fn match_stream_event(event: DiscoveryEvent, stream_id: &str) -> Option<MatchedS
                 LocalAnnouncement::Host => {
                     Some(MatchedStreamEvent::Host(endpoint_info.to_endpoint_addr()))
                 }
-                LocalAnnouncement::Candidate => {
-                    Some(MatchedStreamEvent::Candidate(
-                        endpoint_info.endpoint_id,
-                        endpoint_info.to_endpoint_addr(),
-                    ))
-                }
+                LocalAnnouncement::Candidate => Some(MatchedStreamEvent::Candidate(
+                    endpoint_info.endpoint_id,
+                    endpoint_info.to_endpoint_addr(),
+                )),
             }
         }
         DiscoveryEvent::Expired { .. } => None,
@@ -213,14 +208,14 @@ enum MatchedStreamEvent {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::{Mutex, OnceLock};
     use std::str::FromStr;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use super::{
         announcement_tag, duration_from_env, elected_candidate_endpoint, local_discovery_timing,
-        parse_announcement, should_promote_to_host, LocalAnnouncement,
-        HOST_ANNOUNCEMENT_GRACE_ENV, JOIN_ELECTION_WINDOW_ENV,
+        parse_announcement, should_promote_to_host, LocalAnnouncement, HOST_ANNOUNCEMENT_GRACE_ENV,
+        JOIN_ELECTION_WINDOW_ENV,
     };
     use std::collections::BTreeMap;
 

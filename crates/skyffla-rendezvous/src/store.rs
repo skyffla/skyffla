@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
-    GetRoomResponse, PutRoomRequest, PutRoomResponse, RegistryError, RoomRecord,
-    RoomRegistry,
+    GetRoomResponse, PutRoomRequest, PutRoomResponse, RegistryError, RoomRecord, RoomRegistry,
 };
 
 pub trait RoomStore: Send + Sync {
@@ -16,8 +15,7 @@ pub trait RoomStore: Send + Sync {
         now_epoch_seconds: u64,
     ) -> Result<PutRoomResponse, StoreError>;
 
-    fn get(&self, room_id: &str, now_epoch_seconds: u64)
-        -> Result<GetRoomResponse, StoreError>;
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError>;
 
     fn delete(&self, room_id: &str) -> Result<bool, StoreError>;
 
@@ -59,11 +57,7 @@ impl RoomStore for InMemoryRoomStore {
             .map_err(StoreError::from)
     }
 
-    fn get(
-        &self,
-        room_id: &str,
-        now_epoch_seconds: u64,
-    ) -> Result<GetRoomResponse, StoreError> {
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError> {
         self.inner
             .lock()
             .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
@@ -203,11 +197,7 @@ impl RoomStore for SqliteRoomStore {
         })
     }
 
-    fn get(
-        &self,
-        room_id: &str,
-        now_epoch_seconds: u64,
-    ) -> Result<GetRoomResponse, StoreError> {
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError> {
         self.with_connection(|connection| {
             connection.execute(
                 "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
@@ -250,10 +240,8 @@ impl RoomStore for SqliteRoomStore {
 
     fn delete(&self, room_id: &str) -> Result<bool, StoreError> {
         self.with_connection(|connection| {
-            let deleted = connection.execute(
-                "DELETE FROM rooms WHERE room_id = ?1",
-                params![room_id],
-            )?;
+            let deleted =
+                connection.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
             Ok(deleted > 0)
         })
     }

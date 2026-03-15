@@ -830,8 +830,7 @@ mod tests {
             "channel_id":"c7"
         }"#;
 
-        let event: MachineEvent =
-            serde_json::from_str(json).expect("error event should parse");
+        let event: MachineEvent = serde_json::from_str(json).expect("error event should parse");
 
         assert_eq!(
             event,
