@@ -15,19 +15,13 @@ dependencies = [
   "skyffla>=1.1.3,<2",
 ]
 
-[project.scripts]
-simple-chat = "skyffla_examples.simple_chat:main"
-sync-chat-and-channel = "skyffla_examples.sync_chat_and_channel:main"
-room-director = "skyffla_examples.studio_app.director:main"
-room-artist = "skyffla_examples.studio_app.artist:main"
-
 [dependency-groups]
 dev = [
   "pytest>=8,<9",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/skyffla_examples"]
+[tool.uv]
+package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["room-agents-studio"]

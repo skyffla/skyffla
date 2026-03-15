@@ -15,9 +15,3 @@ Run two terminals:
 SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/simple-chat/main.py join demo-room --local
 SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/simple-chat/main.py join demo-room --local
 ```
-
-Or use the installed entry point:
-
-```sh
-SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python simple-chat join demo-room --local
-```

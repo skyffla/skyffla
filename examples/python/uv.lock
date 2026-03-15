@@ -438,7 +438,7 @@ wheels = [
 [[package]]
 name = "skyffla-python-examples"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "openai" },
     { name = "pydantic" },
