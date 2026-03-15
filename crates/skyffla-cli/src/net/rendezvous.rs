@@ -124,7 +124,6 @@ struct RendezvousErrorResponse {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::accept_policy::AutoAcceptPolicy;
     use crate::config::{Role, SessionConfig, DEFAULT_RENDEZVOUS_URL};
 
     use reqwest::StatusCode;
@@ -144,8 +143,6 @@ mod tests {
             machine: false,
             json_events: false,
             local_mode: false,
-            auto_accept_policy: AutoAcceptPolicy::none(),
-            auto_accept_source: "default",
         };
 
         assert_eq!(

@@ -4,9 +4,10 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use skyffla_protocol::SessionMode;
 
-use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+use crate::accept_policy::AutoAcceptTarget;
+#[cfg(test)]
+use crate::accept_policy::AutoAcceptPolicy;
 use crate::cli_error::CliError;
-use crate::local_state::{load_local_state, local_state_file_path};
 
 pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
 
@@ -78,8 +79,6 @@ pub(crate) struct SessionConfig {
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
-    pub(crate) auto_accept_policy: AutoAcceptPolicy,
-    pub(crate) auto_accept_source: &'static str,
 }
 
 impl SessionConfig {
@@ -91,14 +90,6 @@ impl SessionConfig {
                 CliError::usage("missing room id: pass it as an argument or set SKYFFLA_STREAM_ID")
             })?;
         validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
-        let state_path = local_state_file_path();
-        let stored_state =
-            load_local_state(&state_path).map_err(|error| CliError::local_io(error.to_string()))?;
-        let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
-            &stored_state.auto_accept_policy,
-            &args.auto_accept,
-            args.reject_all,
-        );
         Ok(Self {
             role,
             stream_id,
@@ -114,8 +105,6 @@ impl SessionConfig {
             machine: matches!(args.surface, Some(ClientSurface::Machine)),
             json_events: args.json,
             local_mode: args.local,
-            auto_accept_policy,
-            auto_accept_source,
         })
     }
 
@@ -158,6 +147,7 @@ fn validate_stdio_message_flags(stdio: bool, message: Option<&str>) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_auto_accept_policy(
     persisted: &AutoAcceptPolicy,
     cli_targets: &[AutoAcceptTarget],
