@@ -176,7 +176,6 @@ mod tests {
             rendezvous_server: format!("{DEFAULT_RENDEZVOUS_URL}/"),
             download_dir: PathBuf::from("."),
             peer_name: "peer".into(),
-            outgoing_message: None,
             stdio: false,
             machine: false,
             json_events: false,
@@ -216,10 +215,7 @@ mod tests {
     #[test]
     fn rejects_incompatible_rendezvous_major_version() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            RENDEZVOUS_VERSION_HEADER,
-            HeaderValue::from_static("2.0"),
-        );
+        headers.insert(RENDEZVOUS_VERSION_HEADER, HeaderValue::from_static("2.0"));
         let error = ensure_rendezvous_compatible(&headers).unwrap_err();
         assert!(error
             .to_string()

@@ -44,8 +44,6 @@ pub enum TransportCapability {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
-    Interactive,
-    Message,
     Stdio,
     Machine,
 }

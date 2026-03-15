@@ -33,8 +33,7 @@ async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join")
-        .await?;
+    host.expect_line_contains("member joined: join").await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
 
@@ -66,8 +65,7 @@ async fn room_tui_supports_direct_message_command() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut join = TuiProc::spawn("join", &room, &server.url, "join", &join_home).await?;
 
-    host.expect_line_contains("member joined: join")
-        .await?;
+    host.expect_line_contains("member joined: join").await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: host (m1)")
@@ -120,12 +118,13 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
         .await?;
     host.expect_line_contains("downloading file (report.txt)")
         .await?;
-    host.expect_line_contains("saving file report.txt 11B to report.txt")
+    let saved_line = host
+        .expect_line_contains("file report.txt 11B saved to ")
         .await?;
-    host.expect_line_contains("file report.txt 11B saved to report.txt")
-        .await?;
+    let saved_path = extract_saved_path(&saved_line, "file report.txt 11B saved to ", &host_home)
+        .context("missing saved filename in TUI output")?;
 
-    assert_eq!(std::fs::read(host_home.join("report.txt"))?, b"mesh report");
+    assert_eq!(std::fs::read(saved_path)?, b"mesh report");
 
     host.shutdown().await?;
     join.shutdown().await?;
@@ -167,13 +166,17 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
         .await?;
 
     host.send_line("/accept").await?;
-    host.expect_line_contains("downloading folder (artpack)").await?;
+    host.expect_line_contains("downloading folder (artpack)")
+        .await?;
     host.expect_line_contains("saving folder artpack 9B to artpack")
         .await?;
     host.expect_line_contains("folder artpack 9B saved to artpack")
         .await?;
 
-    assert_eq!(std::fs::read(host_home.join("artpack").join("a.txt"))?, b"alpha");
+    assert_eq!(
+        std::fs::read(host_home.join("artpack").join("a.txt"))?,
+        b"alpha"
+    );
     assert_eq!(
         std::fs::read(host_home.join("artpack").join("nested").join("b.txt"))?,
         b"beta"
@@ -214,11 +217,13 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
     beta.expect_line_contains("sending file secret.txt to alpha")
         .await?;
-    alpha.expect_line_contains("beta wants to send file secret.txt (6B) - /accept or /reject")
+    alpha
+        .expect_line_contains("beta wants to send file secret.txt (6B) - /accept or /reject")
         .await?;
 
     alpha.send_line("/accept").await?;
-    alpha.expect_line_contains("file secret.txt 6B saved to secret.txt")
+    alpha
+        .expect_line_contains("file secret.txt 6B saved to secret.txt")
         .await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -261,10 +266,8 @@ async fn room_tui_announces_when_member_leaves() -> Result<()> {
     gamma.expect_line_contains("members:").await?;
 
     beta.send_line("/quit").await?;
-    alpha.expect_line_contains("member left: beta")
-        .await?;
-    gamma.expect_line_contains("member left: beta")
-        .await?;
+    alpha.expect_line_contains("member left: beta").await?;
+    gamma.expect_line_contains("member left: beta").await?;
 
     alpha.shutdown().await?;
     gamma.shutdown().await?;
@@ -324,6 +327,7 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
     let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
 
     host.expect_line_contains("member joined: beta").await?;
+    join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
 
@@ -334,13 +338,24 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
         .await?;
 
     host.send_line("/accept").await?;
-    host.expect_line_contains("saving file report.txt 11B to report (1).txt")
+    let saved_line = host
+        .expect_line_contains("file report.txt 11B saved to ")
         .await?;
-    host.expect_line_contains("file report.txt 11B saved to report (1).txt")
-        .await?;
+    let saved_path = extract_saved_path(&saved_line, "file report.txt 11B saved to ", &host_home)
+        .context("missing saved filename in TUI output")?;
 
-    assert_eq!(std::fs::read(host_home.join("report.txt"))?, b"existing report");
-    assert_eq!(std::fs::read(host_home.join("report (1).txt"))?, b"mesh report");
+    assert_eq!(
+        std::fs::read(host_home.join("report.txt"))?,
+        b"existing report"
+    );
+    let saved_name = saved_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("saved path did not end in a file name")?;
+    assert_ne!(saved_path, host_home.join("report.txt"));
+    assert!(saved_name.starts_with("report"));
+    assert!(saved_name.ends_with(".txt"));
+    assert_eq!(std::fs::read(saved_path)?, b"mesh report");
 
     host.shutdown().await?;
     join.shutdown().await?;
@@ -490,4 +505,21 @@ fn spawn_stdout_reader(
             }
         }
     });
+}
+
+fn extract_saved_path(
+    line: &str,
+    prefix: &str,
+    cwd: &Path,
+) -> Option<std::path::PathBuf> {
+    line.strip_prefix(prefix)
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .map(|(path, _)| {
+            let path = std::path::PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
 }

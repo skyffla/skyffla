@@ -199,7 +199,9 @@ impl IrohTransport {
     ) -> Result<ImportedPath, TransportError> {
         let path = path.as_ref();
         if path.is_file() {
-            return self.import_file_path_with_progress(path, &mut on_progress).await;
+            return self
+                .import_file_path_with_progress(path, &mut on_progress)
+                .await;
         }
         if path.is_dir() {
             return self
@@ -420,7 +422,9 @@ impl IrohTransport {
                 AddProgressItem::Done(mut tag) => {
                     let blob = blob_ref_from_hash_and_format(tag.hash_and_format());
                     let size = total_size.unwrap_or_else(|| {
-                        std::fs::metadata(path).map(|value| value.len()).unwrap_or(0)
+                        std::fs::metadata(path)
+                            .map(|value| value.len())
+                            .unwrap_or(0)
                     });
                     on_progress(LocalTransferProgress {
                         phase: TransferPhase::Preparing,
@@ -537,13 +541,22 @@ impl IrohTransport {
         on_progress: &mut impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
         let target = target.as_ref();
-        if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent)
                 .map_err(|error| TransportError::BlobExport(error.to_string()))?;
         }
         let hash = hash_from_blob_ref(blob)?;
         let mut total_size = None;
-        let mut stream = self.inner.blob_store.blobs().export(hash, target).stream().await;
+        let mut stream = self
+            .inner
+            .blob_store
+            .blobs()
+            .export(hash, target)
+            .stream()
+            .await;
         while let Some(item) = stream.next().await {
             match item {
                 ExportProgressItem::Size(size) => {

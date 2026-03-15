@@ -10,8 +10,8 @@ mod support;
 
 use support::{
     acquire_local_discovery_test_guard, apply_local_discovery_test_env, assert_local_mode_stderr,
-    fresh_test_dir, local_discovery_available, unique_room_name,
-    LOCAL_DISCOVERY_BOOTSTRAP_DELAY, PROCESS_TIMEOUT,
+    fresh_test_dir, local_discovery_available, unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY,
+    PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

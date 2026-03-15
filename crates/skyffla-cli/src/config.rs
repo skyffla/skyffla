@@ -4,9 +4,9 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use skyffla_protocol::SessionMode;
 
-use crate::accept_policy::AutoAcceptTarget;
 #[cfg(test)]
 use crate::accept_policy::AutoAcceptPolicy;
+use crate::accept_policy::AutoAcceptTarget;
 use crate::cli_error::CliError;
 
 pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
@@ -43,8 +43,6 @@ pub(crate) struct SessionArgs {
     #[arg(long)]
     pub(crate) name: Option<String>,
     #[arg(long)]
-    pub(crate) message: Option<String>,
-    #[arg(long)]
     pub(crate) stdio: bool,
     #[arg(long)]
     pub(crate) json: bool,
@@ -74,7 +72,6 @@ pub(crate) struct SessionConfig {
     pub(crate) rendezvous_server: String,
     pub(crate) download_dir: PathBuf,
     pub(crate) peer_name: String,
-    pub(crate) outgoing_message: Option<String>,
     pub(crate) stdio: bool,
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
@@ -83,8 +80,6 @@ pub(crate) struct SessionConfig {
 
 impl SessionConfig {
     pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
-        validate_stdio_message_flags(args.stdio, args.message.as_deref())
-            .map_err(|error| CliError::usage(error.to_string()))?;
         let stream_id = resolve_stream_id(args.room_id, std::env::var("SKYFFLA_STREAM_ID").ok())
             .ok_or_else(|| {
                 CliError::usage("missing room id: pass it as an argument or set SKYFFLA_STREAM_ID")
@@ -100,7 +95,6 @@ impl SessionConfig {
                 std::env::var("USER").ok(),
                 std::env::var("USERNAME").ok(),
             ),
-            outgoing_message: args.message,
             stdio: args.stdio,
             machine: matches!(args.surface, Some(ClientSurface::Machine)),
             json_events: args.json,
@@ -111,12 +105,8 @@ impl SessionConfig {
     pub(crate) fn session_mode(&self) -> SessionMode {
         if self.machine {
             SessionMode::Machine
-        } else if self.stdio {
-            SessionMode::Stdio
-        } else if self.outgoing_message.is_some() {
-            SessionMode::Message
         } else {
-            SessionMode::Interactive
+            SessionMode::Stdio
         }
     }
 }
@@ -138,13 +128,6 @@ fn resolve_peer_name(
         .or(username_env)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "skyffla-peer".into())
-}
-
-fn validate_stdio_message_flags(stdio: bool, message: Option<&str>) -> Result<()> {
-    if stdio && message.is_some() {
-        bail!("--stdio cannot be combined with --message");
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -182,8 +165,7 @@ fn validate_stream_id(stream_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id,
-        validate_stdio_message_flags, validate_stream_id,
+        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id, validate_stream_id,
     };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
@@ -214,13 +196,6 @@ mod tests {
             "username-name"
         );
         assert_eq!(resolve_peer_name(None, None, None), "skyffla-peer");
-    }
-
-    #[test]
-    fn stdio_and_message_are_mutually_exclusive() {
-        assert!(validate_stdio_message_flags(true, Some("hello")).is_err());
-        assert!(validate_stdio_message_flags(false, Some("hello")).is_ok());
-        assert!(validate_stdio_message_flags(true, None).is_ok());
     }
 
     #[test]

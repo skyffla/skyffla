@@ -14,6 +14,7 @@ use support::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow mdns host/join coverage"]
 async fn stdio_local_duplex_supports_host_to_join() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {

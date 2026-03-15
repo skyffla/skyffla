@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::local_state::{load_local_state, local_state_file_path, update_local_state};
 use anyhow::{Context, Result};
 use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,23 +13,6 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
-use skyffla_protocol::Offer;
-
-use crate::local_state::{load_local_state, local_state_file_path, update_local_state};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TransferStateUi {
-    AwaitingDecision,
-    Completed,
-    Rejected,
-    Cancelled,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct TransferUi {
-    pub(crate) id: String,
-    pub(crate) state: TransferStateUi,
-}
 
 struct EventLine {
     timestamp: String,
@@ -43,8 +27,6 @@ pub(crate) struct UiState {
     pub(crate) host_member_id: Option<String>,
     pub(crate) room_members: BTreeMap<String, String>,
     events: Vec<EventLine>,
-    pub(crate) transfers: Vec<TransferUi>,
-    pub(crate) pending_offer: Option<Offer>,
     input_buffer: String,
     cursor_index: usize,
     input_history: Vec<String>,
@@ -88,8 +70,6 @@ impl UiState {
             host_member_id: None,
             room_members: BTreeMap::new(),
             events: Vec::new(),
-            transfers: Vec::new(),
-            pending_offer: None,
             input_buffer: String::new(),
             cursor_index: 0,
             input_history: state.history,
@@ -133,32 +113,6 @@ impl UiState {
 
     pub(crate) fn remove_room_member(&mut self, member_id: &str) {
         self.room_members.remove(member_id);
-    }
-
-    pub(crate) fn upsert_transfer(&mut self, transfer: TransferUi) {
-        if let Some(existing) = self.transfers.iter_mut().find(|t| t.id == transfer.id) {
-            *existing = transfer;
-        } else {
-            self.transfers.push(transfer);
-        }
-    }
-
-    pub(crate) fn mark_transfer_completed(&mut self, transfer_id: &str) {
-        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
-            transfer.state = TransferStateUi::Completed;
-        }
-    }
-
-    pub(crate) fn mark_transfer_rejected(&mut self, transfer_id: &str) {
-        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
-            transfer.state = TransferStateUi::Rejected;
-        }
-    }
-
-    pub(crate) fn mark_transfer_cancelled(&mut self, transfer_id: &str) {
-        if let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
-            transfer.state = TransferStateUi::Cancelled;
-        }
     }
 
     pub(crate) fn render(&mut self) {

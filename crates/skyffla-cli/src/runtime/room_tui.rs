@@ -399,7 +399,9 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
     if let Some(rest) = trimmed.strip_prefix("/send ") {
         let tokens = split_shell_words(rest)?;
         if tokens.is_empty() {
-            return Err(CliError::usage("/send requires <path> or <all|member_id|name> <path>"));
+            return Err(CliError::usage(
+                "/send requires <path> or <all|member_id|name> <path>",
+            ));
         }
         let (to, path) = if tokens.len() == 1 {
             (
@@ -409,10 +411,7 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
                 tokens[0].clone(),
             )
         } else {
-            (
-                parse_route(&tokens[0], state)?,
-                tokens[1..].join(" "),
-            )
+            (parse_route(&tokens[0], state)?, tokens[1..].join(" "))
         };
         let command = MachineCommand::SendFile {
             channel_id: state.next_local_file_channel(),
@@ -427,10 +426,12 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
         return Ok(RoomTuiInput::Send(command));
     }
     if trimmed == "/accept" {
-        let channel_id = state
-            .default_pending_file_channel()
-            .ok_or_else(|| CliError::usage("/accept requires a pending file or /accept <channel_id>"))?;
-        return Ok(RoomTuiInput::Send(MachineCommand::AcceptChannel { channel_id }));
+        let channel_id = state.default_pending_file_channel().ok_or_else(|| {
+            CliError::usage("/accept requires a pending file or /accept <channel_id>")
+        })?;
+        return Ok(RoomTuiInput::Send(MachineCommand::AcceptChannel {
+            channel_id,
+        }));
     }
     if let Some(rest) = trimmed.strip_prefix("/accept ") {
         return Ok(RoomTuiInput::Send(MachineCommand::AcceptChannel {
@@ -470,7 +471,10 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
     }
     if trimmed == "/save" {
         let (channel_id, path) = state.default_save_target()?;
-        return Ok(RoomTuiInput::Send(MachineCommand::ExportChannelFile { channel_id, path }));
+        return Ok(RoomTuiInput::Send(MachineCommand::ExportChannelFile {
+            channel_id,
+            path,
+        }));
     }
     if trimmed.starts_with("/file ")
         || trimmed.starts_with("/channel ")
@@ -512,7 +516,10 @@ fn stringify_room_lines(lines: Vec<RoomLine>) -> Vec<String> {
         .collect()
 }
 
-fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineCommand) -> Vec<RoomLine> {
+fn local_command_feedback_lines(
+    state: &mut RoomTuiState,
+    command: &MachineCommand,
+) -> Vec<RoomLine> {
     match command {
         MachineCommand::SendChat { to, text } => match to {
             Route::All => vec![RoomLine::Chat {
@@ -538,11 +545,14 @@ fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineComma
                 .file_name()
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            state.file_channels.entry(channel_id.clone()).or_insert(FileChannelUiState {
-                item_kind: item_kind.clone(),
-                name: name.clone(),
-                size: None,
-            });
+            state
+                .file_channels
+                .entry(channel_id.clone())
+                .or_insert(FileChannelUiState {
+                    item_kind: item_kind.clone(),
+                    name: name.clone(),
+                    size: None,
+                });
             let route = match to {
                 Route::All => "all".to_string(),
                 Route::Member { member_id } => state.display_member(member_id),
@@ -570,7 +580,10 @@ fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineComma
             let label = state
                 .channel_summary(channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
-            vec![RoomLine::System(format!("saving {label} to {}", display_path(path)))]
+            vec![RoomLine::System(format!(
+                "saving {label} to {}",
+                display_path(path)
+            ))]
         }
         _ => Vec::new(),
     }
@@ -740,8 +753,8 @@ impl RoomTuiState {
         };
 
         name_match.or_else(|name_error| {
-            let member_id =
-                MemberId::new(value.to_string()).map_err(|error| CliError::usage(error.to_string()))?;
+            let member_id = MemberId::new(value.to_string())
+                .map_err(|error| CliError::usage(error.to_string()))?;
             if self.self_member.as_ref() == Some(&member_id) {
                 return Err(name_error);
             }
@@ -796,10 +809,9 @@ impl RoomTuiState {
     }
 
     fn default_save_path(&self, channel_id: &ChannelId) -> Result<String, CliError> {
-        let file = self
-            .file_channels
-            .get(channel_id)
-            .ok_or_else(|| CliError::usage(format!("unknown file channel {}", channel_id.as_str())))?;
+        let file = self.file_channels.get(channel_id).ok_or_else(|| {
+            CliError::usage(format!("unknown file channel {}", channel_id.as_str()))
+        })?;
         Ok(unique_path_in_dir(&self.download_dir, &file.name)
             .display()
             .to_string())
@@ -862,12 +874,15 @@ fn format_room_event_lines(
         } => {
             state.self_member = Some(self_member.clone());
             state.host_member = Some(host_member.clone());
-            (vec![RoomLine::System(format!(
-                "joined room {} as {} (host {})",
-                room_id.as_str(),
-                self_member.as_str(),
-                host_member.as_str()
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "joined room {} as {} (host {})",
+                    room_id.as_str(),
+                    self_member.as_str(),
+                    host_member.as_str()
+                ))],
+                None,
+            )
         }
         MachineEvent::MemberSnapshot { members } => {
             state.members = members
@@ -880,26 +895,33 @@ fn format_room_event_lines(
             state
                 .members
                 .insert(member.member_id.clone(), member.name.clone());
-            (vec![RoomLine::System(format!(
-                "member joined: {}",
-                state.display_member(&member.member_id)
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "member joined: {}",
+                    state.display_member(&member.member_id)
+                ))],
+                None,
+            )
         }
         MachineEvent::MemberLeft { member_id, reason } => {
             let name = state.display_member(&member_id);
             state.members.remove(&member_id);
-            (vec![RoomLine::System(format!(
-                "member left: {}{}",
-                name,
-                reason
-                    .as_deref()
-                    .map(|value| format!(" - {value}"))
-                    .unwrap_or_default()
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "member left: {}{}",
+                    name,
+                    reason
+                        .as_deref()
+                        .map(|value| format!(" - {value}"))
+                        .unwrap_or_default()
+                ))],
+                None,
+            )
         }
-        MachineEvent::RoomClosed { reason } => {
-            (vec![RoomLine::System(format!("room closed: {reason}"))], None)
-        }
+        MachineEvent::RoomClosed { reason } => (
+            vec![RoomLine::System(format!("room closed: {reason}"))],
+            None,
+        ),
         MachineEvent::Chat {
             from,
             from_name,
@@ -913,15 +935,15 @@ fn format_room_event_lines(
                 Route::Member { member_id } => Some(state.display_member(&member_id)),
             };
             if let Some(target) = target {
-                (vec![RoomLine::Chat {
-                    speaker: format!("{speaker} -> {target}"),
-                    text,
-                }], None)
+                (
+                    vec![RoomLine::Chat {
+                        speaker: format!("{speaker} -> {target}"),
+                        text,
+                    }],
+                    None,
+                )
             } else {
-                (vec![RoomLine::Chat {
-                    speaker,
-                    text,
-                }], None)
+                (vec![RoomLine::Chat { speaker, text }], None)
             }
         }
         MachineEvent::ChannelOpened {
@@ -947,10 +969,13 @@ fn format_room_event_lines(
                 let display_name = name
                     .clone()
                     .unwrap_or_else(|| channel_id.as_str().to_string());
-                let is_incoming = state.self_member.as_ref().is_some_and(|self_member| match &to {
-                    Route::All => from_name != state.local_name,
-                    Route::Member { member_id } => member_id == self_member,
-                });
+                let is_incoming = state
+                    .self_member
+                    .as_ref()
+                    .is_some_and(|self_member| match &to {
+                        Route::All => from_name != state.local_name,
+                        Route::Member { member_id } => member_id == self_member,
+                    });
                 state.file_channels.insert(
                     channel_id.clone(),
                     FileChannelUiState {
@@ -960,7 +985,10 @@ fn format_room_event_lines(
                     },
                 );
                 if is_incoming
-                    && !state.pending_incoming_files.iter().any(|id| id == &channel_id)
+                    && !state
+                        .pending_incoming_files
+                        .iter()
+                        .any(|id| id == &channel_id)
                 {
                     state.pending_incoming_files.push(channel_id.clone());
                 }
@@ -980,13 +1008,16 @@ fn format_room_event_lines(
                 }
                 return (vec![RoomLine::System(message)], None);
             }
-            (vec![RoomLine::System(format!(
-                "channel {} opened by {} kind={:?} to {}",
-                channel_id.as_str(),
-                from_name,
-                kind,
-                route
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "channel {} opened by {} kind={:?} to {}",
+                    channel_id.as_str(),
+                    from_name,
+                    kind,
+                    route
+                ))],
+                None,
+            )
         }
         MachineEvent::ChannelAccepted {
             channel_id,
@@ -1001,7 +1032,10 @@ fn format_room_event_lines(
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             let member = state.display_member_name_with_fallback(&member_name, &member_id);
-            (vec![RoomLine::System(format!("{member} accepted {label}"))], None)
+            (
+                vec![RoomLine::System(format!("{member} accepted {label}"))],
+                None,
+            )
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -1018,14 +1052,17 @@ fn format_room_event_lines(
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
             let member = state.display_member_name_with_fallback(&member_name, &member_id);
-            (vec![RoomLine::System(format!(
-                "{} rejected {label}{}",
-                member,
-                reason
-                    .as_deref()
-                    .map(|value| format!(" - {value}"))
-                    .unwrap_or_default()
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "{} rejected {label}{}",
+                    member,
+                    reason
+                        .as_deref()
+                        .map(|value| format!(" - {value}"))
+                        .unwrap_or_default()
+                ))],
+                None,
+            )
         }
         MachineEvent::ChannelData {
             channel_id,
@@ -1033,14 +1070,17 @@ fn format_room_event_lines(
             from_name,
             body,
             ..
-        } => (vec![RoomLine::Chat {
-            speaker: format!(
-                "{} [{}]",
-                state.display_member_name_with_fallback(&from_name, &from),
-                channel_id.as_str()
-            ),
-            text: body,
-        }], None),
+        } => (
+            vec![RoomLine::Chat {
+                speaker: format!(
+                    "{} [{}]",
+                    state.display_member_name_with_fallback(&from_name, &from),
+                    channel_id.as_str()
+                ),
+                text: body,
+            }],
+            None,
+        ),
         MachineEvent::ChannelClosed {
             channel_id,
             member_id,
@@ -1054,14 +1094,17 @@ fn format_room_event_lines(
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
             let member = state.display_member_name_with_fallback(&member_name, &member_id);
-            (vec![RoomLine::System(format!(
-                "{label} closed by {}{}",
-                member,
-                reason
-                    .as_deref()
-                    .map(|value| format!(" - {value}"))
-                    .unwrap_or_default()
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "{label} closed by {}{}",
+                    member,
+                    reason
+                        .as_deref()
+                        .map(|value| format!(" - {value}"))
+                        .unwrap_or_default()
+                ))],
+                None,
+            )
         }
         MachineEvent::ChannelFileReady { channel_id, .. } => {
             state.pending_incoming_files.retain(|id| id != &channel_id);
@@ -1088,11 +1131,14 @@ fn format_room_event_lines(
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.ready_files.retain(|id| id != &channel_id);
-            (vec![RoomLine::System(format!(
-                "{label} saved to {} ({})",
-                display_path(&path),
-                format_bytes(size)
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "{label} saved to {} ({})",
+                    display_path(&path),
+                    format_bytes(size)
+                ))],
+                None,
+            )
         }
         MachineEvent::TransferProgress {
             phase,
@@ -1105,27 +1151,33 @@ fn format_room_event_lines(
             if matches!(phase, TransferPhase::Preparing | TransferPhase::Exporting) {
                 return (Vec::new(), None);
             }
-            (vec![RoomLine::System(format!(
-                "{} {} ({}) {}",
-                phase_label(&phase),
-                item_kind_label(item_kind),
-                name,
-                format_progress(bytes_complete, bytes_total).unwrap_or_default()
-            ))], None)
+            (
+                vec![RoomLine::System(format!(
+                    "{} {} ({}) {}",
+                    phase_label(&phase),
+                    item_kind_label(item_kind),
+                    name,
+                    format_progress(bytes_complete, bytes_total).unwrap_or_default()
+                ))],
+                None,
+            )
         }
         MachineEvent::Error {
             code,
             message,
             channel_id,
-        } => (vec![RoomLine::System(format!(
-            "error {}{}: {}",
-            code,
-            channel_id
-                .as_ref()
-                .map(|id| format!(" ({})", id.as_str()))
-                .unwrap_or_default(),
-            message
-        ))], None),
+        } => (
+            vec![RoomLine::System(format!(
+                "error {}{}: {}",
+                code,
+                channel_id
+                    .as_ref()
+                    .map(|id| format!(" ({})", id.as_str()))
+                    .unwrap_or_default(),
+                message
+            ))],
+            None,
+        ),
     }
 }
 
@@ -1207,7 +1259,9 @@ mod tests {
             other => panic!("unexpected input: {other:?}"),
         }
 
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
         state.self_member = Some(MemberId::new("m1").unwrap());
         match parse_room_tui_input("/msg m2 hi beta", &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendChat { to, text }) => {
@@ -1222,7 +1276,9 @@ mod tests {
             other => panic!("unexpected input: {other:?}"),
         }
 
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
         state.self_member = Some(MemberId::new("m1").unwrap());
         match parse_room_tui_input("/msg beta hi by name", &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendChat { to, text }) => {
@@ -1242,9 +1298,15 @@ mod tests {
     fn room_member_resolution_prefers_name_but_accepts_id() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         state.self_member = Some(MemberId::new("m1").unwrap());
-        state.members.insert(MemberId::new("m1").unwrap(), "alpha".into());
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
-        state.members.insert(MemberId::new("m3").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m1").unwrap(), "alpha".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m3").unwrap(), "beta".into());
 
         assert_eq!(
             state.resolve_member("m2").unwrap(),
@@ -1258,13 +1320,25 @@ mod tests {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         state.self_member = Some(MemberId::new("m1").unwrap());
         state.host_member = Some(MemberId::new("m1").unwrap());
-        state.members.insert(MemberId::new("m1").unwrap(), "alpha".into());
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m1").unwrap(), "alpha".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
         assert_eq!(state.member_roster_line(), "members: alpha*, beta");
 
-        state.members.insert(MemberId::new("m3").unwrap(), "beta".into());
-        assert_eq!(state.display_member(&MemberId::new("m2").unwrap()), "beta (m2)");
-        assert_eq!(state.display_member(&MemberId::new("m3").unwrap()), "beta (m3)");
+        state
+            .members
+            .insert(MemberId::new("m3").unwrap(), "beta".into());
+        assert_eq!(
+            state.display_member(&MemberId::new("m2").unwrap()),
+            "beta (m2)"
+        );
+        assert_eq!(
+            state.display_member(&MemberId::new("m3").unwrap()),
+            "beta (m3)"
+        );
     }
 
     #[test]
@@ -1284,7 +1358,9 @@ mod tests {
             other => panic!("unexpected input: {other:?}"),
         }
 
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
         state.self_member = Some(MemberId::new("m1").unwrap());
         match parse_room_tui_input(r#"/send "./solo.txt""#, &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendFile { to, path, .. }) => {
@@ -1307,7 +1383,9 @@ mod tests {
             other => panic!("unexpected input: {other:?}"),
         }
 
-        state.pending_incoming_files.push(ChannelId::new("f9").unwrap());
+        state
+            .pending_incoming_files
+            .push(ChannelId::new("f9").unwrap());
         state.file_channels.insert(
             ChannelId::new("f9").unwrap(),
             FileChannelUiState {
@@ -1404,7 +1482,9 @@ mod tests {
             },
         );
 
-        let path = state.default_save_path(&ChannelId::new("f1").unwrap()).unwrap();
+        let path = state
+            .default_save_path(&ChannelId::new("f1").unwrap())
+            .unwrap();
         assert!(path.ends_with("demo (1).txt"), "{path}");
 
         let _ = std::fs::remove_file(root.join("demo.txt"));

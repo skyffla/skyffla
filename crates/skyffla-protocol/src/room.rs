@@ -549,9 +549,7 @@ impl MachineEvent {
                 Ok(())
             }
             Self::TransferProgress {
-                channel_id,
-                name,
-                ..
+                channel_id, name, ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });

@@ -118,7 +118,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
 }
 
 fn should_use_room_tui(config: &SessionConfig) -> bool {
-    !config.machine && !config.stdio && config.outgoing_message.is_none()
+    !config.machine && !config.stdio
 }
 
 async fn connect_to_registered_peer(

@@ -36,8 +36,8 @@ use crate::runtime::machine_links::{
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
-    join_exportable_file, join_pending_file_transfer, ExportableFileTransfer, HostState,
-    JoinState, PendingFileTransfer,
+    join_exportable_file, join_pending_file_transfer, ExportableFileTransfer, HostState, JoinState,
+    PendingFileTransfer,
 };
 
 #[derive(Debug)]

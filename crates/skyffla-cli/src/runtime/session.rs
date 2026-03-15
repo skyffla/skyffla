@@ -5,15 +5,13 @@ use skyffla_transport::{IrohConnection, IrohTransport};
 
 use crate::app::identity::load_or_create_identity;
 use crate::app::sink::EventSink;
-use crate::app::trust::{remember_peer, short_fingerprint};
+use crate::app::trust::remember_peer;
 use crate::cli_error::CliError;
 use crate::config::SessionConfig;
 use crate::local_state::local_state_file_path;
-use crate::net::framing::read_envelope;
-use crate::runtime::handshake::{exchange_hello, handle_post_handshake_message, send_chat_message};
+use crate::runtime::handshake::exchange_hello;
 use crate::runtime::machine::run_machine_join_session;
 use crate::runtime::stdio::run_stdio_session;
-use crate::ui::UiState;
 
 pub(crate) async fn run_connected_session(
     config: &SessionConfig,
@@ -90,32 +88,7 @@ pub(crate) async fn run_connected_session(
         mode: connection_status.mode.to_string(),
         remote_addr: connection_status.remote_addr.clone(),
     });
-    if let Some(message) = &config.outgoing_message {
-        let mut ui = build_ui(
-            config,
-            transport,
-            &identity.fingerprint,
-            &peer,
-            &connection_status,
-            peer_trust,
-        )?;
-        send_chat_message(&session_id, &mut send, message, None, Some(sink))
-            .await
-            .map_err(|error| CliError::protocol(error.to_string()))?;
-        ui.chat("you", message);
-        send.finish()
-            .context("failed to finish control stream send side")
-            .map_err(|error| CliError::transport(error.to_string()))?;
-
-        while let Some(envelope) = read_envelope(&mut recv)
-            .await
-            .map_err(|error| CliError::protocol(error.to_string()))?
-        {
-            handle_post_handshake_message(&mut ui, envelope, Some(sink))
-                .await
-                .map_err(|error| CliError::protocol(error.to_string()))?;
-        }
-    } else if config.machine {
+    if config.machine {
         debug_assert!(!is_host, "machine host path should use run_machine_host");
         run_machine_join_session(
             config,
@@ -159,46 +132,4 @@ pub(crate) async fn run_connected_session(
     ));
 
     Ok(())
-}
-
-fn build_ui(
-    config: &SessionConfig,
-    transport: &IrohTransport,
-    local_fingerprint: &str,
-    peer: &skyffla_session::SessionPeer,
-    connection_status: &skyffla_transport::ConnectionStatus,
-    peer_trust: Option<crate::app::trust::PeerTrustStatus>,
-) -> Result<UiState, CliError> {
-    let mut ui = UiState::new(
-        &config.stream_id,
-        &config.peer_name,
-        &transport.endpoint().id().to_string(),
-    )
-    .map_err(|error| CliError::local_io(error.to_string()))?;
-    ui.peer_name = peer.peer_name.clone();
-    ui.system(format!(
-        "session stream={} you={} peer={}",
-        ui.stream_id, ui.local_name, ui.peer_name
-    ));
-    ui.system(format!(
-        "identity you={} peer={}",
-        short_fingerprint(local_fingerprint).unwrap_or_else(|| "unknown".to_string()),
-        peer.peer_fingerprint
-            .as_deref()
-            .and_then(short_fingerprint)
-            .unwrap_or_else(|| "unknown".to_string())
-    ));
-    ui.system(format!("connected to {}", ui.peer_name));
-    ui.system(format!(
-        "connection {} remote={}",
-        connection_status.mode,
-        connection_status
-            .remote_addr
-            .as_deref()
-            .unwrap_or("unknown")
-    ));
-    if let Some(trust) = peer_trust {
-        ui.system(trust.message);
-    }
-    Ok(ui)
 }
