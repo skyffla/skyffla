@@ -259,13 +259,13 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
         .await?;
 
     host.send_line("/accept").await?;
-    host.expect_line_contains("saving file report.txt 11B to report (2).txt")
+    host.expect_line_contains("saving file report.txt 11B to report (1).txt")
         .await?;
-    host.expect_line_contains("file report.txt 11B saved to report (2).txt")
+    host.expect_line_contains("file report.txt 11B saved to report (1).txt")
         .await?;
 
     assert_eq!(std::fs::read(host_home.join("report.txt"))?, b"existing report");
-    assert_eq!(std::fs::read(host_home.join("report (2).txt"))?, b"mesh report");
+    assert_eq!(std::fs::read(host_home.join("report (1).txt"))?, b"mesh report");
 
     host.shutdown().await?;
     join.shutdown().await?;

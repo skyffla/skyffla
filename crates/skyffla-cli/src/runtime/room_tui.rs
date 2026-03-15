@@ -72,7 +72,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                         }
                         Ok(RoomTuiInput::Send(command)) => {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
-                            apply_room_lines(&mut ui, local_command_feedback_lines(&state, &command));
+                            apply_room_lines(&mut ui, local_command_feedback_lines(&mut state, &command));
                         }
                         Err(error) => ui.system(error.to_string()),
                     }
@@ -85,7 +85,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                         let follow_up = apply_room_event(&mut state, &mut ui, event);
                         if let Some(command) = follow_up {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
-                            apply_room_lines(&mut ui, local_command_feedback_lines(&state, &command));
+                            apply_room_lines(&mut ui, local_command_feedback_lines(&mut state, &command));
                         }
                         ui.render();
                     }
@@ -141,7 +141,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                         }
                         Ok(RoomTuiInput::Send(command)) => {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
-                            for line in stringify_room_lines(local_command_feedback_lines(&state, &command)) {
+                            for line in stringify_room_lines(local_command_feedback_lines(&mut state, &command)) {
                                 emit_scripted_line(&line).await?;
                             }
                         }
@@ -163,7 +163,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                         }
                         if let Some(command) = follow_up {
                             send_machine_command(backend.stdin.as_mut(), &command).await?;
-                            for line in stringify_room_lines(local_command_feedback_lines(&state, &command)) {
+                            for line in stringify_room_lines(local_command_feedback_lines(&mut state, &command)) {
                                 emit_scripted_line(&line).await?;
                             }
                         }
@@ -477,7 +477,7 @@ fn stringify_room_lines(lines: Vec<RoomLine>) -> Vec<String> {
         .collect()
 }
 
-fn local_command_feedback_lines(state: &RoomTuiState, command: &MachineCommand) -> Vec<RoomLine> {
+fn local_command_feedback_lines(state: &mut RoomTuiState, command: &MachineCommand) -> Vec<RoomLine> {
     match command {
         MachineCommand::SendChat { to, text } => match to {
             Route::All => vec![RoomLine::Chat {
@@ -497,15 +497,21 @@ fn local_command_feedback_lines(state: &RoomTuiState, command: &MachineCommand) 
             }
         },
         MachineCommand::SendFile {
-            channel_id: _,
+            channel_id,
             to,
             path,
             ..
         } => {
+            let item_kind = path_item_kind(path);
             let name = Path::new(path)
                 .file_name()
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
+            state.file_channels.entry(channel_id.clone()).or_insert(FileChannelUiState {
+                item_kind: item_kind.clone(),
+                name: name.clone(),
+                size: None,
+            });
             let route = match to {
                 Route::All => "all".to_string(),
                 Route::Member { member_id } => state
@@ -516,7 +522,7 @@ fn local_command_feedback_lines(state: &RoomTuiState, command: &MachineCommand) 
             };
             vec![RoomLine::System(format!(
                 "sending {} {} to {}",
-                item_kind_label(path_item_kind(path)),
+                item_kind_label(item_kind),
                 name,
                 route
             ))]
@@ -1018,7 +1024,7 @@ fn format_room_event_lines(
             bytes_total,
             ..
         } => {
-            if matches!(phase, TransferPhase::Preparing) {
+            if matches!(phase, TransferPhase::Preparing | TransferPhase::Exporting) {
                 return (Vec::new(), None);
             }
             (vec![RoomLine::System(format!(
@@ -1292,7 +1298,7 @@ mod tests {
         );
 
         let path = state.default_save_path(&ChannelId::new("f1").unwrap()).unwrap();
-        assert!(path.ends_with("demo (2).txt"), "{path}");
+        assert!(path.ends_with("demo (1).txt"), "{path}");
 
         let _ = std::fs::remove_file(root.join("demo.txt"));
         let _ = std::fs::remove_dir(&root);
@@ -1369,7 +1375,7 @@ fn unique_path_in_dir(dir: &Path, name: &str) -> PathBuf {
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty());
 
-    for index in 2.. {
+    for index in 1.. {
         let file_name = match extension {
             Some(extension) => format!("{stem} ({index}).{extension}"),
             None => format!("{stem} ({index})"),
