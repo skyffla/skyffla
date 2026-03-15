@@ -21,7 +21,7 @@ def _require_non_empty_body(value: str) -> str:
 
 
 class SkyfflaModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class ChannelKind(str, Enum):
