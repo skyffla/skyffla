@@ -536,6 +536,11 @@ impl IrohTransport {
         target: impl AsRef<Path>,
         on_progress: &mut impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
+        let target = target.as_ref();
+        if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+        }
         let hash = hash_from_blob_ref(blob)?;
         let mut total_size = None;
         let mut stream = self.inner.blob_store.blobs().export(hash, target).stream().await;

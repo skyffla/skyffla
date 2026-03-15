@@ -107,7 +107,7 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
     join.expect_line_contains("sending file report.txt to alpha (m1)")
         .await?;
-    host.expect_line_contains("beta wants to send file report.txt (11B)")
+    host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;
 
     host.send_line("/accept").await?;
@@ -158,7 +158,8 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
     join.send_line(r#"/send m1 ~/artpack"#).await?;
     join.expect_line_contains("sending folder artpack to alpha (m1)")
         .await?;
-    host.expect_line_contains("beta wants to send folder artpack").await?;
+    host.expect_line_contains("beta wants to send folder artpack (9B) - /accept or /reject")
+        .await?;
 
     host.send_line("/accept").await?;
     host.expect_line_contains("downloading folder (artpack)").await?;
@@ -208,7 +209,7 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
     beta.expect_line_contains("sending file secret.txt to alpha (m1)")
         .await?;
-    alpha.expect_line_contains("beta wants to send file secret.txt (6B)")
+    alpha.expect_line_contains("beta wants to send file secret.txt (6B) - /accept or /reject")
         .await?;
 
     alpha.send_line("/accept").await?;
@@ -225,6 +226,49 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     alpha.shutdown().await?;
     beta.shutdown().await?;
     gamma.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-room-tui-host");
+    let join_home = fresh_test_dir("skyffla-cli-room-tui-join");
+    for home in [&host_home, &join_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(host_home.join("report.txt"), b"existing report")?;
+    std::fs::write(join_home.join("report.txt"), b"mesh report")?;
+
+    let room = unique_room_name();
+    let mut host = TuiProc::spawn("host", &room, &server.url, "alpha", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
+
+    host.expect_line_contains("member joined: beta (m2)").await?;
+    join.expect_line_contains("direct room link ready: alpha (m1)")
+        .await?;
+
+    join.send_line(r#"/send m1 ~/report.txt"#).await?;
+    host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
+        .await?;
+
+    host.send_line("/accept").await?;
+    host.expect_line_contains("saving file report.txt 11B to report (2).txt")
+        .await?;
+    host.expect_line_contains("file report.txt 11B saved to report (2).txt")
+        .await?;
+
+    assert_eq!(std::fs::read(host_home.join("report.txt"))?, b"existing report");
+    assert_eq!(std::fs::read(host_home.join("report (2).txt"))?, b"mesh report");
+
+    host.shutdown().await?;
+    join.shutdown().await?;
     server.abort();
     Ok(())
 }

@@ -416,6 +416,15 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
             reason,
         }));
     }
+    if trimmed == "/reject" {
+        let channel_id = state.default_pending_file_channel().ok_or_else(|| {
+            CliError::usage("/reject requires a pending file or /reject <channel_id> [reason]")
+        })?;
+        return Ok(RoomTuiInput::Send(MachineCommand::RejectChannel {
+            channel_id,
+            reason: None,
+        }));
+    }
     if let Some(rest) = trimmed.strip_prefix("/save ") {
         let tokens = split_shell_words(rest)?;
         let (channel_id, path) = state.parse_save_target(&tokens)?;
@@ -718,9 +727,7 @@ impl RoomTuiState {
             .file_channels
             .get(channel_id)
             .ok_or_else(|| CliError::usage(format!("unknown file channel {}", channel_id.as_str())))?;
-        Ok(self
-            .download_dir
-            .join(&file.name)
+        Ok(unique_path_in_dir(&self.download_dir, &file.name)
             .display()
             .to_string())
     }
@@ -894,11 +901,7 @@ fn format_room_event_lines(
                     size_suffix
                 );
                 if is_incoming {
-                    message.push_str(&format!(
-                        " - /accept or /accept {} or /reject {} [reason]",
-                        channel_id.as_str(),
-                        channel_id.as_str()
-                    ));
+                    message.push_str(" - /accept or /reject");
                 }
                 return (vec![RoomLine::System(message)], None);
             }
@@ -1094,7 +1097,7 @@ fn room_help_lines() -> &'static [&'static str] {
         "/send <name> <path>  send to a named room member",
         "/send <path>  send to the only other room member in a 1:1 room",
         "/accept [channel_id]  accept and save the newest pending file channel",
-        "/reject <channel_id> [reason]  reject a file channel",
+        "/reject [channel_id] [reason]  reject the newest pending file channel",
         "/save [channel_id] [path]  re-export an accepted file channel",
         "/members  print the current roster",
         "/help  show this help",
@@ -1207,6 +1210,14 @@ mod tests {
             other => panic!("unexpected input: {other:?}"),
         }
 
+        match parse_room_tui_input("/reject", &mut state).unwrap() {
+            RoomTuiInput::Send(MachineCommand::RejectChannel { channel_id, reason }) => {
+                assert_eq!(channel_id.as_str(), "f9");
+                assert_eq!(reason, None);
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+
         state.ready_files.push(ChannelId::new("f9").unwrap());
         match parse_room_tui_input("/save f9", &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::ExportChannelFile { channel_id, path }) => {
@@ -1256,6 +1267,36 @@ mod tests {
         assert_eq!(ui.room_members.get("m1").map(String::as_str), Some("host"));
         assert_eq!(ui.room_members.get("m2").map(String::as_str), Some("alpha"));
     }
+
+    #[test]
+    fn default_save_path_avoids_existing_names() {
+        let root = std::env::temp_dir().join(format!(
+            "skyffla-room-tui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("demo.txt"), b"existing").unwrap();
+
+        let mut state = RoomTuiState::new("alpha", root.clone());
+        state.file_channels.insert(
+            ChannelId::new("f1").unwrap(),
+            FileChannelUiState {
+                item_kind: TransferItemKind::File,
+                name: "demo.txt".into(),
+                size: Some(8),
+            },
+        );
+
+        let path = state.default_save_path(&ChannelId::new("f1").unwrap()).unwrap();
+        assert!(path.ends_with("demo (2).txt"), "{path}");
+
+        let _ = std::fs::remove_file(root.join("demo.txt"));
+        let _ = std::fs::remove_dir(&root);
+    }
 }
 
 fn item_kind_label(kind: TransferItemKind) -> &'static str {
@@ -1288,6 +1329,7 @@ fn format_progress(bytes_complete: u64, bytes_total: Option<u64>) -> Option<Stri
         if bytes_total == 0 {
             return "0%".to_string();
         }
+        let bytes_complete = bytes_complete.min(bytes_total);
         let percent = (bytes_complete.saturating_mul(100) / bytes_total).min(100);
         format!(
             "{} / {} ({}%)",
@@ -1299,7 +1341,46 @@ fn format_progress(bytes_complete: u64, bytes_total: Option<u64>) -> Option<Stri
 }
 
 fn display_path(path: &str) -> String {
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Ok(relative) = Path::new(path).strip_prefix(&current_dir) {
+            let rendered = relative.display().to_string();
+            if !rendered.is_empty() {
+                return rendered;
+            }
+        }
+    }
     path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
+fn unique_path_in_dir(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let source = Path::new(name);
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(name);
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty());
+
+    for index in 2.. {
+        let file_name = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("unique path search should always terminate")
 }
 
 fn path_item_kind(path: &str) -> TransferItemKind {

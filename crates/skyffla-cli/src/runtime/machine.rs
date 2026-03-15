@@ -1041,7 +1041,14 @@ fn expand_user_path(path: &str) -> PathBuf {
             return PathBuf::from(home).join(rest);
         }
     }
-    PathBuf::from(path)
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(candidate)
+    }
 }
 
 fn transfer_progress_event(
