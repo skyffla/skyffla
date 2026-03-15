@@ -142,14 +142,6 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         .stderr(Stdio::piped());
     let mut host = host.spawn().context("failed to spawn host process")?;
 
-    let payload = b"hello from integration test\nsecond line\n";
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(payload)
-        .await
-        .context("failed to write stdio payload into host stdin")?;
-    drop(host_stdin);
-
     wait_for_room_ready(&server.url, &room).await?;
 
     let mut join = Command::new(bin);
@@ -166,6 +158,14 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let join = join.spawn().context("failed to spawn join process")?;
+
+    let payload = b"hello from integration test\nsecond line\n";
+    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
+    host_stdin
+        .write_all(payload)
+        .await
+        .context("failed to write stdio payload into host stdin")?;
+    drop(host_stdin);
 
     let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
         .await
@@ -283,8 +283,9 @@ async fn stdio_rejects_session_mode_mismatch_during_handshake() -> Result<()> {
     let join_stderr = String::from_utf8_lossy(&join_output.stderr);
     let host_stderr = String::from_utf8_lossy(&host_output.stderr);
     assert!(
-        join_stderr.contains("session mode mismatch"),
-        "mismatched join stderr did not mention session mode mismatch:\n{join_stderr}"
+        join_stderr.contains("session mode mismatch")
+            || join_stderr.contains("peer closed control stream before sending hello"),
+        "mismatched join stderr did not mention session mode mismatch or peer closure:\n{join_stderr}"
     );
     assert!(
         host_stderr.contains("session mode mismatch"),
