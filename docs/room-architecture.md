@@ -1,6 +1,6 @@
-# Skyffla Room / Mesh Design
+# Skyffla Room Architecture
 
-Status: in progress
+Status: active architecture reference
 
 ## Goal
 
@@ -44,7 +44,7 @@ Not implemented yet:
 
 ## Naming
 
-Current `stream_id` should conceptually become `room_id`.
+Use `room_id` consistently in the public architecture and docs.
 
 Use these terms consistently:
 
@@ -53,7 +53,7 @@ Use these terms consistently:
 - `channel_id`: a logical lane inside the room
 - `route`: `all` or `member(member_id)`
 
-Keep the old `stream` term only for low-level byte streams if needed internally.
+Keep `stream` only for low-level transport streams if needed internally.
 
 ## Core Architecture
 

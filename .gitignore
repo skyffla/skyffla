@@ -9,6 +9,7 @@ frontend/vite.config.d.ts
 *.db
 *.db-shm
 *.db-wal
+*.local.md
 IMPLEMENTATION_PLAN.md
 DEPLOYMENT_BREW_PLAN.local.md
 scripts/local/
