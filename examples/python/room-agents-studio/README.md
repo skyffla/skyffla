@@ -58,16 +58,34 @@ OPENAI_API_KEY=...
 Terminal 1, start the director:
 
 ```sh
+SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/director.py image-room --name director
+```
+
+Or with the installed entry point:
+
+```sh
 SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python room-director image-room --name director
 ```
 
 Terminal 2, start the first artist:
 
 ```sh
+SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/artist.py image-room --name artist-outline
+```
+
+Or with the installed entry point:
+
+```sh
 SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python room-artist image-room --name artist-outline
 ```
 
 Terminal 3, start the second artist:
+
+```sh
+SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python python examples/python/room-agents-studio/artist.py image-room --name artist-shading
+```
+
+Or with the installed entry point:
 
 ```sh
 SKYFFLA_BIN=target/debug/skyffla uv run --project examples/python room-artist image-room --name artist-shading

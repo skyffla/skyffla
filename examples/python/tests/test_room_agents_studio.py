@@ -1,7 +1,7 @@
 from pathlib import Path
 import random
 
-from skyffla_examples.room_agents_studio.shared import (
+from skyffla_examples.studio_app.shared import (
     ImagePlan,
     StudioTask,
     SubmissionMetadata,
@@ -20,7 +20,7 @@ from skyffla_examples.room_agents_studio.shared import (
     resolve_winner_name,
     sanitize_filename,
 )
-from skyffla_examples.room_agents_studio.web import GalleryState
+from skyffla_examples.studio_app.web import GalleryState
 
 
 def test_task_message_round_trips() -> None:

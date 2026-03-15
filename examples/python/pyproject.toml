@@ -18,8 +18,8 @@ dependencies = [
 [project.scripts]
 simple-chat = "skyffla_examples.simple_chat:main"
 sync-chat-and-channel = "skyffla_examples.sync_chat_and_channel:main"
-room-director = "skyffla_examples.room_agents_studio.director:main"
-room-artist = "skyffla_examples.room_agents_studio.artist:main"
+room-director = "skyffla_examples.studio_app.director:main"
+room-artist = "skyffla_examples.studio_app.artist:main"
 
 [dependency-groups]
 dev = [
