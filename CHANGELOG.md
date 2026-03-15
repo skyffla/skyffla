@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-03-15
+
 - Regenerate `wrappers/python/uv.lock` during release cuts so tagged Python wrapper publishes stay consistent with the bumped package version and `uv sync --locked` succeeds in CI.
 
 ## [1.1.0] - 2026-03-15
