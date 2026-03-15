@@ -56,38 +56,17 @@ with SyncRoom.join("warehouse", name="python-agent") as room:
     print(room.wait_for_chat())
 ```
 
-For a minimal runnable script, see [`examples/simple_chat.py`](examples/simple_chat.py).
+## Examples
 
-Same machine or LAN:
+Runnable example apps live under [`../../examples/python`](../../examples/python).
+That project deliberately installs the published `skyffla` package from PyPI so
+the setup matches external usage rather than importing this source tree
+directly.
 
-```sh
-uv run python examples/simple_chat.py host demo-room --local
-uv run python examples/simple_chat.py join demo-room --local
-```
+Included examples:
 
-Or let both sides use `join` and allow the first process to promote itself to
-host:
-
-```sh
-uv run python examples/simple_chat.py join demo-room --local
-uv run python examples/simple_chat.py join demo-room --local
-```
-
-`examples/simple_chat.py` is now a minimal interactive chat client. Start one
-host and one join process, then type lines in either terminal. Use `/quit` to
-exit.
-
-For `--local`, start the host first and give local discovery a few seconds to
-advertise before starting the join side. If the join side promotes itself to
-host, use `--server` with a local `skyffla-rendezvous` for deterministic
-same-machine testing.
-
-Custom rendezvous server:
-
-```sh
-uv run python examples/simple_chat.py host demo-room --server http://127.0.0.1:8080
-uv run python examples/simple_chat.py join demo-room --server http://127.0.0.1:8080
-```
+- [`../../examples/python`](../../examples/python): shared Python example project
+- [`../../examples/python/room-agents-studio/README.md`](../../examples/python/room-agents-studio/README.md): multi-agent OpenAI poster studio with a live browser gallery and image transfer
 
 ## Tests
 

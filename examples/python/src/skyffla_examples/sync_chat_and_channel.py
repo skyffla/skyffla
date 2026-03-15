@@ -7,7 +7,7 @@ from skyffla import SyncRoom
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("usage: python examples/sync_chat_and_channel.py <host|join> <room-id>")
+        print("usage: sync-chat-and-channel <host|join> <room-id>")
         return 2
 
     role, room_id = sys.argv[1], sys.argv[2]

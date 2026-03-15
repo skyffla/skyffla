@@ -423,12 +423,27 @@ wheels = [
 ]
 
 [[package]]
-name = "python-room-agents-demo"
+name = "skyffla"
+version = "1.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/e8/35ff743de3ef341fc9bf1f32cf8ff415ba46fe2bd052b0eca2a363e15a69/skyffla-1.1.3.tar.gz", hash = "sha256:a8dde5b9a94919d7796910b151997b8a026915249eafd9decf46ecad2ee30629", size = 33639, upload-time = "2026-03-15T20:39:33.937Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/26/b5b0716ec3732853bfc47476e1c6cf27cb7f39415fe0e6c3567a3c41f1a2/skyffla-1.1.3-py3-none-any.whl", hash = "sha256:ce5d03bc3e14df60346335191817a2b4066e3e6207fc51bf3d9fda0dd6ba234e", size = 11164, upload-time = "2026-03-15T20:39:32.523Z" },
+]
+
+[[package]]
+name = "skyffla-python-examples"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
+    { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "skyffla" },
 ]
 
 [package.dev-dependencies]
@@ -439,7 +454,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openai", specifier = ">=1.0" },
+    { name = "pydantic", specifier = ">=2.8,<3" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "skyffla", specifier = ">=1.1.3,<2" },
 ]
 
 [package.metadata.requires-dev]
