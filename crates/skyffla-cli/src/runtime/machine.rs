@@ -596,7 +596,7 @@ async fn handle_join_authority_message(
         )),
         None => {
             let event = MachineEvent::RoomClosed {
-                reason: "host disconnected".into(),
+                reason: "host left".into(),
             };
             apply_machine_event(join_state, &event);
             emit_event(stdout, &event).await?;
