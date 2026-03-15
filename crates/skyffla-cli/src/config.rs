@@ -14,6 +14,7 @@ pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8
 #[derive(Parser)]
 #[command(name = "skyffla")]
 #[command(about = "Minimal Skyffla peer CLI", long_about = None)]
+#[command(version, propagate_version = true)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,

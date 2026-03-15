@@ -183,10 +183,12 @@ if ! grep -q "^## \\[${VERSION}\\]" CHANGELOG.md; then
 fi
 
 perl -0pi -e 's/(\[workspace\.package\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' Cargo.toml
+perl -0pi -e 's/(\[project\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' wrappers/python/pyproject.toml
+perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/python/src/skyffla/__about__.py
 
 cargo check >/dev/null
 
-FILES=(Cargo.toml CHANGELOG.md)
+FILES=(Cargo.toml CHANGELOG.md wrappers/python/pyproject.toml wrappers/python/src/skyffla/__about__.py)
 if ! git diff --quiet -- Cargo.lock; then
   FILES+=(Cargo.lock)
 fi

@@ -60,6 +60,12 @@ brew install skyffla-rendezvous
 
 By default, the CLI uses the public rendezvous at `http://rendezvous.skyffla.com:8080`.
 
+Check the installed CLI version:
+
+```sh
+skyffla --version
+```
+
 ## Quick Start
 
 Open two or more terminals and join the same room.
@@ -213,6 +219,14 @@ cargo build --bins
 
 ```sh
 cargo test -p skyffla
+```
+
+Run the Python wrapper checks:
+
+```sh
+cd wrappers/python
+uv sync
+uv run pytest
 ```
 
 Run the rendezvous server locally:

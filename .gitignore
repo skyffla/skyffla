@@ -12,3 +12,6 @@ frontend/vite.config.d.ts
 *.local.md
 scripts/local/
 skyfflacli.code-workspace
+wrappers/python/.venv/
+wrappers/python/.pytest_cache/
+wrappers/python/**/__pycache__/
