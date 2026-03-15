@@ -2,9 +2,7 @@
   <img src="assets/readme-hero.svg" alt="Skyffla" width="100%" />
 </p>
 
-<p align="center">
-  Multi-party peer-to-peer rooms for terminals, agents, and scripts.
-</p>
+# Multi-party peer-to-peer rooms for terminals, agents, and scripts
 
 Skyffla is a room-first, multi-party peer-to-peer system.
 
