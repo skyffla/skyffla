@@ -105,9 +105,9 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
-    join.expect_line_contains("sending file report.txt as file-1 to alpha (m1)")
+    join.expect_line_contains("sending file report.txt to alpha (m1)")
         .await?;
-    host.expect_line_contains("beta wants to send file report.txt (11B) as file-1 to m1")
+    host.expect_line_contains("beta wants to send file report.txt (11B)")
         .await?;
 
     host.send_line("/accept").await?;
@@ -160,7 +160,7 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
     join.send_line(r#"/send m1 ~/artpack"#).await?;
-    join.expect_line_contains("sending folder artpack as file-1 to alpha (m1)")
+    join.expect_line_contains("sending folder artpack to alpha (m1)")
         .await?;
     host.expect_line_contains("beta wants to send folder artpack").await?;
 
@@ -183,6 +183,56 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
 
     host.shutdown().await?;
     join.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-room-tui-host");
+    let beta_home = fresh_test_dir("skyffla-cli-room-tui-beta");
+    let gamma_home = fresh_test_dir("skyffla-cli-room-tui-gamma");
+    for home in [&host_home, &beta_home, &gamma_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(beta_home.join("secret.txt"), b"secret")?;
+
+    let room = unique_room_name();
+    let mut alpha = TuiProc::spawn("host", &room, &server.url, "alpha", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = TuiProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = TuiProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
+
+    alpha.expect_line_contains("member joined: beta").await?;
+    alpha.expect_line_contains("member joined: gamma").await?;
+    beta.expect_line_contains("members:").await?;
+    gamma.expect_line_contains("members:").await?;
+
+    beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
+    beta.expect_line_contains("sending file secret.txt to alpha (m1)")
+        .await?;
+    alpha.expect_line_contains("beta wants to send file secret.txt (6B)")
+        .await?;
+
+    alpha.send_line("/accept").await?;
+    alpha.expect_line_contains("file secret.txt 6B (file-1) ready")
+        .await?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let gamma_dump = gamma.debug_dump().await;
+    assert!(
+        !gamma_dump.contains("secret.txt"),
+        "gamma unexpectedly saw targeted file transfer:\n{gamma_dump}"
+    );
+
+    alpha.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
     server.abort();
     Ok(())
 }
