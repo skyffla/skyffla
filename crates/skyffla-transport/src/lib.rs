@@ -4,13 +4,16 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::ProtocolHandler;
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
+use iroh_blobs::api::proto::{AddProgressItem, ExportProgressItem};
+use iroh_blobs::api::remote::GetProgressItem;
 use iroh_blobs::format::collection::Collection;
 use iroh_blobs::store::mem::MemStore;
 use iroh_blobs::{BlobFormat as IrohBlobFormat, BlobsProtocol, Hash, HashAndFormat};
-use skyffla_protocol::room::{BlobFormat, BlobRef};
+use skyffla_protocol::room::{BlobFormat, BlobRef, TransferItemKind, TransferPhase};
 use skyffla_protocol::TransportCapability;
 use tokio::sync::{mpsc, Mutex};
 
@@ -86,6 +89,15 @@ pub struct TransportOptions {
 pub struct ImportedPath {
     pub blob: BlobRef,
     pub size: u64,
+    pub item_kind: TransferItemKind,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTransferProgress {
+    pub phase: TransferPhase,
+    pub bytes_complete: u64,
+    pub bytes_total: Option<u64>,
 }
 
 impl IrohTransport {
@@ -177,16 +189,22 @@ impl IrohTransport {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<ImportedPath, TransportError> {
+        self.import_path_with_progress(path, |_| {}).await
+    }
+
+    pub async fn import_path_with_progress(
+        &self,
+        path: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
         let path = path.as_ref();
         if path.is_file() {
-            let blob = self.import_blob_path(path).await?;
-            let size = std::fs::metadata(path)
-                .map_err(|error| TransportError::BlobImport(error.to_string()))?
-                .len();
-            return Ok(ImportedPath { blob, size });
+            return self.import_file_path_with_progress(path, &mut on_progress).await;
         }
         if path.is_dir() {
-            return self.import_collection_path(path).await;
+            return self
+                .import_collection_path_with_progress(path, &mut on_progress)
+                .await;
         }
         Err(TransportError::BlobImport(format!(
             "path {} is not a file or directory",
@@ -198,6 +216,15 @@ impl IrohTransport {
         &self,
         provider: &PeerTicket,
         blob: &BlobRef,
+    ) -> Result<(), TransportError> {
+        self.fetch_blob_with_progress(provider, blob, |_| {}).await
+    }
+
+    pub async fn fetch_blob_with_progress(
+        &self,
+        provider: &PeerTicket,
+        blob: &BlobRef,
+        mut on_progress: impl FnMut(LocalTransferProgress),
     ) -> Result<(), TransportError> {
         let endpoint_addr =
             filter_endpoint_addr(provider.to_endpoint_addr()?, self.inner.options.local_only);
@@ -217,12 +244,25 @@ impl IrohTransport {
         self.enforce_connection_policy(&wrapped).await?;
 
         let hash_and_format = hash_and_format_from_blob_ref(blob)?;
-        self.inner
+        let mut stream = self
+            .inner
             .blob_store
             .remote()
             .fetch(connection, hash_and_format)
-            .await
-            .map_err(|error| TransportError::BlobFetch(error.to_string()))?;
+            .stream();
+        while let Some(item) = stream.next().await {
+            match item {
+                GetProgressItem::Progress(bytes_complete) => on_progress(LocalTransferProgress {
+                    phase: TransferPhase::Downloading,
+                    bytes_complete,
+                    bytes_total: None,
+                }),
+                GetProgressItem::Done(_) => {}
+                GetProgressItem::Error(error) => {
+                    return Err(TransportError::BlobFetch(error.to_string()));
+                }
+            }
+        }
         let mut tag = self
             .inner
             .blob_store
@@ -253,9 +293,24 @@ impl IrohTransport {
         blob: &BlobRef,
         target: impl AsRef<Path>,
     ) -> Result<u64, TransportError> {
+        self.export_path_with_progress(blob, target, |_| {}).await
+    }
+
+    pub async fn export_path_with_progress(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
         match blob.format {
-            BlobFormat::Blob => self.export_blob(blob, target).await,
-            BlobFormat::Collection => self.export_collection(blob, target.as_ref()).await,
+            BlobFormat::Blob => {
+                self.export_blob_with_progress(blob, target, &mut on_progress)
+                    .await
+            }
+            BlobFormat::Collection => {
+                self.export_collection_with_progress(blob, target.as_ref(), &mut on_progress)
+                    .await
+            }
         }
     }
 
@@ -332,22 +387,126 @@ impl IrohTransport {
 }
 
 impl IrohTransport {
-    async fn import_collection_path(&self, path: &Path) -> Result<ImportedPath, TransportError> {
+    async fn import_file_path_with_progress(
+        &self,
+        path: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
+        let display_name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let mut total_size = None;
+        let mut stream = self.inner.blob_store.blobs().add_path(path).stream().await;
+        while let Some(item) = stream.next().await {
+            match item {
+                AddProgressItem::Size(size) => {
+                    total_size = Some(size);
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    });
+                }
+                AddProgressItem::CopyProgress(bytes_complete)
+                | AddProgressItem::OutboardProgress(bytes_complete) => {
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete,
+                        bytes_total: total_size,
+                    });
+                }
+                AddProgressItem::CopyDone => {}
+                AddProgressItem::Done(mut tag) => {
+                    let blob = blob_ref_from_hash_and_format(tag.hash_and_format());
+                    let size = total_size.unwrap_or_else(|| {
+                        std::fs::metadata(path).map(|value| value.len()).unwrap_or(0)
+                    });
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete: size,
+                        bytes_total: Some(size),
+                    });
+                    tag.leak();
+                    return Ok(ImportedPath {
+                        blob,
+                        size,
+                        item_kind: TransferItemKind::File,
+                        display_name,
+                    });
+                }
+                AddProgressItem::Error(error) => {
+                    return Err(TransportError::BlobImport(error.to_string()));
+                }
+            }
+        }
+        Err(TransportError::BlobImport(
+            "import stream closed before completion".into(),
+        ))
+    }
+
+    async fn import_collection_path_with_progress(
+        &self,
+        path: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
         let entries = collect_collection_entries(path)?;
+        let display_name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         let mut total_size = 0_u64;
         let mut tags = Vec::with_capacity(entries.len());
         let mut items = Vec::with_capacity(entries.len());
+        let mut completed = 0_u64;
+
+        for entry in &entries {
+            total_size = total_size.saturating_add(entry.size);
+        }
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Preparing,
+            bytes_complete: 0,
+            bytes_total: Some(total_size),
+        });
 
         for entry in entries {
-            total_size = total_size.saturating_add(entry.size);
-            let tag = self
+            let mut current = 0_u64;
+            let mut stream = self
                 .inner
                 .blob_store
                 .blobs()
                 .add_path(&entry.absolute_path)
-                .temp_tag()
-                .await
-                .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+                .stream()
+                .await;
+            let tag = loop {
+                match stream.next().await {
+                    Some(AddProgressItem::CopyProgress(bytes_complete))
+                    | Some(AddProgressItem::OutboardProgress(bytes_complete)) => {
+                        current = current.max(bytes_complete.min(entry.size));
+                        on_progress(LocalTransferProgress {
+                            phase: TransferPhase::Preparing,
+                            bytes_complete: completed.saturating_add(current),
+                            bytes_total: Some(total_size),
+                        });
+                    }
+                    Some(AddProgressItem::Size(_)) | Some(AddProgressItem::CopyDone) => {}
+                    Some(AddProgressItem::Done(tag)) => break tag,
+                    Some(AddProgressItem::Error(error)) => {
+                        return Err(TransportError::BlobImport(error.to_string()));
+                    }
+                    None => {
+                        return Err(TransportError::BlobImport(
+                            "import stream closed before completion".into(),
+                        ));
+                    }
+                }
+            };
+            completed = completed.saturating_add(entry.size);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Preparing,
+                bytes_complete: completed,
+                bytes_total: Some(total_size),
+            });
             let name = collection_entry_name(&entry.relative_path)?;
             items.push((name, tag.hash()));
             tags.push(tag);
@@ -366,13 +525,55 @@ impl IrohTransport {
         Ok(ImportedPath {
             blob: blob_ref_from_hash_and_format(root.hash_and_format()),
             size: total_size,
+            item_kind: TransferItemKind::Folder,
+            display_name,
         })
     }
 
-    async fn export_collection(
+    async fn export_blob_with_progress(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
+        let hash = hash_from_blob_ref(blob)?;
+        let mut total_size = None;
+        let mut stream = self.inner.blob_store.blobs().export(hash, target).stream().await;
+        while let Some(item) = stream.next().await {
+            match item {
+                ExportProgressItem::Size(size) => {
+                    total_size = Some(size);
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Exporting,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    });
+                }
+                ExportProgressItem::CopyProgress(bytes_complete) => {
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Exporting,
+                        bytes_complete,
+                        bytes_total: total_size,
+                    });
+                }
+                ExportProgressItem::Done => {
+                    return Ok(total_size.unwrap_or(0));
+                }
+                ExportProgressItem::Error(error) => {
+                    return Err(TransportError::BlobExport(error.to_string()));
+                }
+            }
+        }
+        Err(TransportError::BlobExport(
+            "export stream closed before completion".into(),
+        ))
+    }
+
+    async fn export_collection_with_progress(
         &self,
         blob: &BlobRef,
         target: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
         std::fs::create_dir_all(target)
             .map_err(|error| TransportError::BlobExport(error.to_string()))?;
@@ -381,8 +582,15 @@ impl IrohTransport {
             .await
             .map_err(|error| TransportError::BlobExport(error.to_string()))?;
 
-        let mut total_size = 0_u64;
-        for (name, hash) in collection {
+        let entries = collection.into_iter().collect::<Vec<_>>();
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Exporting,
+            bytes_complete: 0,
+            bytes_total: None,
+        });
+
+        let mut completed = 0_u64;
+        for (name, hash) in entries {
             let relative_path = validated_collection_relative_path(&name)?;
             let destination = target.join(&relative_path);
             if let Some(parent) = destination.parent() {
@@ -390,15 +598,29 @@ impl IrohTransport {
                     .map_err(|error| TransportError::BlobExport(error.to_string()))?;
             }
             let size = self
-                .inner
-                .blob_store
-                .blobs()
-                .export(hash, &destination)
-                .await
-                .map_err(|error| TransportError::BlobExport(error.to_string()))?;
-            total_size = total_size.saturating_add(size);
+                .export_blob_with_progress(
+                    &BlobRef {
+                        hash: hash.to_hex(),
+                        format: BlobFormat::Blob,
+                    },
+                    &destination,
+                    &mut |progress| {
+                        on_progress(LocalTransferProgress {
+                            phase: TransferPhase::Exporting,
+                            bytes_complete: completed.saturating_add(progress.bytes_complete),
+                            bytes_total: None,
+                        });
+                    },
+                )
+                .await?;
+            completed = completed.saturating_add(size);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Exporting,
+                bytes_complete: completed,
+                bytes_total: None,
+            });
         }
-        Ok(total_size)
+        Ok(completed)
     }
 }
 

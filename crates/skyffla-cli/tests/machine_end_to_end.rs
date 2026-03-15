@@ -384,18 +384,8 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
             .with_context(|| format!("failed to create {}", home.display()))?;
     }
 
-    let source_path = fresh_test_dir("skyffla-cli-machine-file-source").join("report.txt");
-    let export_path = fresh_test_dir("skyffla-cli-machine-file-export").join("report.txt");
-    std::fs::create_dir_all(
-        source_path
-            .parent()
-            .context("source path should have a parent")?,
-    )?;
-    std::fs::create_dir_all(
-        export_path
-            .parent()
-            .context("export path should have a parent")?,
-    )?;
+    let source_path = host_home.join("report.txt");
+    let export_path = beta_home.join("report-copy.txt");
     std::fs::write(&source_path, b"mesh file payload")?;
 
     let room = unique_room_name();
@@ -408,33 +398,50 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
     beta.expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
 
-    host.send(&format!(
-        r#"/file send --channel f1 --to m2 --path "{}""#,
-        source_path.display()
-    ))
+    host.send(r#"/file send --channel f1 --to m2 --path "~/report.txt""#)
+        .await?;
+    host.expect_event("sender progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.get("name") == Some(&Value::String("report.txt".into()))
+            && event.get("phase") == Some(&Value::String("preparing".into()))
+    })
     .await?;
     beta.expect_event("file opened from host", |event| {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.get("name") == Some(&Value::String("report.txt".into()))
             && event.pointer("/blob/hash").is_some()
     })
     .await?;
 
     beta.send("/channel accept f1").await?;
+    beta.expect_event("download progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.get("name") == Some(&Value::String("report.txt".into()))
+            && event.get("phase") == Some(&Value::String("downloading".into()))
+    })
+    .await?;
     beta.expect_event("file ready", |event| {
         event.get("type") == Some(&Value::String("channel_file_ready".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
     })
     .await?;
 
-    beta.send(&format!(
-        r#"/file export --channel f1 --path "{}""#,
-        export_path.display()
-    ))
+    beta.send(r#"/file export --channel f1 --path "~/report-copy.txt""#)
+        .await?;
+    beta.expect_event("export progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.get("name") == Some(&Value::String("report.txt".into()))
+            && event.get("phase") == Some(&Value::String("exporting".into()))
+    })
     .await?;
     beta.expect_event("file exported", |event| {
         event.get("type") == Some(&Value::String("channel_file_exported".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.get("path") == Some(&Value::String(export_path.display().to_string()))
     })
     .await?;
 
@@ -459,9 +466,9 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
             .with_context(|| format!("failed to create {}", home.display()))?;
     }
 
-    let source_dir = fresh_test_dir("skyffla-cli-machine-folder-source");
+    let source_dir = host_home.join("artpack");
     let nested_dir = source_dir.join("nested");
-    let export_dir = fresh_test_dir("skyffla-cli-machine-folder-export");
+    let export_dir = beta_home.join("saved-artpack");
     std::fs::create_dir_all(&nested_dir)?;
     std::fs::create_dir_all(&export_dir)?;
     std::fs::write(source_dir.join("a.txt"), b"alpha")?;
@@ -477,19 +484,33 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     beta.expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
 
-    host.send(&format!(
-        r#"/file send --channel folder1 --to m2 --path "{}""#,
-        source_dir.display()
-    ))
+    host.send(r#"/file send --channel folder1 --to m2 --path "~/artpack""#)
+        .await?;
+    host.expect_event("folder prepare progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.get("name") == Some(&Value::String("artpack".into()))
+            && event.get("item_kind") == Some(&Value::String("folder".into()))
+            && event.get("phase") == Some(&Value::String("preparing".into()))
+    })
     .await?;
     beta.expect_event("folder opened from host", |event| {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.get("name") == Some(&Value::String("artpack".into()))
             && event.pointer("/blob/format") == Some(&Value::String("collection".into()))
     })
     .await?;
 
     beta.send("/channel accept folder1").await?;
+    beta.expect_event("folder download progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.get("name") == Some(&Value::String("artpack".into()))
+            && event.get("item_kind") == Some(&Value::String("folder".into()))
+            && event.get("phase") == Some(&Value::String("downloading".into()))
+    })
+    .await?;
     beta.expect_event("folder ready", |event| {
         event.get("type") == Some(&Value::String("channel_file_ready".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
@@ -497,14 +518,20 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     })
     .await?;
 
-    beta.send(&format!(
-        r#"/file export --channel folder1 --path "{}""#,
-        export_dir.display()
-    ))
+    beta.send(r#"/file export --channel folder1 --path "~/saved-artpack""#)
+        .await?;
+    beta.expect_event("folder export progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.get("name") == Some(&Value::String("artpack".into()))
+            && event.get("item_kind") == Some(&Value::String("folder".into()))
+            && event.get("phase") == Some(&Value::String("exporting".into()))
+    })
     .await?;
     beta.expect_event("folder exported", |event| {
         event.get("type") == Some(&Value::String("channel_file_exported".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
+            && event.get("path") == Some(&Value::String(export_dir.display().to_string()))
     })
     .await?;
 

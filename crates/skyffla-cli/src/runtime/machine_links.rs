@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 
 use iroh::endpoint::{RecvStream, SendStream};
-use skyffla_protocol::room::{BlobRef, ChannelId, MachineCommand, MachineEvent, Member, MemberId};
+use skyffla_protocol::room::{
+    BlobRef, ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind,
+    TransferPhase,
+};
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_session::SessionPeer;
-use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
+use skyffla_transport::{
+    ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
+};
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
@@ -389,9 +394,29 @@ pub(crate) fn spawn_join_blob_download(
     provider: PeerTicket,
     channel_id: ChannelId,
     blob: BlobRef,
+    item_kind: TransferItemKind,
+    name: String,
+    size: Option<u64>,
 ) {
     tokio::spawn(async move {
-        match transport.fetch_blob(&provider, &blob).await {
+        let mut last_step = None;
+        match transport
+            .fetch_blob_with_progress(&provider, &blob, |progress| {
+                if should_emit_progress(&mut last_step, &progress, size) {
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: item_kind.clone(),
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
+                }
+            })
+            .await
+        {
             Ok(()) => {
                 let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                     event: MachineEvent::ChannelFileReady { channel_id, blob },
@@ -416,9 +441,29 @@ pub(crate) fn spawn_host_blob_download(
     provider: PeerTicket,
     channel_id: ChannelId,
     blob: BlobRef,
+    item_kind: TransferItemKind,
+    name: String,
+    size: Option<u64>,
 ) {
     tokio::spawn(async move {
-        match transport.fetch_blob(&provider, &blob).await {
+        let mut last_step = None;
+        match transport
+            .fetch_blob_with_progress(&provider, &blob, |progress| {
+                if should_emit_progress(&mut last_step, &progress, size) {
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: item_kind.clone(),
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
+                }
+            })
+            .await
+        {
             Ok(()) => {
                 let _ = host_tx.send(HostInput::LocalEvent {
                     event: MachineEvent::ChannelFileReady { channel_id, blob },
@@ -435,6 +480,21 @@ pub(crate) fn spawn_host_blob_download(
             }
         }
     });
+}
+
+fn should_emit_progress(
+    last_step: &mut Option<u64>,
+    progress: &LocalTransferProgress,
+    total_override: Option<u64>,
+) -> bool {
+    let total = total_override.or(progress.bytes_total);
+    let step = match total {
+        Some(total) if total > 0 => (progress.bytes_complete.saturating_mul(100) / total) / 10,
+        _ => progress.bytes_complete / (256 * 1024),
+    };
+    let emit = *last_step != Some(step) || progress.bytes_complete == 0;
+    *last_step = Some(step);
+    emit
 }
 
 pub(crate) fn introduce_member_to_existing_peers(
@@ -506,6 +566,7 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberLeft { .. }
         | MachineEvent::ChannelFileReady { .. }
         | MachineEvent::ChannelFileExported { .. }
+        | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route,
+    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferItemKind,
 };
 use skyffla_protocol::room_link::PeerLinkMessage;
 use tokio::sync::mpsc;
@@ -27,8 +27,28 @@ pub(super) struct JoinChannelState {
     pub(super) opener: MemberId,
     pub(super) kind: ChannelKind,
     pub(super) participants: BTreeSet<MemberId>,
+    pub(super) item_kind: Option<TransferItemKind>,
+    pub(super) name: Option<String>,
+    pub(super) size: Option<u64>,
     pub(super) blob: Option<BlobRef>,
     pub(super) local_file_ready: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingFileTransfer {
+    pub(super) provider_ticket: String,
+    pub(super) blob: BlobRef,
+    pub(super) item_kind: TransferItemKind,
+    pub(super) name: String,
+    pub(super) size: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ExportableFileTransfer {
+    pub(super) blob: BlobRef,
+    pub(super) item_kind: TransferItemKind,
+    pub(super) name: String,
+    pub(super) size: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +82,8 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             kind,
             from,
             to,
+            name,
+            size,
             blob,
             ..
         } => {
@@ -72,6 +94,14 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                         opener: from.clone(),
                         kind: kind.clone(),
                         participants,
+                        item_kind: blob.as_ref().map(|blob| match blob.format {
+                            skyffla_protocol::room::BlobFormat::Blob => TransferItemKind::File,
+                            skyffla_protocol::room::BlobFormat::Collection => {
+                                TransferItemKind::Folder
+                            }
+                        }),
+                        name: name.clone(),
+                        size: *size,
                         blob: blob.clone(),
                         local_file_ready: state.self_member.as_ref() == Some(from),
                     },
@@ -180,11 +210,11 @@ pub(super) fn join_channel_recipients(
         .collect())
 }
 
-pub(super) fn join_pending_file_download(
+pub(super) fn join_pending_file_transfer(
     state: &JoinState,
     self_member: &MemberId,
     channel_id: &ChannelId,
-) -> Result<Option<(String, BlobRef)>, CliError> {
+) -> Result<Option<PendingFileTransfer>, CliError> {
     let Some(channel) = state.channels.get(channel_id) else {
         return Err(CliError::runtime(format!(
             "unknown channel {}",
@@ -207,7 +237,7 @@ pub(super) fn join_pending_file_download(
             channel_id.as_str()
         ))
     })?;
-    let ticket = state
+    let provider_ticket = state
         .member_tickets
         .get(&channel.opener)
         .cloned()
@@ -217,14 +247,23 @@ pub(super) fn join_pending_file_download(
                 channel.opener.as_str()
             ))
         })?;
-    Ok(Some((ticket, blob)))
+    Ok(Some(PendingFileTransfer {
+        provider_ticket,
+        blob,
+        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
+        name: channel
+            .name
+            .clone()
+            .unwrap_or_else(|| channel_id.as_str().to_string()),
+        size: channel.size,
+    }))
 }
 
-pub(super) fn join_exportable_blob(
+pub(super) fn join_exportable_file(
     state: &JoinState,
     self_member: &MemberId,
     channel_id: &ChannelId,
-) -> Result<BlobRef, CliError> {
+) -> Result<ExportableFileTransfer, CliError> {
     let channel = state
         .channels
         .get(channel_id)
@@ -248,11 +287,20 @@ pub(super) fn join_exportable_blob(
             channel_id.as_str()
         )));
     }
-    channel.blob.clone().ok_or_else(|| {
+    let blob = channel.blob.clone().ok_or_else(|| {
         CliError::runtime(format!(
             "file channel {} is missing blob metadata",
             channel_id.as_str()
         ))
+    })?;
+    Ok(ExportableFileTransfer {
+        blob,
+        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
+        name: channel
+            .name
+            .clone()
+            .unwrap_or_else(|| channel_id.as_str().to_string()),
+        size: channel.size,
     })
 }
 

@@ -137,6 +137,21 @@ pub enum BlobFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferItemKind {
+    File,
+    Folder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferPhase {
+    Preparing,
+    Downloading,
+    Exporting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlobRef {
     pub hash: String,
     pub format: BlobFormat,
@@ -352,6 +367,14 @@ pub enum MachineEvent {
         path: String,
         size: u64,
     },
+    TransferProgress {
+        channel_id: ChannelId,
+        item_kind: TransferItemKind,
+        name: String,
+        phase: TransferPhase,
+        bytes_complete: u64,
+        bytes_total: Option<u64>,
+    },
     Error {
         code: String,
         message: String,
@@ -509,6 +532,19 @@ impl MachineEvent {
                 }
                 if path.trim().is_empty() {
                     return Err(RoomProtocolError::EmptyPath { kind: "path" });
+                }
+                Ok(())
+            }
+            Self::TransferProgress {
+                channel_id,
+                name,
+                ..
+            } => {
+                if channel_id.as_str().trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
+                }
+                if name.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "name" });
                 }
                 Ok(())
             }
@@ -841,5 +877,34 @@ mod tests {
             }
         );
         event.validate().expect("error event should validate");
+    }
+
+    #[test]
+    fn transfer_progress_event_round_trips() {
+        let json = r#"{
+            "type":"transfer_progress",
+            "channel_id":"c9",
+            "item_kind":"folder",
+            "name":"photos",
+            "phase":"downloading",
+            "bytes_complete":32,
+            "bytes_total":64
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("transfer_progress should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::TransferProgress {
+                channel_id: ChannelId::new("c9").expect("valid channel id"),
+                item_kind: TransferItemKind::Folder,
+                name: "photos".into(),
+                phase: TransferPhase::Downloading,
+                bytes_complete: 32,
+                bytes_total: Some(64),
+            }
+        );
+        event.validate().expect("transfer_progress should validate");
     }
 }
