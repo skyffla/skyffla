@@ -1,8 +1,10 @@
 # Skyffla Duplex `--stdio` Spec
 
+Status: active raw byte-stream reference
+
 ## Goal
 
-Redefine `skyffla ... --stdio` as a long-lived, full-duplex machine I/O session suitable for true async agent-to-agent communication.
+Define `skyffla ... --stdio` as a long-lived, full-duplex raw byte session suitable for true async agent-to-agent communication.
 
 The new `--stdio` mode should:
 
@@ -14,14 +16,20 @@ The new `--stdio` mode should:
 
 ## Non-Goals
 
-- preserve compatibility with the current one-shot `--stdio` implementation
-- introduce a separate agent-only CLI mode
+- turn `--stdio` into the public room automation API
 - make Skyffla responsible for agent protocol semantics beyond transport and session control
-- replace the existing interactive TUI session model
+- replace the room-native TUI or `machine` surfaces
 
 ## Product Definition
 
-`--stdio` becomes a persistent machine channel.
+`--stdio` is a persistent raw byte channel.
+
+It is intentionally separate from Skyffla's room-native multiparty model:
+
+- use the default TUI or `machine` when you want room/member/channel semantics
+- use `--stdio` when you want a raw 1:1 byte pipe
+
+`--stdio` is not the public room automation protocol.
 
 Each peer:
 
@@ -46,8 +54,8 @@ The underlying transport already supports bidirectional streams. The current lim
 Relevant current code:
 
 - transport bidirectional streams: `crates/skyffla-transport/src/lib.rs`
-- one-shot stdio runtime to replace: `crates/skyffla-cli/src/runtime/stdio.rs`
-- long-lived concurrent session model to borrow from: `crates/skyffla-cli/src/runtime/interactive.rs`
+- duplex stdio runtime: `crates/skyffla-cli/src/runtime/stdio.rs`
+- session routing between `machine` and `stdio`: `crates/skyffla-cli/src/runtime/session.rs`
 
 Two one-way Skyffla runs can emulate turn-taking, but they are not the target architecture because they add rendezvous churn, session orchestration overhead, and awkward streaming behavior.
 
@@ -72,14 +80,13 @@ Discovery and connection policy are orthogonal to this session model:
 
 ### Handshake changes
 
-Add a negotiated session mode to the protocol `Hello` message.
+The protocol negotiates session mode in the `Hello` message.
 
 New field:
 
 ```rust
 pub enum SessionMode {
-    Interactive,
-    Message,
+    Machine,
     Stdio,
 }
 ```
@@ -99,8 +106,8 @@ pub struct Hello {
 Rules:
 
 - `skyffla ... --stdio` sends `session_mode = Stdio`
-- normal TUI mode sends `session_mode = Interactive`
-- one-shot `--message` sends `session_mode = Message`
+- `skyffla ... machine` sends `session_mode = Machine`
+- the room-native TUI runs by spawning the internal `machine` backend
 - peers must reject mismatched session modes during handshake
 - session mode negotiation must be independent of how the peer was discovered
 
@@ -318,21 +325,15 @@ In stdio mode:
 - `host <stream> --stdio` means "wait for peer, then enter duplex machine session"
 - `join <stream> --stdio` means "connect to peer, then enter duplex machine session"
 
+Even though the positional argument is still the same room / session identifier,
+the resulting session is 1:1 raw byte transport, not a multiparty room API.
+
 In local mode:
 
 - `host <stream> --local --stdio` means "advertise on the local network, accept a direct LAN peer, then enter duplex machine session"
 - `join <stream> --local --stdio` means "discover a LAN peer with mDNS or become the advertiser/host, then enter duplex machine session"
 - once connected, stdio behavior should be identical to the rendezvous-backed case
 - local mode should not depend on rendezvous configuration or `--server`
-
-### `--message`
-
-`--message` remains separate from `--stdio`.
-
-`--stdio` and `--message` stay mutually exclusive because:
-
-- `--message` is one-shot control-plane content
-- `--stdio` is a long-lived payload channel
 
 ## Failure and Cancellation
 
@@ -422,7 +423,6 @@ Required end-to-end tests:
 - cancellation from either side tears down the session cleanly
 - `stdout` contains only payload bytes
 - `stderr` contains only status/errors/JSON events
-- `--message` and `--stdio` remain mutually exclusive
 - mismatched session modes fail during handshake
 - the same duplex stdio contract holds for `--local` sessions once connected
 

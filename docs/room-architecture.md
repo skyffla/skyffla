@@ -18,6 +18,15 @@ This is not a full network mesh in v1. It is a native multiparty product model w
 - direct peer-to-peer member messaging
 - direct peer-to-peer payload channels
 
+This room-first architecture applies to:
+
+- the default TUI
+- the `machine` API
+- future language wrappers built on `machine`
+
+It does not mean every CLI mode is room-native. `--stdio` remains a separate
+raw 1:1 duplex byte-stream mode.
+
 One host process hosts one room.
 
 ## Current Status
@@ -60,6 +69,11 @@ Keep `stream` only for low-level transport streams if needed internally.
 Skyffla should have one canonical room/session engine in Rust.
 
 Everything else is an adapter on top of that.
+
+The important boundary is:
+
+- room-native adapters should expose room/member/channel semantics
+- raw byte adapters should stay explicitly outside the room protocol model
 
 The protocol must be treated as a first-class design artifact:
 

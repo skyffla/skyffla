@@ -3,22 +3,34 @@
 </p>
 
 <p align="center">
-  Peer-to-peer rooms for terminals, agents, and scripts.
+  Multiparty peer-to-peer rooms for terminals, agents, and scripts.
 </p>
 
-Skyffla gives you one direct room model through three surfaces:
+Skyffla is a room-first peer-to-peer system.
+
+Its native model is:
+
+- one room
+- one host-owned room authority
+- any number of members
+- direct peer-to-peer chat and payload traffic once the room is established
+
+The primary room surfaces are:
 
 - a room-native TUI for people
 - a framed `machine` protocol for wrappers and automation
-- raw full-duplex `--stdio` for byte streams
+
+It also includes raw full-duplex `--stdio` for 1:1 byte streams when you do not
+want room semantics.
 
 Use it when you want direct peer-to-peer communication without building your own
-signaling, room control, file transfer, and terminal UX stack first.
+room control, peer introduction, file transfer, and terminal UX stack first.
 
 ## Why Skyffla
 
+- Multiparty is native. A room is the product abstraction; 1:1 is just a room with two members.
 - Direct by default. Chat, file/folder transfer, and channel traffic stay peer-to-peer once a room is established.
-- One mental model. Humans, wrappers, and raw pipelines all join the same kind of room.
+- One room model across human and machine surfaces. The TUI and `machine` speak the same room protocol.
 - Easy to adopt. Use the public rendezvous by default, or self-host `skyffla-rendezvous` when you need control.
 
 ## Install
@@ -45,7 +57,7 @@ By default, the CLI uses the public rendezvous at `http://rendezvous.skyffla.com
 
 ## Quick Start
 
-Open two terminals and join the same room.
+Open two or more terminals and join the same room.
 
 Terminal A:
 
@@ -59,12 +71,18 @@ Terminal B:
 skyffla join copper-731
 ```
 
-The first peer hosts the room. The next peer joins it.
+The first peer hosts the room. Every later peer joins that same room.
+
+You can keep adding members:
+
+```sh
+skyffla join copper-731
+```
 
 In the default TUI:
 
 - plain text sends room chat
-- `/msg <member>` sends a direct message
+- `/msg <member>` sends a direct message to one member
 - `/send <member|all> <path>` sends a file or folder
 - `/members` shows the live roster
 - `/quit` leaves the room
@@ -72,11 +90,11 @@ In the default TUI:
 Treat the room ID as a short-lived shared secret. Prefer something less obvious
 than `demo`.
 
-## Other Surfaces
+## Room Surfaces
 
 ### `machine`
 
-Use `machine` for wrappers, agents, and scripted automation:
+Use `machine` for wrappers, agents, and scripted room automation:
 
 ```sh
 skyffla host copper-731 machine
@@ -96,10 +114,24 @@ Skyffla accepts either newline-delimited JSON or the convenience slash commands
 documented for the CLI runtime. The public wrapper-facing contract is in
 [`docs/machine-protocol.md`](docs/machine-protocol.md).
 
-### `--stdio`
+Both the default TUI and `machine` are room-native:
 
-Use `--stdio` when you want a raw full-duplex byte pipe instead of room chat or
-structured machine events.
+- they join the same kind of multiparty room
+- they see the same room/member/channel concepts
+- they differ only in presentation and automation surface
+
+## Raw Duplex `--stdio`
+
+Use `--stdio` when you want a raw full-duplex 1:1 byte pipe instead of room
+chat or the room-native `machine` API.
+
+`--stdio` is useful for:
+
+- shell pipelines
+- agent-to-agent byte streams
+- custom framed protocols such as NDJSON
+
+It is not the multiparty room API.
 
 Terminal A:
 
@@ -115,6 +147,9 @@ cat | skyffla join copper-731 --stdio
 
 Type in either terminal to send bytes to the other. `Ctrl-D` closes only your
 send side.
+
+If you want wrappers or automation to participate in rooms, use `machine`, not
+`--stdio`.
 
 ### `--local`
 
@@ -160,7 +195,7 @@ that you control.
 - [`docs/room-architecture.md`](docs/room-architecture.md): room-native architecture and design boundaries
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
 - [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
-- [`docs/stdio-duplex-spec.md`](docs/stdio-duplex-spec.md): low-level duplex `--stdio` design note
+- [`docs/stdio-duplex-spec.md`](docs/stdio-duplex-spec.md): raw duplex `--stdio` design note
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
 
 ## Local Development
