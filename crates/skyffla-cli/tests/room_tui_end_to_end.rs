@@ -507,11 +507,7 @@ fn spawn_stdout_reader(
     });
 }
 
-fn extract_saved_path(
-    line: &str,
-    prefix: &str,
-    cwd: &Path,
-) -> Option<std::path::PathBuf> {
+fn extract_saved_path(line: &str, prefix: &str, cwd: &Path) -> Option<std::path::PathBuf> {
     line.strip_prefix(prefix)
         .and_then(|rest| rest.rsplit_once(" ("))
         .map(|(path, _)| {
