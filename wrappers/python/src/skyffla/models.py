@@ -35,6 +35,17 @@ class BlobFormat(str, Enum):
     COLLECTION = "collection"
 
 
+class TransferItemKind(str, Enum):
+    FILE = "file"
+    FOLDER = "folder"
+
+
+class TransferPhase(str, Enum):
+    PREPARING = "preparing"
+    DOWNLOADING = "downloading"
+    EXPORTING = "exporting"
+
+
 class ProtocolVersion(SkyfflaModel):
     major: int
     minor: int
@@ -423,6 +434,35 @@ class ChannelFileExported(SkyfflaModel):
         return _require_non_empty(value, "path")
 
 
+class TransferProgress(SkyfflaModel):
+    type: Literal["transfer_progress"] = "transfer_progress"
+    channel_id: str
+    item_kind: TransferItemKind
+    name: str
+    phase: TransferPhase
+    bytes_complete: int
+    bytes_total: int | None = None
+
+    @field_validator("channel_id", "name")
+    @classmethod
+    def _validate_required_fields(cls, value: str, info: Any) -> str:
+        return _require_non_empty(value, info.field_name or "field")
+
+    @field_validator("bytes_complete")
+    @classmethod
+    def _validate_bytes_complete(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("bytes_complete must not be negative")
+        return value
+
+    @field_validator("bytes_total")
+    @classmethod
+    def _validate_bytes_total(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("bytes_total must not be negative")
+        return value
+
+
 class ErrorEvent(SkyfflaModel):
     type: Literal["error"] = "error"
     code: str
@@ -449,6 +489,7 @@ MachineEvent = Annotated[
         ChannelClosed,
         ChannelFileReady,
         ChannelFileExported,
+        TransferProgress,
         ErrorEvent,
     ],
     Field(discriminator="type"),

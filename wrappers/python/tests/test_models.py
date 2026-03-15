@@ -7,6 +7,9 @@ from skyffla import (
     RouteAll,
     RouteMember,
     RoomWelcome,
+    TransferItemKind,
+    TransferPhase,
+    TransferProgress,
     __version__,
     dump_message,
     ensure_machine_protocol_version,
@@ -104,3 +107,24 @@ def test_machine_protocol_version_requires_matching_major() -> None:
         assert "same machine protocol major version" in str(exc)
     else:
         raise AssertionError("expected a machine protocol mismatch")
+
+
+def test_transfer_progress_event_round_trips() -> None:
+    event = parse_machine_event(
+        {
+            "type": "transfer_progress",
+            "channel_id": "img-bb3e8484",
+            "item_kind": "file",
+            "name": "Cyan-Tea-Confidential.png",
+            "phase": "preparing",
+            "bytes_complete": 65536,
+            "bytes_total": None,
+        }
+    )
+
+    assert isinstance(event, TransferProgress)
+    assert event.channel_id == "img-bb3e8484"
+    assert event.item_kind == TransferItemKind.FILE
+    assert event.phase == TransferPhase.PREPARING
+    assert event.bytes_complete == 65536
+    assert event.bytes_total is None
