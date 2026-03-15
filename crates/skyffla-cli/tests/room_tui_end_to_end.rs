@@ -111,20 +111,16 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
         .await?;
 
     host.send_line("/accept").await?;
-    host.expect_line_contains("accepting file report.txt 11B (file-1)")
+    host.expect_line_contains("accepting file report.txt 11B")
         .await?;
     host.expect_line_contains("downloading file (report.txt)")
         .await?;
-    host.expect_line_contains("file report.txt 11B (file-1) ready")
+    host.expect_line_contains("saving file report.txt 11B to report.txt")
+        .await?;
+    host.expect_line_contains("file report.txt 11B saved to report.txt")
         .await?;
 
-    host.send_line(r#"/save file-1 ~/report-copy.txt"#).await?;
-    host.expect_line_contains("saving file report.txt 11B (file-1) to ~/report-copy.txt")
-        .await?;
-    host.expect_line_contains("file report.txt 11B (file-1) saved to")
-        .await?;
-
-    assert_eq!(std::fs::read(host_home.join("report-copy.txt"))?, b"mesh report");
+    assert_eq!(std::fs::read(host_home.join("report.txt"))?, b"mesh report");
 
     host.shutdown().await?;
     join.shutdown().await?;
@@ -166,18 +162,14 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
 
     host.send_line("/accept").await?;
     host.expect_line_contains("downloading folder (artpack)").await?;
-    host.expect_line_contains("folder artpack 9B (file-1) ready")
+    host.expect_line_contains("saving folder artpack 9B to artpack")
+        .await?;
+    host.expect_line_contains("folder artpack 9B saved to artpack")
         .await?;
 
-    host.send_line(r#"/save file-1 ~/saved-artpack"#).await?;
-    host.expect_line_contains("saving folder artpack 9B (file-1) to ~/saved-artpack")
-        .await?;
-    host.expect_line_contains("folder artpack 9B (file-1) saved to")
-        .await?;
-
-    assert_eq!(std::fs::read(host_home.join("saved-artpack").join("a.txt"))?, b"alpha");
+    assert_eq!(std::fs::read(host_home.join("artpack").join("a.txt"))?, b"alpha");
     assert_eq!(
-        std::fs::read(host_home.join("saved-artpack").join("nested").join("b.txt"))?,
+        std::fs::read(host_home.join("artpack").join("nested").join("b.txt"))?,
         b"beta"
     );
 
@@ -220,7 +212,7 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
         .await?;
 
     alpha.send_line("/accept").await?;
-    alpha.expect_line_contains("file secret.txt 6B (file-1) ready")
+    alpha.expect_line_contains("file secret.txt 6B saved to secret.txt")
         .await?;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -262,6 +254,7 @@ impl TuiProc {
             .arg(server_url)
             .arg("--name")
             .arg(name)
+            .current_dir(home)
             .env("HOME", home)
             .env("SKYFFLA_TUI_SCRIPTED", "1")
             .stdin(Stdio::piped())

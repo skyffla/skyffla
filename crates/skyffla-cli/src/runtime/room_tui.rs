@@ -47,7 +47,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut ui = UiState::new(&config.stream_id, &config.peer_name, "room")
         .map_err(|error| CliError::local_io(error.to_string()))?;
-    let mut state = RoomTuiState::new(&config.peer_name);
+    let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
 
     ui.system("room session ready; use /help for commands".to_string());
     ui.render();
@@ -82,7 +82,11 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
             maybe_event = backend.stdout_rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        apply_room_event(&mut state, &mut ui, event);
+                        let follow_up = apply_room_event(&mut state, &mut ui, event);
+                        if let Some(command) = follow_up {
+                            send_machine_command(backend.stdin.as_mut(), &command).await?;
+                            apply_room_lines(&mut ui, local_command_feedback_lines(&state, &command));
+                        }
                         ui.render();
                     }
                     None => break,
@@ -116,7 +120,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
 async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(), CliError> {
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut input = BufReader::new(tokio::io::stdin()).lines();
-    let mut state = RoomTuiState::new(&config.peer_name);
+    let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
 
     loop {
         tokio::select! {
@@ -153,8 +157,15 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
             maybe_event = backend.stdout_rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        for line in summarize_room_event(&mut state, event) {
+                        let (lines, follow_up) = summarize_room_event(&mut state, event);
+                        for line in lines {
                             emit_scripted_line(&line).await?;
+                        }
+                        if let Some(command) = follow_up {
+                            send_machine_command(backend.stdin.as_mut(), &command).await?;
+                            for line in stringify_room_lines(local_command_feedback_lines(&state, &command)) {
+                                emit_scripted_line(&line).await?;
+                            }
                         }
                     }
                     None => break,
@@ -503,19 +514,19 @@ fn local_command_feedback_lines(state: &RoomTuiState, command: &MachineCommand) 
         }
         MachineCommand::AcceptChannel { channel_id } => {
             let label = state
-                .channel_label(channel_id)
+                .channel_summary(channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             vec![RoomLine::System(format!("accepting {label}"))]
         }
         MachineCommand::RejectChannel { channel_id, .. } => {
             let label = state
-                .channel_label(channel_id)
+                .channel_summary(channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             vec![RoomLine::System(format!("rejecting {label}"))]
         }
         MachineCommand::ExportChannelFile { channel_id, path } => {
             let label = state
-                .channel_label(channel_id)
+                .channel_summary(channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             vec![RoomLine::System(format!("saving {label} to {}", display_path(path)))]
         }
@@ -568,6 +579,7 @@ fn split_shell_words(line: &str) -> Result<Vec<String>, CliError> {
 
 struct RoomTuiState {
     local_name: String,
+    download_dir: PathBuf,
     next_file_channel_index: u64,
     self_member: Option<MemberId>,
     host_member: Option<MemberId>,
@@ -578,9 +590,10 @@ struct RoomTuiState {
 }
 
 impl RoomTuiState {
-    fn new(local_name: &str) -> Self {
+    fn new(local_name: &str, download_dir: PathBuf) -> Self {
         Self {
             local_name: local_name.to_string(),
+            download_dir,
             next_file_channel_index: 1,
             self_member: None,
             host_member: None,
@@ -624,7 +637,7 @@ impl RoomTuiState {
         self.ready_files.last().cloned()
     }
 
-    fn channel_label(&self, channel_id: &ChannelId) -> Option<String> {
+    fn channel_summary(&self, channel_id: &ChannelId) -> Option<String> {
         let file = self.file_channels.get(channel_id)?;
         let size_suffix = file
             .size
@@ -632,11 +645,10 @@ impl RoomTuiState {
             .map(|value| format!(" {value}"))
             .unwrap_or_default();
         Some(format!(
-            "{} {}{} ({})",
+            "{} {}{}",
             item_kind_label(file.item_kind.clone()),
             file.name,
-            size_suffix,
-            channel_id.as_str()
+            size_suffix
         ))
     }
 
@@ -706,7 +718,8 @@ impl RoomTuiState {
             .file_channels
             .get(channel_id)
             .ok_or_else(|| CliError::usage(format!("unknown file channel {}", channel_id.as_str())))?;
-        Ok(PathBuf::from(".")
+        Ok(self
+            .download_dir
             .join(&file.name)
             .display()
             .to_string())
@@ -720,7 +733,11 @@ struct FileChannelUiState {
     size: Option<u64>,
 }
 
-fn apply_room_event(state: &mut RoomTuiState, ui: &mut UiState, event: MachineEvent) {
+fn apply_room_event(
+    state: &mut RoomTuiState,
+    ui: &mut UiState,
+    event: MachineEvent,
+) -> Option<MachineCommand> {
     match &event {
         MachineEvent::RoomWelcome {
             room_id,
@@ -747,10 +764,15 @@ fn apply_room_event(state: &mut RoomTuiState, ui: &mut UiState, event: MachineEv
         }
         _ => {}
     }
-    apply_room_lines(ui, format_room_event_lines(state, event));
+    let (lines, follow_up) = format_room_event_lines(state, event);
+    apply_room_lines(ui, lines);
+    follow_up
 }
 
-fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec<RoomLine> {
+fn format_room_event_lines(
+    state: &mut RoomTuiState,
+    event: MachineEvent,
+) -> (Vec<RoomLine>, Option<MachineCommand>) {
     match event {
         MachineEvent::RoomWelcome {
             room_id,
@@ -760,36 +782,36 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
         } => {
             state.self_member = Some(self_member.clone());
             state.host_member = Some(host_member.clone());
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "joined room {} as {} (host {})",
                 room_id.as_str(),
                 self_member.as_str(),
                 host_member.as_str()
-            ))]
+            ))], None)
         }
         MachineEvent::MemberSnapshot { members } => {
             state.members = members
                 .into_iter()
                 .map(|member| (member.member_id, member.name))
                 .collect();
-            vec![RoomLine::System(state.member_roster_line())]
+            (vec![RoomLine::System(state.member_roster_line())], None)
         }
         MachineEvent::MemberJoined { member } => {
             state
                 .members
                 .insert(member.member_id.clone(), member.name.clone());
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "member joined: {} ({})",
                 member.name,
                 member.member_id.as_str()
-            ))]
+            ))], None)
         }
         MachineEvent::MemberLeft { member_id, reason } => {
             let name = state
                 .members
                 .remove(&member_id)
                 .unwrap_or_else(|| member_id.as_str().to_string());
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "member left: {} ({}){}",
                 name,
                 member_id.as_str(),
@@ -797,7 +819,7 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                     .as_deref()
                     .map(|value| format!(" - {value}"))
                     .unwrap_or_default()
-            ))]
+            ))], None)
         }
         MachineEvent::Chat {
             from_name,
@@ -810,15 +832,15 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                 Route::Member { member_id } => Some(member_id.as_str().to_string()),
             };
             if let Some(target) = target {
-                vec![RoomLine::Chat {
+                (vec![RoomLine::Chat {
                     speaker: format!("{from_name} -> {target}"),
                     text,
-                }]
+                }], None)
             } else {
-                vec![RoomLine::Chat {
+                (vec![RoomLine::Chat {
                     speaker: from_name,
                     text,
-                }]
+                }], None)
             }
         }
         MachineEvent::ChannelOpened {
@@ -878,15 +900,15 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                         channel_id.as_str()
                     ));
                 }
-                return vec![RoomLine::System(message)];
+                return (vec![RoomLine::System(message)], None);
             }
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "channel {} opened by {} kind={:?} to {}",
                 channel_id.as_str(),
                 from_name,
                 kind,
                 route
-            ))]
+            ))], None)
         }
         MachineEvent::ChannelAccepted {
             channel_id,
@@ -898,9 +920,9 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                 state.pending_incoming_files.retain(|id| id != &channel_id);
             }
             let label = state
-                .channel_label(&channel_id)
+                .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
-            vec![RoomLine::System(format!("{member_name} accepted {label}"))]
+            (vec![RoomLine::System(format!("{member_name} accepted {label}"))], None)
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -913,27 +935,27 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                 state.pending_incoming_files.retain(|id| id != &channel_id);
             }
             let label = state
-                .channel_label(&channel_id)
+                .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "{} rejected {label}{}",
                 member_name,
                 reason
                     .as_deref()
                     .map(|value| format!(" - {value}"))
                     .unwrap_or_default()
-            ))]
+            ))], None)
         }
         MachineEvent::ChannelData {
             channel_id,
             from_name,
             body,
             ..
-        } => vec![RoomLine::Chat {
+        } => (vec![RoomLine::Chat {
             speaker: format!("{from_name} [{}]", channel_id.as_str()),
             text: body,
-        }],
+        }], None),
         MachineEvent::ChannelClosed {
             channel_id,
             member_name,
@@ -942,35 +964,33 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
         } => {
             state.pending_incoming_files.retain(|id| id != &channel_id);
             let label = state
-                .channel_label(&channel_id)
+                .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.file_channels.remove(&channel_id);
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "{label} closed by {}{}",
                 member_name,
                 reason
                     .as_deref()
                     .map(|value| format!(" - {value}"))
                     .unwrap_or_default()
-            ))]
+            ))], None)
         }
         MachineEvent::ChannelFileReady { channel_id, .. } => {
             state.pending_incoming_files.retain(|id| id != &channel_id);
             if !state.ready_files.iter().any(|id| id == &channel_id) {
                 state.ready_files.push(channel_id.clone());
             }
-            let label = state
-                .channel_label(&channel_id)
-                .unwrap_or_else(|| channel_id.as_str().to_string());
-            vec![RoomLine::System(format!(
-                "{label} ready - /save {} [path] (default: {})",
-                channel_id.as_str(),
-                display_path(
-                    &state
-                        .default_save_path(&channel_id)
-                        .unwrap_or_else(|_| "./".to_string())
-                )
-            ))]
+            let save_path = state
+                .default_save_path(&channel_id)
+                .unwrap_or_else(|_| ".".to_string());
+            (
+                Vec::new(),
+                Some(MachineCommand::ExportChannelFile {
+                    channel_id,
+                    path: save_path,
+                }),
+            )
         }
         MachineEvent::ChannelFileExported {
             channel_id,
@@ -978,14 +998,14 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
             size,
         } => {
             let label = state
-                .channel_label(&channel_id)
+                .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
             state.ready_files.retain(|id| id != &channel_id);
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "{label} saved to {} ({})",
                 display_path(&path),
                 format_bytes(size)
-            ))]
+            ))], None)
         }
         MachineEvent::TransferProgress {
             phase,
@@ -996,21 +1016,21 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
             ..
         } => {
             if matches!(phase, TransferPhase::Preparing) {
-                return Vec::new();
+                return (Vec::new(), None);
             }
-            vec![RoomLine::System(format!(
+            (vec![RoomLine::System(format!(
                 "{} {} ({}) {}",
                 phase_label(&phase),
                 item_kind_label(item_kind),
                 name,
                 format_progress(bytes_complete, bytes_total).unwrap_or_default()
-            ))]
+            ))], None)
         }
         MachineEvent::Error {
             code,
             message,
             channel_id,
-        } => vec![RoomLine::System(format!(
+        } => (vec![RoomLine::System(format!(
             "error {}{}: {}",
             code,
             channel_id
@@ -1018,7 +1038,7 @@ fn format_room_event_lines(state: &mut RoomTuiState, event: MachineEvent) -> Vec
                 .map(|id| format!(" ({})", id.as_str()))
                 .unwrap_or_default(),
             message
-        ))],
+        ))], None),
     }
 }
 
@@ -1057,8 +1077,12 @@ fn scripted_mode() -> bool {
     std::env::var_os("SKYFFLA_TUI_SCRIPTED").is_some()
 }
 
-fn summarize_room_event(state: &mut RoomTuiState, event: MachineEvent) -> Vec<String> {
-    stringify_room_lines(format_room_event_lines(state, event))
+fn summarize_room_event(
+    state: &mut RoomTuiState,
+    event: MachineEvent,
+) -> (Vec<String>, Option<MachineCommand>) {
+    let (lines, follow_up) = format_room_event_lines(state, event);
+    (stringify_room_lines(lines), follow_up)
 }
 
 fn room_help_lines() -> &'static [&'static str] {
@@ -1069,9 +1093,9 @@ fn room_help_lines() -> &'static [&'static str] {
         "/send <all|member_id> <path>  send a file or folder",
         "/send <name> <path>  send to a named room member",
         "/send <path>  send to the only other room member in a 1:1 room",
-        "/accept [channel_id]  accept the newest pending file channel",
+        "/accept [channel_id]  accept and save the newest pending file channel",
         "/reject <channel_id> [reason]  reject a file channel",
-        "/save [channel_id] [path]  export a ready file channel (default: current folder)",
+        "/save [channel_id] [path]  re-export an accepted file channel",
         "/members  print the current roster",
         "/help  show this help",
         "/quit  leave the room",
@@ -1087,7 +1111,7 @@ mod tests {
 
     #[test]
     fn parses_room_chat_and_dm_commands() {
-        let mut state = RoomTuiState::new("alpha");
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         match parse_room_tui_input("hello room", &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendChat { to, text }) => {
                 assert_eq!(to, Route::All);
@@ -1129,7 +1153,7 @@ mod tests {
 
     #[test]
     fn parses_room_file_commands() {
-        let mut state = RoomTuiState::new("alpha");
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         match parse_room_tui_input(r#"/send all "./folder name""#, &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendFile {
                 channel_id,
@@ -1195,7 +1219,7 @@ mod tests {
 
     #[test]
     fn room_events_update_roster_and_identity() {
-        let mut state = RoomTuiState::new("alpha");
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
 
         apply_room_event(
