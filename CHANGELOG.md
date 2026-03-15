@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Regenerate `wrappers/python/uv.lock` during release cuts so tagged Python wrapper publishes stay consistent with the bumped package version and `uv sync --locked` succeeds in CI.
+
 ## [1.1.0] - 2026-03-15
 
 - Add the first published Python wrapper under `wrappers/python`, including async and sync room clients, typed machine models, runnable chat examples, and smoke coverage against the local `skyffla` binary.

@@ -186,9 +186,10 @@ perl -0pi -e 's/(\[workspace\.package\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")
 perl -0pi -e 's/(\[project\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' wrappers/python/pyproject.toml
 perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/python/src/skyffla/__about__.py
 
+uv lock --project wrappers/python >/dev/null
 cargo check >/dev/null
 
-FILES=(Cargo.toml CHANGELOG.md wrappers/python/pyproject.toml wrappers/python/src/skyffla/__about__.py)
+FILES=(Cargo.toml CHANGELOG.md wrappers/python/pyproject.toml wrappers/python/src/skyffla/__about__.py wrappers/python/uv.lock)
 if ! git diff --quiet -- Cargo.lock; then
   FILES+=(Cargo.lock)
 fi
