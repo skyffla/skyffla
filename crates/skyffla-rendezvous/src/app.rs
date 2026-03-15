@@ -337,6 +337,7 @@ mod tests {
     #[tokio::test]
     async fn put_then_get_room_via_http() {
         let app = test_app(10, false);
+        let version = RENDEZVOUS_API_VERSION.to_string();
 
         let put_response = app
             .clone()
@@ -359,6 +360,13 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(put_response.status(), StatusCode::OK);
+        assert_eq!(
+            put_response
+                .headers()
+                .get(RENDEZVOUS_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(version.as_str())
+        );
 
         let get_response = app
             .oneshot(
@@ -372,6 +380,13 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(get_response.status(), StatusCode::OK);
+        assert_eq!(
+            get_response
+                .headers()
+                .get(RENDEZVOUS_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(version.as_str())
+        );
         let body = get_response
             .into_body()
             .collect()

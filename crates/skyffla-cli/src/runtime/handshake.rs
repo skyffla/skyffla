@@ -40,13 +40,7 @@ pub(crate) async fn exchange_hello(
         .context("peer closed control stream before sending hello")?;
     let peer = match peer_hello.payload {
         ControlMessage::Hello(hello) => {
-            if !hello.protocol_version.is_compatible_with(WIRE_PROTOCOL_VERSION) {
-                bail!(
-                    "protocol version mismatch: local {}, peer {}",
-                    WIRE_PROTOCOL_VERSION,
-                    hello.protocol_version
-                );
-            }
+            ensure_wire_protocol_compatible(hello.protocol_version, "protocol version mismatch")?;
             if hello.session_mode != config.session_mode() {
                 bail!(
                     "session mode mismatch: local {:?}, peer {:?}",
@@ -78,16 +72,30 @@ pub(crate) async fn exchange_hello(
         .await?
         .context("peer closed control stream before sending hello ack")?;
     match peer_ack.payload {
-        ControlMessage::HelloAck(ack) if ack.protocol_version.is_compatible_with(WIRE_PROTOCOL_VERSION) => {
+        ControlMessage::HelloAck(ack) => {
+            ensure_wire_protocol_compatible(
+                ack.protocol_version,
+                "protocol version mismatch in hello ack",
+            )?;
             Ok(peer)
         }
-        ControlMessage::HelloAck(ack) => bail!(
-            "protocol version mismatch in hello ack: local {}, peer {}",
-            WIRE_PROTOCOL_VERSION,
-            ack.protocol_version
-        ),
         other => bail!("expected hello ack from peer, got {:?}", other),
     }
+}
+
+fn ensure_wire_protocol_compatible(
+    peer_version: skyffla_protocol::ProtocolVersion,
+    context: &str,
+) -> Result<()> {
+    if peer_version.is_compatible_with(WIRE_PROTOCOL_VERSION) {
+        return Ok(());
+    }
+
+    bail!(
+        "{context}: local {}, peer {}",
+        WIRE_PROTOCOL_VERSION,
+        peer_version
+    )
 }
 
 pub(crate) async fn send_chat_message(
@@ -229,4 +237,24 @@ fn format_digest_suffix(digest: Option<&skyffla_protocol::Digest>) -> String {
     digest
         .map(|digest| format!(" [{}:{}]", digest.algorithm, digest.value_hex))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use skyffla_protocol::ProtocolVersion;
+
+    use super::ensure_wire_protocol_compatible;
+
+    #[test]
+    fn wire_handshake_allows_minor_differences_with_same_major() {
+        let peer = ProtocolVersion::new(1, 7);
+        assert!(ensure_wire_protocol_compatible(peer, "peer hello").is_ok());
+    }
+
+    #[test]
+    fn wire_handshake_rejects_different_major_versions() {
+        let peer = ProtocolVersion::new(2, 0);
+        let error = ensure_wire_protocol_compatible(peer, "peer hello").unwrap_err();
+        assert!(error.to_string().contains("local 1.0, peer 2.0"));
+    }
 }
