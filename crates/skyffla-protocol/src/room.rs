@@ -190,6 +190,7 @@ impl Member {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MachineCommand {
+    LeaveRoom,
     SendChat {
         to: Route,
         text: String,
@@ -234,6 +235,7 @@ pub enum MachineCommand {
 impl MachineCommand {
     pub fn validate(&self) -> Result<(), RoomProtocolError> {
         match self {
+            Self::LeaveRoom => Ok(()),
             Self::SendChat { to, text } => {
                 to.validate()?;
                 if text.trim().is_empty() {
@@ -317,6 +319,9 @@ pub enum MachineEvent {
     MemberLeft {
         member_id: MemberId,
         reason: Option<String>,
+    },
+    RoomClosed {
+        reason: String,
     },
     Chat {
         from: MemberId,
@@ -420,6 +425,12 @@ impl MachineEvent {
             Self::MemberLeft { member_id, .. } => {
                 if member_id.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "member_id" });
+                }
+                Ok(())
+            }
+            Self::RoomClosed { reason } => {
+                if reason.trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "reason" });
                 }
                 Ok(())
             }

@@ -564,6 +564,7 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberSnapshot { .. }
         | MachineEvent::MemberJoined { .. }
         | MachineEvent::MemberLeft { .. }
+        | MachineEvent::RoomClosed { .. }
         | MachineEvent::ChannelFileReady { .. }
         | MachineEvent::ChannelFileExported { .. }
         | MachineEvent::TransferProgress { .. }

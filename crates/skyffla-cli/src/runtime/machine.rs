@@ -274,6 +274,15 @@ async fn handle_host_input(
 ) -> Result<LoopControl, CliError> {
     match input {
         HostInput::LocalCommand(command) => {
+            if matches!(command, MachineCommand::LeaveRoom) {
+                broadcast_room_closed(
+                    peers,
+                    MachineEvent::RoomClosed {
+                        reason: "host left".into(),
+                    },
+                )?;
+                return Ok(LoopControl::Break);
+            }
             if let Err(error) = handle_host_command(
                 room,
                 host_member,
@@ -336,6 +345,19 @@ async fn handle_host_input(
         }
         HostInput::PeerCommand { member_id, command } => {
             if peers.contains_key(&member_id) {
+                if matches!(command, MachineCommand::LeaveRoom) {
+                    if let Ok(dispatch) = room.leave(&member_id, Some("left room".into())) {
+                        deliver_routed_events(
+                            host_member,
+                            dispatch.to_remaining_members,
+                            stdout,
+                            peers,
+                        )
+                        .await?;
+                    }
+                    peers.remove(&member_id);
+                    return Ok(LoopControl::Continue);
+                }
                 if let Err(error) = handle_host_command(
                     room,
                     &member_id,
@@ -475,6 +497,12 @@ async fn handle_join_stdin_input(
 ) -> Result<bool, CliError> {
     match input {
         Some(JoinStdinInput::LocalCommand(command)) => {
+            if matches!(command, MachineCommand::LeaveRoom) {
+                if join_state.self_member.is_some() {
+                    send_peer_command(authority_send, &command).await?;
+                }
+                return Ok(true);
+            }
             if join_state.self_member.is_none() {
                 emit_event(
                     stdout,
@@ -525,7 +553,7 @@ async fn handle_join_authority_message(
         Some(AuthorityLinkMessage::MachineEvent { event }) => {
             apply_machine_event(join_state, &event);
             emit_event(stdout, &event).await?;
-            Ok(false)
+            Ok(matches!(event, MachineEvent::RoomClosed { .. }))
         }
         Some(AuthorityLinkMessage::PeerConnect {
             member,
@@ -566,7 +594,14 @@ async fn handle_join_authority_message(
         Some(AuthorityLinkMessage::MachineCommand { .. }) => Err(CliError::protocol(
             "joiner received unexpected command on authority link",
         )),
-        None => Ok(true),
+        None => {
+            let event = MachineEvent::RoomClosed {
+                reason: "host disconnected".into(),
+            };
+            apply_machine_event(join_state, &event);
+            emit_event(stdout, &event).await?;
+            Ok(true)
+        }
     }
 }
 
@@ -763,6 +798,7 @@ async fn handle_join_command(
         .ok_or_else(|| CliError::protocol("machine room is not ready yet"))?;
 
     match command {
+        MachineCommand::LeaveRoom => Ok(()),
         MachineCommand::SendChat { to, text } => {
             let event = MachineEvent::Chat {
                 from: self_member.clone(),
@@ -1183,6 +1219,19 @@ async fn handle_host_command(
     command.validate().map_err(protocol_error)?;
 
     match command {
+        MachineCommand::LeaveRoom => {
+            if !local_command {
+                return Err(CliError::usage(
+                    "leave_room is only valid as a local machine command",
+                ));
+            }
+            broadcast_room_closed(
+                peers,
+                MachineEvent::RoomClosed {
+                    reason: "host left".into(),
+                },
+            )
+        }
         MachineCommand::SendChat { to, text } => {
             let routed = room.send_chat(sender, to, text).map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
@@ -1392,6 +1441,7 @@ fn command_error_event(code: &str, message: &str, channel_id: Option<ChannelId>)
 
 fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
     match command {
+        MachineCommand::LeaveRoom => None,
         MachineCommand::SendChat { .. } => None,
         MachineCommand::SendFile { channel_id, .. }
         | MachineCommand::OpenChannel { channel_id, .. }
@@ -1401,6 +1451,21 @@ fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
         | MachineCommand::CloseChannel { channel_id, .. }
         | MachineCommand::ExportChannelFile { channel_id, .. } => Some(channel_id.clone()),
     }
+}
+
+fn broadcast_room_closed(
+    peers: &BTreeMap<MemberId, PeerHandle>,
+    event: MachineEvent,
+) -> Result<(), CliError> {
+    for peer in peers.values() {
+        send_link_message(
+            &peer.authority_sender,
+            AuthorityLinkMessage::MachineEvent {
+                event: event.clone(),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 async fn emit_event(stdout: &mut tokio::io::Stdout, event: &MachineEvent) -> Result<(), CliError> {

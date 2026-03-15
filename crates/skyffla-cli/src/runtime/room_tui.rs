@@ -59,7 +59,8 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                 if let Some(line) = ui.handle_key_event(key) {
                     match parse_room_tui_input(&line, &mut state) {
                         Ok(RoomTuiInput::Quit) => {
-                            let _ = backend.child.kill().await;
+                            let _ = request_backend_leave(&mut backend).await;
+                            let _ = backend.child.wait().await;
                             break;
                         }
                         Ok(RoomTuiInput::Help) => {
@@ -128,7 +129,8 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                 match line {
                     Ok(Some(line)) => match parse_room_tui_input(&line, &mut state) {
                         Ok(RoomTuiInput::Quit) => {
-                            let _ = backend.child.kill().await;
+                            let _ = request_backend_leave(&mut backend).await;
+                            let _ = backend.child.wait().await;
                             break;
                         }
                         Ok(RoomTuiInput::Help) => {
@@ -319,6 +321,12 @@ async fn send_machine_command(
         .await
         .context("failed to flush machine command")
         .map_err(|error| CliError::runtime(error.to_string()))?;
+    Ok(())
+}
+
+async fn request_backend_leave(backend: &mut RoomBackend) -> Result<(), CliError> {
+    send_machine_command(backend.stdin.as_mut(), &MachineCommand::LeaveRoom).await?;
+    backend.stdin.take();
     Ok(())
 }
 
@@ -833,6 +841,9 @@ fn format_room_event_lines(
                     .map(|value| format!(" - {value}"))
                     .unwrap_or_default()
             ))], None)
+        }
+        MachineEvent::RoomClosed { reason } => {
+            (vec![RoomLine::System(format!("room closed: {reason}"))], None)
         }
         MachineEvent::Chat {
             from_name,

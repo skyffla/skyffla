@@ -101,6 +101,8 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
     let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
 
     host.expect_line_contains("member joined: beta (m2)").await?;
+    join.expect_line_contains("joined room").await?;
+    join.expect_line_contains("members:").await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
 
@@ -226,6 +228,74 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     alpha.shutdown().await?;
     beta.shutdown().await?;
     gamma.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_tui_announces_when_member_leaves() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let alpha_home = fresh_test_dir("skyffla-cli-room-tui-host");
+    let beta_home = fresh_test_dir("skyffla-cli-room-tui-beta");
+    let gamma_home = fresh_test_dir("skyffla-cli-room-tui-gamma");
+    for home in [&alpha_home, &beta_home, &gamma_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut alpha = TuiProc::spawn("host", &room, &server.url, "alpha", &alpha_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = TuiProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+    let mut gamma = TuiProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
+
+    alpha.expect_line_contains("member joined: beta").await?;
+    alpha.expect_line_contains("member joined: gamma").await?;
+    beta.expect_line_contains("members:").await?;
+    gamma.expect_line_contains("members:").await?;
+
+    beta.send_line("/quit").await?;
+    alpha.expect_line_contains("member left: beta")
+        .await?;
+    gamma.expect_line_contains("member left: beta")
+        .await?;
+
+    alpha.shutdown().await?;
+    gamma.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_tui_announces_when_host_leaves() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let alpha_home = fresh_test_dir("skyffla-cli-room-tui-host");
+    let beta_home = fresh_test_dir("skyffla-cli-room-tui-beta");
+    for home in [&alpha_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut alpha = TuiProc::spawn("host", &room, &server.url, "alpha", &alpha_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = TuiProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+
+    alpha.expect_line_contains("member joined: beta (m2)").await?;
+    beta.expect_line_contains("joined room").await?;
+
+    alpha.send_line("/quit").await?;
+    beta.expect_line_contains("room closed: host left").await?;
+
+    beta.shutdown().await?;
+    alpha.shutdown().await?;
     server.abort();
     Ok(())
 }

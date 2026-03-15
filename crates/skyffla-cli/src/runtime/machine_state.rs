@@ -77,6 +77,12 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             state.peer_links.remove(member_id);
             prune_join_channels_for_member(state, member_id);
         }
+        MachineEvent::RoomClosed { .. } => {
+            state.members.clear();
+            state.member_tickets.clear();
+            state.channels.clear();
+            state.peer_links.clear();
+        }
         MachineEvent::ChannelOpened {
             channel_id,
             kind,
