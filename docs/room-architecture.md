@@ -9,7 +9,7 @@ Make multi-party rooms the native Skyffla abstraction.
 - a room is the thing users join
 - 1:1 is just a room with two members
 - any member can broadcast to all or target one member
-- TUI, `machine`, and language wrappers must all sit on the same room model
+- Terminal UI (TUI), `machine`, and language wrappers must all sit on the same room model
 - wrappers must not reimplement transport or protocol logic
 
 This is not a full network mesh in v1. It is a native multi-party, mesh-oriented

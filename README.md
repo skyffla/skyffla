@@ -23,7 +23,7 @@ Its native model is:
 
 The primary room surfaces are:
 
-- a room-native TUI for people
+- a room-native Terminal UI (TUI) for people
 - a framed `machine` protocol for wrappers and automation
 
 It also includes raw full-duplex `--stdio` for 1:1 byte streams when you do not
@@ -37,7 +37,7 @@ room control, peer introduction, file transfer, and terminal UX stack first.
 - Multi-party is native. A room is the product abstraction; 1:1 is just a room with two members.
 - Mesh-oriented where it matters. Room authority is host-owned, but chat and payload traffic are peer-to-peer between members.
 - Direct by default. Chat, file/folder transfer, and channel traffic stay peer-to-peer once a room is established.
-- One room model across human and machine surfaces. The TUI and `machine` speak the same room protocol.
+- One room model across human and machine surfaces. The Terminal UI (TUI) and `machine` speak the same room protocol.
 - Easy to adopt. Use the public rendezvous by default, or self-host `skyffla-rendezvous` when you need control.
 
 ## Install
