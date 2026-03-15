@@ -1,8 +1,11 @@
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 mod support;
 
@@ -31,7 +34,6 @@ async fn stdio_host_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["host", room.as_str(), "--name", "host"],
     )?;
-    write_child_stdin(&mut host, host_payload, "host stdin").await?;
 
     wait_for_room_ready(&server.url, &room).await?;
 
@@ -41,7 +43,12 @@ async fn stdio_host_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["join", room.as_str(), "--name", "join"],
     )?;
-    write_child_stdin(&mut join, join_payload, "join stdin").await?;
+    host.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    join.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    host.write_stdin_and_close(host_payload, "host stdin")
+        .await?;
+    join.write_stdin_and_close(join_payload, "join stdin")
+        .await?;
 
     let join_output = wait_for_output(join, "join process").await?;
     let host_output = wait_for_output(host, "host process").await?;
@@ -88,7 +95,6 @@ async fn stdio_join_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["join", room.as_str(), "--name", "first"],
     )?;
-    write_child_stdin(&mut first, first_payload, "first join stdin").await?;
 
     wait_for_room_ready(&server.url, &room).await?;
 
@@ -98,7 +104,18 @@ async fn stdio_join_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["join", room.as_str(), "--name", "second"],
     )?;
-    write_child_stdin(&mut second, second_payload, "second join stdin").await?;
+    // Wait until both peers have negotiated into stdio mode before sending bytes.
+    // The promoted-join host path is otherwise timing-sensitive in CI.
+    first.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    second
+        .wait_for_stderr_contains("\"state\":\"Stdio ")
+        .await?;
+    first
+        .write_stdin_and_close(first_payload, "first join stdin")
+        .await?;
+    second
+        .write_stdin_and_close(second_payload, "second join stdin")
+        .await?;
 
     let second_output = wait_for_output(second, "second join process").await?;
     let first_output = wait_for_output(first, "first join process").await?;
@@ -130,7 +147,7 @@ fn spawn_stdio_peer<const N: usize>(
     label: &str,
     server_url: &str,
     args: [&str; N],
-) -> Result<Child> {
+) -> Result<SpawnedPeer> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_skyffla"));
     command
         .args(args)
@@ -142,29 +159,24 @@ fn spawn_stdio_peer<const N: usize>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command
+    let mut child = command
         .spawn()
-        .with_context(|| format!("failed to spawn {label} process"))
-}
-
-async fn write_child_stdin(child: &mut Child, payload: &[u8], label: &str) -> Result<()> {
-    let mut stdin = child
-        .stdin
+        .with_context(|| format!("failed to spawn {label} process"))?;
+    let stderr = child
+        .stderr
         .take()
-        .with_context(|| format!("{label} missing"))?;
-    stdin
-        .write_all(payload)
-        .await
-        .with_context(|| format!("failed to write {label}"))?;
-    drop(stdin);
-    Ok(())
+        .with_context(|| format!("{label} stderr missing"))?;
+    let stderr_seen = Arc::new(Mutex::new(String::new()));
+    let stderr_task = spawn_stderr_reader(stderr, stderr_seen.clone());
+    Ok(SpawnedPeer {
+        child,
+        stderr_seen,
+        stderr_task,
+    })
 }
 
-async fn wait_for_output(child: Child, label: &str) -> Result<std::process::Output> {
-    tokio::time::timeout(PROCESS_TIMEOUT, child.wait_with_output())
-        .await
-        .with_context(|| format!("{label} watchdog timed out"))?
-        .with_context(|| format!("{label} failed while waiting for output"))
+async fn wait_for_output(peer: SpawnedPeer, label: &str) -> Result<std::process::Output> {
+    peer.wait_for_output(label).await
 }
 
 fn assert_success(status: &ExitStatus, label: &str, stdout: &[u8], stderr: &[u8]) {
@@ -174,4 +186,110 @@ fn assert_success(status: &ExitStatus, label: &str, stdout: &[u8], stderr: &[u8]
         String::from_utf8_lossy(stdout),
         String::from_utf8_lossy(stderr)
     );
+}
+
+struct SpawnedPeer {
+    child: Child,
+    stderr_seen: Arc<Mutex<String>>,
+    stderr_task: JoinHandle<Result<()>>,
+}
+
+impl SpawnedPeer {
+    async fn write_stdin_and_close(&mut self, payload: &[u8], label: &str) -> Result<()> {
+        let mut stdin = self
+            .child
+            .stdin
+            .take()
+            .with_context(|| format!("{label} missing"))?;
+        stdin
+            .write_all(payload)
+            .await
+            .with_context(|| format!("failed to write {label}"))?;
+        drop(stdin);
+        Ok(())
+    }
+
+    async fn wait_for_stderr_contains(&self, needle: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            {
+                let stderr = self.stderr_seen.lock().await;
+                if stderr.contains(needle) {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let stderr = self.stderr_seen.lock().await.clone();
+                anyhow::bail!("timed out waiting for {needle} in stderr:\n{stderr}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_output(mut self, label: &str) -> Result<std::process::Output> {
+        match tokio::time::timeout(PROCESS_TIMEOUT, self.child.wait()).await {
+            Ok(status) => {
+                let status =
+                    status.with_context(|| format!("{label} failed while waiting for exit"))?;
+                let mut stdout = Vec::new();
+                if let Some(mut child_stdout) = self.child.stdout.take() {
+                    child_stdout
+                        .read_to_end(&mut stdout)
+                        .await
+                        .with_context(|| format!("failed to read {label} stdout"))?;
+                }
+                self.stderr_task
+                    .await
+                    .context("stderr reader task panicked")??;
+                let stderr = self.stderr_seen.lock().await.clone().into_bytes();
+                Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                })
+            }
+            Err(_) => {
+                let _ = self.child.kill().await;
+                let _status =
+                    self.child.wait().await.with_context(|| {
+                        format!("{label} failed while collecting timeout status")
+                    })?;
+                let mut stdout = Vec::new();
+                if let Some(mut child_stdout) = self.child.stdout.take() {
+                    child_stdout
+                        .read_to_end(&mut stdout)
+                        .await
+                        .with_context(|| format!("failed to read {label} stdout"))?;
+                }
+                self.stderr_task
+                    .await
+                    .context("stderr reader task panicked")??;
+                let stderr = self.stderr_seen.lock().await.clone().into_bytes();
+                anyhow::bail!(
+                    "{label} watchdog timed out\nstdout={}\nstderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
+            }
+        }
+    }
+}
+
+fn spawn_stderr_reader(
+    stderr: tokio::process::ChildStderr,
+    stderr_seen: Arc<Mutex<String>>,
+) -> JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .context("failed to read child stderr")?
+        {
+            let mut seen = stderr_seen.lock().await;
+            seen.push_str(&line);
+            seen.push('\n');
+        }
+        Ok(())
+    })
 }

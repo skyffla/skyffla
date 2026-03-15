@@ -83,54 +83,62 @@ if [[ ! "${CI_TIMEOUT_SECONDS}" =~ ^[0-9]+$ || "${CI_TIMEOUT_SECONDS}" -le 0 ]];
   exit 1
 fi
 
-CI_DEADLINE="$(( $(date +%s) + CI_TIMEOUT_SECONDS ))"
-LAST_CI_STATE=""
+wait_for_ci_success() {
+  local commit_sha="$1"
+  local ci_deadline last_ci_state ci_run_line ci_state
+  local ci_run_id ci_status ci_conclusion
 
-while :; do
-  CI_RUN_LINE="$(
-    gh run list \
-      -R "${REPO_SLUG}" \
-      --workflow ci.yml \
-      --branch main \
-      --commit "${HEAD_SHA}" \
-      --json databaseId,status,conclusion \
-      --jq 'map(select(.databaseId != null))[0] | if . then [.databaseId, .status, (.conclusion // "")] | @tsv else empty end' \
-      -L 10
-  )"
+  ci_deadline="$(( $(date +%s) + CI_TIMEOUT_SECONDS ))"
+  last_ci_state=""
 
-  if [[ -z "${CI_RUN_LINE}" ]]; then
-    CI_STATE="missing"
+  while :; do
+    ci_run_line="$(
+      gh run list \
+        -R "${REPO_SLUG}" \
+        --workflow ci.yml \
+        --branch main \
+        --commit "${commit_sha}" \
+        --json databaseId,status,conclusion \
+        --jq 'map(select(.databaseId != null))[0] | if . then [.databaseId, .status, (.conclusion // "")] | @tsv else empty end' \
+        -L 10
+    )"
 
-    if [[ "${CI_STATE}" != "${LAST_CI_STATE}" ]]; then
-      echo "waiting for CI to start for ${HEAD_SHA} on main..." >&2
-      LAST_CI_STATE="${CI_STATE}"
-    fi
-  else
-    IFS=$'\t' read -r CI_RUN_ID CI_STATUS CI_CONCLUSION <<<"${CI_RUN_LINE}"
-    CI_STATE="${CI_RUN_ID}:${CI_STATUS}:${CI_CONCLUSION}"
+    if [[ -z "${ci_run_line}" ]]; then
+      ci_state="missing"
 
-    if [[ "${CI_STATE}" != "${LAST_CI_STATE}" ]]; then
-      echo "CI run ${CI_RUN_ID} status: ${CI_STATUS}${CI_CONCLUSION:+ (${CI_CONCLUSION})}" >&2
-      LAST_CI_STATE="${CI_STATE}"
-    fi
+      if [[ "${ci_state}" != "${last_ci_state}" ]]; then
+        echo "waiting for CI to start for ${commit_sha} on main..." >&2
+        last_ci_state="${ci_state}"
+      fi
+    else
+      IFS=$'\t' read -r ci_run_id ci_status ci_conclusion <<<"${ci_run_line}"
+      ci_state="${ci_run_id}:${ci_status}:${ci_conclusion}"
 
-    if [[ "${CI_STATUS}" == "completed" ]]; then
-      if [[ "${CI_CONCLUSION}" == "success" ]]; then
-        break
+      if [[ "${ci_state}" != "${last_ci_state}" ]]; then
+        echo "CI run ${ci_run_id} status: ${ci_status}${ci_conclusion:+ (${ci_conclusion})}" >&2
+        last_ci_state="${ci_state}"
       fi
 
-      echo "CI run ${CI_RUN_ID} finished with conclusion: ${CI_CONCLUSION}" >&2
-      exit 1
+      if [[ "${ci_status}" == "completed" ]]; then
+        if [[ "${ci_conclusion}" == "success" ]]; then
+          return 0
+        fi
+
+        echo "CI run ${ci_run_id} finished with conclusion: ${ci_conclusion}" >&2
+        return 1
+      fi
     fi
-  fi
 
-  if [[ "$(date +%s)" -ge "${CI_DEADLINE}" ]]; then
-    echo "timed out after ${CI_TIMEOUT_SECONDS}s waiting for CI on ${HEAD_SHA}" >&2
-    exit 1
-  fi
+    if [[ "$(date +%s)" -ge "${ci_deadline}" ]]; then
+      echo "timed out after ${CI_TIMEOUT_SECONDS}s waiting for CI on ${commit_sha}" >&2
+      return 1
+    fi
 
-  sleep "${CI_POLL_INTERVAL}"
-done
+    sleep "${CI_POLL_INTERVAL}"
+  done
+}
+
+wait_for_ci_success "${HEAD_SHA}"
 
 TODAY="$(date +%F)"
 
@@ -196,12 +204,15 @@ fi
 
 git add "${FILES[@]}"
 git commit -m "Release ${TAG}"
-git tag "${TAG}"
 
 if [[ "${PUSH}" -eq 1 ]]; then
   git push origin HEAD
+  RELEASE_SHA="$(git rev-parse HEAD)"
+  wait_for_ci_success "${RELEASE_SHA}"
+  git tag "${TAG}"
   git push origin "${TAG}"
 else
+  git tag "${TAG}"
   cat <<EOF
 Created release commit and tag:
   $(git rev-parse --short HEAD) (${TAG})
