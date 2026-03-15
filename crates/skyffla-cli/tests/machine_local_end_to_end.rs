@@ -13,8 +13,8 @@ use tokio::time::sleep;
 mod support;
 
 use support::{
-    acquire_local_discovery_test_guard, fresh_test_dir, local_discovery_available, unique_room_name,
-    LOCAL_DISCOVERY_BOOTSTRAP_DELAY, LOCAL_JOIN_PROMOTION_DELAY, PROCESS_TIMEOUT,
+    acquire_local_discovery_test_guard, fresh_test_dir, local_discovery_available,
+    unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY, LOCAL_JOIN_PROMOTION_DELAY, PROCESS_TIMEOUT,
 };
 
 const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
@@ -86,11 +86,12 @@ async fn machine_local_two_joins_connect_after_promotion_and_chat() -> Result<()
 
     let room = unique_room_name();
     let mut alpha = MachineProc::spawn_local("join", &room, "alpha", &home_dir).await?;
-    alpha.expect_event("initial self snapshot", |event| {
-        event.get("type") == Some(&Value::String("member_snapshot".into()))
-            && member_count(event) == Some(1)
-    })
-    .await?;
+    alpha
+        .expect_event("initial self snapshot", |event| {
+            event.get("type") == Some(&Value::String("member_snapshot".into()))
+                && member_count(event) == Some(1)
+        })
+        .await?;
 
     sleep(LOCAL_JOIN_PROMOTION_DELAY).await;
 
@@ -106,12 +107,14 @@ async fn machine_local_two_joins_connect_after_promotion_and_chat() -> Result<()
             && member_count(event) == Some(2)
     })
     .await?;
-    alpha.expect_stderr_contains("\"member_name\":\"beta\"")
+    alpha
+        .expect_stderr_contains("\"member_name\":\"beta\"")
         .await?;
     beta.expect_stderr_contains("\"member_name\":\"alpha\"")
         .await?;
 
-    alpha.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello from promoted join"}"#)
+    alpha
+        .send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello from promoted join"}"#)
         .await?;
     beta.expect_event("alpha chat", |event| {
         event.get("type") == Some(&Value::String("chat".into()))
