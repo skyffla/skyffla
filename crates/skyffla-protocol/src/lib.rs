@@ -1,4 +1,6 @@
 mod framing;
+pub mod room;
+pub mod room_link;
 
 use std::fmt;
 
@@ -8,13 +10,42 @@ pub use framing::{
     decode_frame, encode_frame, read_frame, write_frame, FrameError, MAX_FRAME_SIZE,
 };
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtocolVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl ProtocolVersion {
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+
+    pub const fn is_compatible_with(self, other: Self) -> bool {
+        self.major == other.major
+    }
+}
+
+impl fmt::Display for ProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TransportCapability {
     NativeDirect,
     WebsocketRelay,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Stdio,
+    Machine,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,7 +88,7 @@ pub enum MessageType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Envelope {
-    pub version: u16,
+    pub version: ProtocolVersion,
     pub session_id: String,
     pub message_id: String,
     pub message_type: MessageType,
@@ -72,7 +103,7 @@ impl Envelope {
     ) -> Self {
         let message_type = payload.message_type();
         Self {
-            version: PROTOCOL_VERSION,
+            version: WIRE_PROTOCOL_VERSION,
             session_id: session_id.into(),
             message_id: message_id.into(),
             message_type,
@@ -126,17 +157,19 @@ impl ControlMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Hello {
-    pub protocol_version: u16,
+    pub protocol_version: ProtocolVersion,
     pub session_id: String,
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,
+    pub peer_ticket: Option<String>,
     pub capabilities: Capabilities,
     pub transport_capabilities: Vec<TransportCapability>,
+    pub session_mode: SessionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HelloAck {
-    pub protocol_version: u16,
+    pub protocol_version: ProtocolVersion,
     pub session_id: String,
 }
 

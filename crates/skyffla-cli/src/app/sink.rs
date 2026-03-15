@@ -1,5 +1,4 @@
 use serde_json::json;
-use skyffla_protocol::Digest;
 use skyffla_session::RuntimeEvent;
 
 use crate::config::SessionConfig;
@@ -78,7 +77,8 @@ impl EventSink {
     }
 }
 
-pub(crate) fn digest_json(digest: Option<&Digest>) -> serde_json::Value {
+#[cfg(test)]
+pub(crate) fn digest_json(digest: Option<&skyffla_protocol::Digest>) -> serde_json::Value {
     match digest {
         Some(digest) => json!({
             "algorithm": digest.algorithm,
@@ -185,6 +185,7 @@ mod tests {
                 session_id: "room".into(),
                 peer_name: "alice".into(),
                 peer_fingerprint: Some("fp".into()),
+                peer_ticket: None,
             },
         };
 

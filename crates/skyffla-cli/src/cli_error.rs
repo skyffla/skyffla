@@ -10,7 +10,6 @@ pub(crate) enum CliExitCode {
     Rendezvous = 10,
     Transport = 11,
     Protocol = 12,
-    TransferRejected = 20,
     TransferCancelled = 21,
     PeerError = 22,
     LocalIo = 23,
@@ -44,10 +43,6 @@ impl CliError {
 
     pub(crate) fn protocol(message: impl Into<String>) -> Self {
         Self::new(CliExitCode::Protocol, "protocol_error", message)
-    }
-
-    pub(crate) fn rejected(message: impl Into<String>) -> Self {
-        Self::new(CliExitCode::TransferRejected, "transfer_rejected", message)
     }
 
     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
@@ -106,15 +101,3 @@ impl fmt::Display for CliError {
 }
 
 impl std::error::Error for CliError {}
-
-#[cfg(test)]
-mod tests {
-    use super::{CliError, CliExitCode};
-
-    #[test]
-    fn rejected_error_uses_stable_exit_code() {
-        let error = CliError::rejected("no thanks");
-        assert_eq!(error.exit_code, CliExitCode::TransferRejected);
-        assert_eq!(error.code, "transfer_rejected");
-    }
-}

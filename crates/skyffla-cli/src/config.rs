@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
+use skyffla_protocol::SessionMode;
 
-use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+#[cfg(test)]
+use crate::accept_policy::AutoAcceptPolicy;
+use crate::accept_policy::AutoAcceptTarget;
 use crate::cli_error::CliError;
-use crate::local_state::{load_local_state, local_state_file_path};
 
 pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
 
@@ -27,7 +29,9 @@ pub(crate) enum Command {
 
 #[derive(Args, Clone)]
 pub(crate) struct SessionArgs {
-    pub(crate) stream_id: Option<String>,
+    pub(crate) room_id: Option<String>,
+    #[arg(value_enum)]
+    pub(crate) surface: Option<ClientSurface>,
     #[arg(
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
@@ -38,8 +42,6 @@ pub(crate) struct SessionArgs {
     pub(crate) download_dir: PathBuf,
     #[arg(long)]
     pub(crate) name: Option<String>,
-    #[arg(long)]
-    pub(crate) message: Option<String>,
     #[arg(long)]
     pub(crate) stdio: bool,
     #[arg(long)]
@@ -52,45 +54,37 @@ pub(crate) struct SessionArgs {
     pub(crate) reject_all: bool,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientSurface {
+    Machine,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Role {
     Host,
     Join,
 }
 
+#[derive(Clone)]
 pub(crate) struct SessionConfig {
     pub(crate) role: Role,
     pub(crate) stream_id: String,
     pub(crate) rendezvous_server: String,
     pub(crate) download_dir: PathBuf,
     pub(crate) peer_name: String,
-    pub(crate) outgoing_message: Option<String>,
     pub(crate) stdio: bool,
+    pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
-    pub(crate) auto_accept_policy: AutoAcceptPolicy,
-    pub(crate) auto_accept_source: &'static str,
 }
 
 impl SessionConfig {
     pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
-        validate_stdio_message_flags(args.stdio, args.message.as_deref())
-            .map_err(|error| CliError::usage(error.to_string()))?;
-        let stream_id = resolve_stream_id(args.stream_id, std::env::var("SKYFFLA_STREAM_ID").ok())
+        let stream_id = resolve_stream_id(args.room_id, std::env::var("SKYFFLA_STREAM_ID").ok())
             .ok_or_else(|| {
-                CliError::usage(
-                    "missing stream id: pass it as an argument or set SKYFFLA_STREAM_ID",
-                )
+                CliError::usage("missing room id: pass it as an argument or set SKYFFLA_STREAM_ID")
             })?;
         validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
-        let state_path = local_state_file_path();
-        let stored_state =
-            load_local_state(&state_path).map_err(|error| CliError::local_io(error.to_string()))?;
-        let (auto_accept_policy, auto_accept_source) = resolve_auto_accept_policy(
-            &stored_state.auto_accept_policy,
-            &args.auto_accept,
-            args.reject_all,
-        );
         Ok(Self {
             role,
             stream_id,
@@ -101,13 +95,19 @@ impl SessionConfig {
                 std::env::var("USER").ok(),
                 std::env::var("USERNAME").ok(),
             ),
-            outgoing_message: args.message,
             stdio: args.stdio,
+            machine: matches!(args.surface, Some(ClientSurface::Machine)),
             json_events: args.json,
             local_mode: args.local,
-            auto_accept_policy,
-            auto_accept_source,
         })
+    }
+
+    pub(crate) fn session_mode(&self) -> SessionMode {
+        if self.machine {
+            SessionMode::Machine
+        } else {
+            SessionMode::Stdio
+        }
     }
 }
 
@@ -130,13 +130,7 @@ fn resolve_peer_name(
         .unwrap_or_else(|| "skyffla-peer".into())
 }
 
-fn validate_stdio_message_flags(stdio: bool, message: Option<&str>) -> Result<()> {
-    if stdio && message.is_some() {
-        bail!("--stdio cannot be combined with --message");
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn resolve_auto_accept_policy(
     persisted: &AutoAcceptPolicy,
     cli_targets: &[AutoAcceptTarget],
@@ -171,8 +165,7 @@ fn validate_stream_id(stream_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id,
-        validate_stdio_message_flags, validate_stream_id,
+        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id, validate_stream_id,
     };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
@@ -203,13 +196,6 @@ mod tests {
             "username-name"
         );
         assert_eq!(resolve_peer_name(None, None, None), "skyffla-peer");
-    }
-
-    #[test]
-    fn stdio_and_message_are_mutually_exclusive() {
-        assert!(validate_stdio_message_flags(true, Some("hello")).is_err());
-        assert!(validate_stdio_message_flags(false, Some("hello")).is_ok());
-        assert!(validate_stdio_message_flags(true, None).is_ok());
     }
 
     #[test]

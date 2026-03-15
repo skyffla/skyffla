@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+### Changed
+
+- Bump the next release line to `1.0.0` for the room-native architecture, `machine` protocol, room TUI, and other intentional breaking changes from the old 0.x CLI/runtime model.
+
 ## [0.2.0] - 2026-03-10
 
 - Add `--local` LAN mode with mDNS discovery so peers on the same network can connect without rendezvous.

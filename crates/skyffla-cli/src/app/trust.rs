@@ -10,7 +10,6 @@ pub(crate) struct PeerTrustStatus {
     pub(crate) peer_name: String,
     pub(crate) peer_fingerprint: Option<String>,
     pub(crate) previous_name: Option<String>,
-    pub(crate) message: String,
 }
 
 pub(crate) fn remember_peer(peer: &SessionPeer) -> Result<Option<PeerTrustStatus>> {
@@ -18,15 +17,6 @@ pub(crate) fn remember_peer(peer: &SessionPeer) -> Result<Option<PeerTrustStatus
     update_local_state(&local_state_file_path(), |state| {
         apply_peer_trust(state, peer, now)
     })
-}
-
-pub(crate) fn short_fingerprint(raw: &str) -> Option<String> {
-    let compact: String = raw.chars().take(16).collect();
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
 }
 
 fn unix_now() -> u64 {
@@ -47,7 +37,6 @@ fn apply_peer_trust(
             peer_name: peer.peer_name.clone(),
             peer_fingerprint: None,
             previous_name: None,
-            message: format!("peer {} is unverified", peer.peer_name),
         });
     };
 
@@ -70,14 +59,6 @@ fn apply_peer_trust(
                 peer_name: peer.peer_name.clone(),
                 peer_fingerprint: Some(fingerprint.clone()),
                 previous_name: previous_name.clone(),
-                message: if let Some(previous_name) = previous_name {
-                    format!(
-                        "known peer {} is now {} ({})",
-                        previous_name, peer.peer_name, fingerprint
-                    )
-                } else {
-                    format!("known peer {} ({})", peer.peer_name, fingerprint)
-                },
             })
         }
         None => {
@@ -94,10 +75,6 @@ fn apply_peer_trust(
                 peer_name: peer.peer_name.clone(),
                 peer_fingerprint: Some(fingerprint.clone()),
                 previous_name: None,
-                message: format!(
-                    "new peer trust-on-first-use: {} ({})",
-                    peer.peer_name, fingerprint
-                ),
             })
         }
     }
@@ -107,17 +84,8 @@ fn apply_peer_trust(
 mod tests {
     use skyffla_session::SessionPeer;
 
-    use super::{apply_peer_trust, short_fingerprint};
+    use super::apply_peer_trust;
     use crate::local_state::LocalState;
-
-    #[test]
-    fn short_fingerprint_truncates_to_sixteen_chars() {
-        assert_eq!(
-            short_fingerprint("0123456789abcdef1234").as_deref(),
-            Some("0123456789abcdef")
-        );
-        assert_eq!(short_fingerprint(""), None);
-    }
 
     #[test]
     fn new_peer_is_recorded_with_tofu_status() {
@@ -126,6 +94,7 @@ mod tests {
             session_id: "room".into(),
             peer_name: "alice".into(),
             peer_fingerprint: Some("fingerprint".into()),
+            peer_ticket: None,
         };
 
         let status = apply_peer_trust(&mut state, &peer, 123).expect("status");
@@ -142,11 +111,13 @@ mod tests {
             session_id: "room".into(),
             peer_name: "alice".into(),
             peer_fingerprint: Some("fingerprint".into()),
+            peer_ticket: None,
         };
         let renamed = SessionPeer {
             session_id: "room".into(),
             peer_name: "alice-laptop".into(),
             peer_fingerprint: Some("fingerprint".into()),
+            peer_ticket: None,
         };
         let _ = apply_peer_trust(&mut state, &original, 100);
 
@@ -165,6 +136,7 @@ mod tests {
             session_id: "room".into(),
             peer_name: "anon".into(),
             peer_fingerprint: None,
+            peer_ticket: None,
         };
 
         let status = apply_peer_trust(&mut state, &peer, 123).expect("status");

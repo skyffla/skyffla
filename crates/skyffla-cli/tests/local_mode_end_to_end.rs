@@ -9,211 +9,24 @@ use tokio::time::sleep;
 mod support;
 
 use support::{
-    acquire_local_discovery_test_guard, assert_local_mode_stderr, fresh_test_dir,
-    local_discovery_available, unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY,
-    LOCAL_JOIN_PROMOTION_DELAY, PROCESS_TIMEOUT,
+    acquire_local_discovery_test_guard, apply_local_discovery_test_env, assert_local_mode_stderr,
+    fresh_test_dir, local_discovery_available, unique_room_name, LOCAL_DISCOVERY_BOOTSTRAP_DELAY,
+    PROCESS_TIMEOUT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_host_to_join_transfers_payload_without_rendezvous() -> Result<()> {
+#[ignore = "slow mdns multi-host coverage"]
+async fn stdio_local_mode_prefers_one_host_when_multiple_hosts_advertise() -> Result<()> {
     let _guard = acquire_local_discovery_test_guard()?;
     if !local_discovery_available().await? {
         return Ok(());
     }
 
-    let home_dir = fresh_test_dir("skyffla-cli-stdio-local-host");
-    std::fs::create_dir_all(&home_dir)
-        .with_context(|| format!("failed to create {}", home_dir.display()))?;
-
-    let room = unique_room_name();
-    let payload = b"hello from local discovery\n";
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-    let unreachable_server = "http://127.0.0.1:9";
-
-    let mut host = Command::new(bin);
-    host.arg("host")
-        .arg(&room)
-        .arg("--local")
-        .arg("--server")
-        .arg(unreachable_server)
-        .arg("--name")
-        .arg("host")
-        .arg("--stdio")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut host = host.spawn().context("failed to spawn local host process")?;
-
-    let mut host_stdin = host.stdin.take().context("host stdin missing")?;
-    host_stdin
-        .write_all(payload)
-        .await
-        .context("failed to write stdio payload into local host stdin")?;
-    drop(host_stdin);
-
-    sleep(LOCAL_DISCOVERY_BOOTSTRAP_DELAY).await;
-
-    let mut join = Command::new(bin);
-    join.arg("join")
-        .arg(&room)
-        .arg("--local")
-        .arg("--server")
-        .arg(unreachable_server)
-        .arg("--name")
-        .arg("join")
-        .arg("--stdio")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let join = join.spawn().context("failed to spawn local join process")?;
-
-    let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())
-        .await
-        .context("local join process watchdog timed out")?
-        .context("local join process failed while waiting for output")?;
-    if !join_output.status.success() {
-        let _ = host.kill().await;
-        let host_output = host
-            .wait_with_output()
-            .await
-            .context("local host process failed while collecting failure output")?;
-        anyhow::bail!(
-            "local join failed:\nstdout={}\nstderr={}\nhost stdout={}\nhost stderr={}",
-            String::from_utf8_lossy(&join_output.stdout),
-            String::from_utf8_lossy(&join_output.stderr),
-            String::from_utf8_lossy(&host_output.stdout),
-            String::from_utf8_lossy(&host_output.stderr)
-        );
-    }
-    let host_output = tokio::time::timeout(PROCESS_TIMEOUT, host.wait_with_output())
-        .await
-        .context("local host process watchdog timed out")?
-        .context("local host process failed while waiting for output")?;
-
-    assert!(
-        host_output.status.success(),
-        "local host failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&host_output.stdout),
-        String::from_utf8_lossy(&host_output.stderr)
-    );
-    assert_eq!(join_output.stdout, payload);
-    assert_local_mode_stderr(&join_output.stderr);
-
+    assert_local_multi_host_resolution().await?;
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_join_to_join_promotes_first_peer_without_rendezvous() -> Result<()> {
-    let _guard = acquire_local_discovery_test_guard()?;
-    if !local_discovery_available().await? {
-        return Ok(());
-    }
-
-    let home_dir = fresh_test_dir("skyffla-cli-stdio-local-join");
-    std::fs::create_dir_all(&home_dir)
-        .with_context(|| format!("failed to create {}", home_dir.display()))?;
-
-    let room = unique_room_name();
-    let payload = b"hello from local join discovery\n";
-    let bin = env!("CARGO_BIN_EXE_skyffla");
-    let unreachable_server = "http://127.0.0.1:9";
-
-    let mut first_join = Command::new(bin);
-    first_join
-        .arg("join")
-        .arg(&room)
-        .arg("--local")
-        .arg("--server")
-        .arg(unreachable_server)
-        .arg("--name")
-        .arg("first")
-        .arg("--stdio")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut first_join = first_join
-        .spawn()
-        .context("failed to spawn first local join process")?;
-
-    let mut first_stdin = first_join
-        .stdin
-        .take()
-        .context("first join stdin missing")?;
-    first_stdin
-        .write_all(payload)
-        .await
-        .context("failed to write stdio payload into first local join stdin")?;
-    drop(first_stdin);
-
-    sleep(LOCAL_JOIN_PROMOTION_DELAY).await;
-
-    let mut second_join = Command::new(bin);
-    second_join
-        .arg("join")
-        .arg(&room)
-        .arg("--local")
-        .arg("--server")
-        .arg(unreachable_server)
-        .arg("--name")
-        .arg("second")
-        .arg("--stdio")
-        .arg("--json")
-        .env("HOME", &home_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let second_join = second_join
-        .spawn()
-        .context("failed to spawn second local join process")?;
-
-    let second_output = tokio::time::timeout(PROCESS_TIMEOUT, second_join.wait_with_output())
-        .await
-        .context("second local join process watchdog timed out")?
-        .context("second local join process failed while waiting for output")?;
-    if !second_output.status.success() {
-        let _ = first_join.kill().await;
-        let first_output = first_join
-            .wait_with_output()
-            .await
-            .context("first local join process failed while collecting failure output")?;
-        anyhow::bail!(
-            "second local join failed:\nstdout={}\nstderr={}\nfirst stdout={}\nfirst stderr={}",
-            String::from_utf8_lossy(&second_output.stdout),
-            String::from_utf8_lossy(&second_output.stderr),
-            String::from_utf8_lossy(&first_output.stdout),
-            String::from_utf8_lossy(&first_output.stderr)
-        );
-    }
-    let first_output = tokio::time::timeout(PROCESS_TIMEOUT, first_join.wait_with_output())
-        .await
-        .context("first local join process watchdog timed out")?
-        .context("first local join process failed while waiting for output")?;
-
-    assert!(
-        first_output.status.success(),
-        "first local join failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&first_output.stdout),
-        String::from_utf8_lossy(&first_output.stderr)
-    );
-    assert_eq!(second_output.stdout, payload);
-    assert_local_mode_stderr(&second_output.stderr);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stdio_local_multiple_hosts_same_stream_one_join_connects_to_one_host() -> Result<()> {
-    let _guard = acquire_local_discovery_test_guard()?;
-    if !local_discovery_available().await? {
-        return Ok(());
-    }
-
+async fn assert_local_multi_host_resolution() -> Result<()> {
     let home_dir = fresh_test_dir("skyffla-cli-stdio-local-multi-host");
     std::fs::create_dir_all(&home_dir)
         .with_context(|| format!("failed to create {}", home_dir.display()))?;
@@ -239,6 +52,7 @@ async fn stdio_local_multiple_hosts_same_stream_one_join_connects_to_one_host() 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut first_host);
     let mut first_host = first_host
         .spawn()
         .context("failed to spawn first local host process")?;
@@ -258,6 +72,7 @@ async fn stdio_local_multiple_hosts_same_stream_one_join_connects_to_one_host() 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut second_host);
     let mut second_host = second_host
         .spawn()
         .context("failed to spawn second local host process")?;
@@ -298,6 +113,7 @@ async fn stdio_local_multiple_hosts_same_stream_one_join_connects_to_one_host() 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_local_discovery_test_env(&mut join);
     let join = join.spawn().context("failed to spawn local join process")?;
 
     let join_output = tokio::time::timeout(PROCESS_TIMEOUT, join.wait_with_output())

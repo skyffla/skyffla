@@ -4,96 +4,90 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
-    GetStreamResponse, PutStreamRequest, PutStreamResponse, RegistryError, StreamRecord,
-    StreamRegistry,
+    GetRoomResponse, PutRoomRequest, PutRoomResponse, RegistryError, RoomRecord, RoomRegistry,
 };
 
-pub trait StreamStore: Send + Sync {
+pub trait RoomStore: Send + Sync {
     fn put(
         &self,
-        stream_id: &str,
-        request: PutStreamRequest,
+        room_id: &str,
+        request: PutRoomRequest,
         now_epoch_seconds: u64,
-    ) -> Result<PutStreamResponse, StoreError>;
+    ) -> Result<PutRoomResponse, StoreError>;
 
-    fn get(&self, stream_id: &str, now_epoch_seconds: u64)
-        -> Result<GetStreamResponse, StoreError>;
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError>;
 
-    fn delete(&self, stream_id: &str) -> Result<bool, StoreError>;
+    fn delete(&self, room_id: &str) -> Result<bool, StoreError>;
 
     fn purge_expired(&self, now_epoch_seconds: u64) -> Result<usize, StoreError>;
 }
 
-pub type SharedStreamStore = Arc<dyn StreamStore>;
+pub type SharedRoomStore = Arc<dyn RoomStore>;
 
 #[derive(Debug)]
-pub struct InMemoryStreamStore {
-    inner: Mutex<StreamRegistry>,
+pub struct InMemoryRoomStore {
+    inner: Mutex<RoomRegistry>,
 }
 
-impl InMemoryStreamStore {
+impl InMemoryRoomStore {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(StreamRegistry::new()),
+            inner: Mutex::new(RoomRegistry::new()),
         }
     }
 }
 
-impl Default for InMemoryStreamStore {
+impl Default for InMemoryRoomStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StreamStore for InMemoryStreamStore {
+impl RoomStore for InMemoryRoomStore {
     fn put(
         &self,
-        stream_id: &str,
-        request: PutStreamRequest,
+        room_id: &str,
+        request: PutRoomRequest,
         now_epoch_seconds: u64,
-    ) -> Result<PutStreamResponse, StoreError> {
+    ) -> Result<PutRoomResponse, StoreError> {
         self.inner
             .lock()
-            .map_err(|_| StoreError::Storage("in-memory stream store lock poisoned".into()))?
-            .put(stream_id, request, now_epoch_seconds)
+            .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
+            .put(room_id, request, now_epoch_seconds)
             .map_err(StoreError::from)
     }
 
-    fn get(
-        &self,
-        stream_id: &str,
-        now_epoch_seconds: u64,
-    ) -> Result<GetStreamResponse, StoreError> {
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError> {
         self.inner
             .lock()
-            .map_err(|_| StoreError::Storage("in-memory stream store lock poisoned".into()))?
-            .get(stream_id, now_epoch_seconds)
+            .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
+            .get(room_id, now_epoch_seconds)
             .map_err(StoreError::from)
     }
 
-    fn delete(&self, stream_id: &str) -> Result<bool, StoreError> {
+    fn delete(&self, room_id: &str) -> Result<bool, StoreError> {
         Ok(self
             .inner
             .lock()
-            .map_err(|_| StoreError::Storage("in-memory stream store lock poisoned".into()))?
-            .delete(stream_id))
+            .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
+            .delete(room_id))
     }
 
     fn purge_expired(&self, now_epoch_seconds: u64) -> Result<usize, StoreError> {
         Ok(self
             .inner
             .lock()
-            .map_err(|_| StoreError::Storage("in-memory stream store lock poisoned".into()))?
+            .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
             .purge_expired(now_epoch_seconds))
     }
 }
 
 #[derive(Debug)]
-pub struct SqliteStreamStore {
+pub struct SqliteRoomStore {
     connection: Mutex<Connection>,
 }
 
-impl SqliteStreamStore {
+impl SqliteRoomStore {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let connection = Connection::open(path).map_err(StoreError::from)?;
         Self::from_connection(connection)
@@ -115,8 +109,8 @@ impl SqliteStreamStore {
     fn init_schema(&self) -> Result<(), StoreError> {
         self.with_connection(|connection| {
             connection.execute_batch(
-                "CREATE TABLE IF NOT EXISTS streams (
-                    stream_id TEXT PRIMARY KEY,
+                "CREATE TABLE IF NOT EXISTS rooms (
+                    room_id TEXT PRIMARY KEY,
                     ticket TEXT NOT NULL,
                     capabilities_json TEXT NOT NULL,
                     expires_at_epoch_seconds INTEGER NOT NULL
@@ -133,21 +127,21 @@ impl SqliteStreamStore {
         let mut guard = self
             .connection
             .lock()
-            .map_err(|_| StoreError::Storage("sqlite stream store lock poisoned".into()))?;
+            .map_err(|_| StoreError::Storage("sqlite room store lock poisoned".into()))?;
         f(&mut guard)
     }
 }
 
-impl StreamStore for SqliteStreamStore {
+impl RoomStore for SqliteRoomStore {
     fn put(
         &self,
-        stream_id: &str,
-        request: PutStreamRequest,
+        room_id: &str,
+        request: PutRoomRequest,
         now_epoch_seconds: u64,
-    ) -> Result<PutStreamResponse, StoreError> {
+    ) -> Result<PutRoomResponse, StoreError> {
         self.with_connection(|connection| {
             connection.execute(
-                "DELETE FROM streams WHERE expires_at_epoch_seconds <= ?1",
+                "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
                 params![now_epoch_seconds as i64],
             )?;
 
@@ -155,39 +149,39 @@ impl StreamStore for SqliteStreamStore {
             let expires_at_epoch_seconds = now_epoch_seconds + ttl_seconds;
             let existing_ticket: Option<String> = connection
                 .query_row(
-                    "SELECT ticket FROM streams WHERE stream_id = ?1",
-                    params![stream_id],
+                    "SELECT ticket FROM rooms WHERE room_id = ?1",
+                    params![room_id],
                     |row| row.get(0),
                 )
                 .optional()?;
 
             if let Some(ticket) = existing_ticket {
                 if ticket != request.ticket {
-                    return Err(StoreError::Registry(RegistryError::StreamAlreadyExists {
-                        stream_id: stream_id.to_string(),
+                    return Err(StoreError::Registry(RegistryError::RoomAlreadyExists {
+                        room_id: room_id.to_string(),
                     }));
                 }
 
                 let capabilities_json =
                     serde_json::to_string(&request.capabilities).map_err(StoreError::from)?;
                 connection.execute(
-                    "UPDATE streams
+                    "UPDATE rooms
                      SET capabilities_json = ?1, expires_at_epoch_seconds = ?2
-                     WHERE stream_id = ?3",
+                     WHERE room_id = ?3",
                     params![
                         capabilities_json,
                         expires_at_epoch_seconds as i64,
-                        stream_id
+                        room_id
                     ],
                 )?;
             } else {
                 let capabilities_json =
                     serde_json::to_string(&request.capabilities).map_err(StoreError::from)?;
                 connection.execute(
-                    "INSERT INTO streams (stream_id, ticket, capabilities_json, expires_at_epoch_seconds)
+                    "INSERT INTO rooms (room_id, ticket, capabilities_json, expires_at_epoch_seconds)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![
-                        stream_id,
+                        room_id,
                         request.ticket,
                         capabilities_json,
                         expires_at_epoch_seconds as i64
@@ -195,31 +189,27 @@ impl StreamStore for SqliteStreamStore {
                 )?;
             }
 
-            Ok(PutStreamResponse {
-                stream_id: stream_id.to_string(),
+            Ok(PutRoomResponse {
+                room_id: room_id.to_string(),
                 expires_at_epoch_seconds,
-                status: crate::StreamStatus::Waiting,
+                status: crate::RoomStatus::Waiting,
             })
         })
     }
 
-    fn get(
-        &self,
-        stream_id: &str,
-        now_epoch_seconds: u64,
-    ) -> Result<GetStreamResponse, StoreError> {
+    fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError> {
         self.with_connection(|connection| {
             connection.execute(
-                "DELETE FROM streams WHERE expires_at_epoch_seconds <= ?1",
+                "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
                 params![now_epoch_seconds as i64],
             )?;
 
-            let record: Option<StreamRecord> = connection
+            let record: Option<RoomRecord> = connection
                 .query_row(
-                    "SELECT stream_id, ticket, capabilities_json, expires_at_epoch_seconds
-                     FROM streams
-                     WHERE stream_id = ?1",
-                    params![stream_id],
+                    "SELECT room_id, ticket, capabilities_json, expires_at_epoch_seconds
+                     FROM rooms
+                     WHERE room_id = ?1",
+                    params![room_id],
                     |row| {
                         let capabilities_json: String = row.get(2)?;
                         let capabilities =
@@ -230,8 +220,8 @@ impl StreamStore for SqliteStreamStore {
                                     Box::new(error),
                                 )
                             })?;
-                        Ok(StreamRecord {
-                            stream_id: row.get(0)?,
+                        Ok(RoomRecord {
+                            room_id: row.get(0)?,
                             ticket: row.get(1)?,
                             capabilities,
                             expires_at_epoch_seconds: row.get::<_, i64>(3)? as u64,
@@ -241,19 +231,17 @@ impl StreamStore for SqliteStreamStore {
                 .optional()?;
 
             record.map(|entry| entry.as_get_response()).ok_or_else(|| {
-                StoreError::Registry(RegistryError::StreamNotFound {
-                    stream_id: stream_id.to_string(),
+                StoreError::Registry(RegistryError::RoomNotFound {
+                    room_id: room_id.to_string(),
                 })
             })
         })
     }
 
-    fn delete(&self, stream_id: &str) -> Result<bool, StoreError> {
+    fn delete(&self, room_id: &str) -> Result<bool, StoreError> {
         self.with_connection(|connection| {
-            let deleted = connection.execute(
-                "DELETE FROM streams WHERE stream_id = ?1",
-                params![stream_id],
-            )?;
+            let deleted =
+                connection.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
             Ok(deleted > 0)
         })
     }
@@ -261,7 +249,7 @@ impl StreamStore for SqliteStreamStore {
     fn purge_expired(&self, now_epoch_seconds: u64) -> Result<usize, StoreError> {
         self.with_connection(|connection| {
             let deleted = connection.execute(
-                "DELETE FROM streams WHERE expires_at_epoch_seconds <= ?1",
+                "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
                 params![now_epoch_seconds as i64],
             )?;
             Ok(deleted)
@@ -319,8 +307,8 @@ mod tests {
     use crate::{DEFAULT_TTL_SECONDS, MAX_TTL_SECONDS};
     use skyffla_protocol::Capabilities;
 
-    fn sample_request() -> PutStreamRequest {
-        PutStreamRequest {
+    fn sample_request() -> PutRoomRequest {
+        PutRoomRequest {
             ticket: "bootstrap-ticket".into(),
             ttl_seconds: DEFAULT_TTL_SECONDS,
             capabilities: Capabilities::default(),
@@ -329,27 +317,27 @@ mod tests {
 
     #[test]
     fn sqlite_store_put_get_and_delete_round_trip() {
-        let store = SqliteStreamStore::new_in_memory().expect("store should initialize");
+        let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
             .put("demo-room", sample_request(), 1_000)
             .expect("put should succeed");
 
         let resolved = store
             .get("demo-room", 1_001)
-            .expect("get should resolve stored stream");
-        assert_eq!(resolved.stream_id, "demo-room");
+            .expect("get should resolve stored room");
+        assert_eq!(resolved.room_id, "demo-room");
 
         assert!(store.delete("demo-room").expect("delete should succeed"));
         let missing = store.get("demo-room", 1_001);
         assert!(matches!(
             missing,
-            Err(StoreError::Registry(RegistryError::StreamNotFound { .. }))
+            Err(StoreError::Registry(RegistryError::RoomNotFound { .. }))
         ));
     }
 
     #[test]
     fn sqlite_store_rejects_conflicting_live_host() {
-        let store = SqliteStreamStore::new_in_memory().expect("store should initialize");
+        let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");
@@ -360,14 +348,14 @@ mod tests {
         assert!(matches!(
             result,
             Err(StoreError::Registry(
-                RegistryError::StreamAlreadyExists { .. }
+                RegistryError::RoomAlreadyExists { .. }
             ))
         ));
     }
 
     #[test]
     fn sqlite_store_refreshes_matching_ticket() {
-        let store = SqliteStreamStore::new_in_memory().expect("store should initialize");
+        let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");
@@ -382,7 +370,7 @@ mod tests {
 
     #[test]
     fn sqlite_store_purges_expired_rows() {
-        let store = SqliteStreamStore::new_in_memory().expect("store should initialize");
+        let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
             .put("demo-room", sample_request(), 1_000)
             .expect("first put should succeed");

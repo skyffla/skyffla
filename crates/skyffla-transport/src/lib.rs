@@ -1,9 +1,21 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 
+use futures_util::StreamExt;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::protocol::ProtocolHandler;
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
+use iroh_blobs::api::proto::{AddProgressItem, ExportProgressItem};
+use iroh_blobs::api::remote::GetProgressItem;
+use iroh_blobs::format::collection::Collection;
+use iroh_blobs::store::mem::MemStore;
+use iroh_blobs::{BlobFormat as IrohBlobFormat, BlobsProtocol, Hash, HashAndFormat};
+use skyffla_protocol::room::{BlobFormat, BlobRef, TransferItemKind, TransferPhase};
 use skyffla_protocol::TransportCapability;
+use tokio::sync::{mpsc, Mutex};
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
 
@@ -54,15 +66,38 @@ pub trait PeerTransport {
     fn transport_capabilities(&self) -> Vec<TransportCapability>;
 }
 
-#[derive(Debug, Clone)]
-pub struct IrohTransport {
+#[derive(Debug)]
+struct TransportInner {
     endpoint: Endpoint,
     options: TransportOptions,
+    incoming: Mutex<mpsc::UnboundedReceiver<IrohConnection>>,
+    accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    blob_store: MemStore,
+}
+
+#[derive(Debug, Clone)]
+pub struct IrohTransport {
+    inner: Arc<TransportInner>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TransportOptions {
     pub local_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedPath {
+    pub blob: BlobRef,
+    pub size: u64,
+    pub item_kind: TransferItemKind,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTransferProgress {
+    pub phase: TransferPhase,
+    pub bytes_complete: u64,
+    pub bytes_total: Option<u64>,
 }
 
 impl IrohTransport {
@@ -71,43 +106,62 @@ impl IrohTransport {
     }
 
     pub async fn bind_with_options(options: TransportOptions) -> Result<Self, TransportError> {
-        let mut builder = Endpoint::builder().alpns(vec![SKYFFLA_ALPN.to_vec()]);
+        let mut builder =
+            Endpoint::builder().alpns(vec![SKYFFLA_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]);
         if options.local_only {
             builder = builder.relay_mode(RelayMode::Disabled);
         }
         let endpoint = builder.bind().await.map_err(TransportError::EndpointBind)?;
-        Ok(Self { endpoint, options })
+        let blob_store = MemStore::new();
+        let blobs_protocol = BlobsProtocol::new(&blob_store, None);
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let accept_task = tokio::spawn(run_accept_loop(
+            endpoint.clone(),
+            incoming_tx,
+            blobs_protocol,
+        ));
+
+        Ok(Self {
+            inner: Arc::new(TransportInner {
+                endpoint,
+                options,
+                incoming: Mutex::new(incoming_rx),
+                accept_task: Mutex::new(Some(accept_task)),
+                blob_store,
+            }),
+        })
     }
 
     pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
+        &self.inner.endpoint
     }
 
     pub fn local_ticket(&self) -> Result<PeerTicket, TransportError> {
-        let addr = filter_endpoint_addr(self.endpoint.addr(), self.options.local_only);
-        if self.options.local_only && addr.addrs.is_empty() {
+        let addr = filter_endpoint_addr(self.inner.endpoint.addr(), self.inner.options.local_only);
+        if self.inner.options.local_only && addr.addrs.is_empty() {
             return Err(TransportError::NoLocalAddresses);
         }
         PeerTicket::from_endpoint_addr(&addr)
     }
 
     pub async fn accept_connection(&self) -> Result<IrohConnection, TransportError> {
-        let incoming = self
-            .endpoint
-            .accept()
+        self.inner
+            .incoming
+            .lock()
             .await
-            .ok_or(TransportError::EndpointClosed)?;
-        let connection = incoming.await.map_err(TransportError::Accept)?;
-        Ok(IrohConnection { connection })
+            .recv()
+            .await
+            .ok_or(TransportError::EndpointClosed)
     }
 
     pub async fn connect(&self, ticket: &PeerTicket) -> Result<IrohConnection, TransportError> {
         let endpoint_addr =
-            filter_endpoint_addr(ticket.to_endpoint_addr()?, self.options.local_only);
-        if self.options.local_only && endpoint_addr.addrs.is_empty() {
+            filter_endpoint_addr(ticket.to_endpoint_addr()?, self.inner.options.local_only);
+        if self.inner.options.local_only && endpoint_addr.addrs.is_empty() {
             return Err(TransportError::NoLocalAddresses);
         }
         let connection = self
+            .inner
             .endpoint
             .connect(endpoint_addr, SKYFFLA_ALPN)
             .await
@@ -115,11 +169,158 @@ impl IrohTransport {
         Ok(IrohConnection { connection })
     }
 
+    pub async fn import_blob_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<BlobRef, TransportError> {
+        let mut tag = self
+            .inner
+            .blob_store
+            .blobs()
+            .add_path(path)
+            .temp_tag()
+            .await
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+        tag.leak();
+        Ok(blob_ref_from_hash_and_format(tag.hash_and_format()))
+    }
+
+    pub async fn import_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ImportedPath, TransportError> {
+        self.import_path_with_progress(path, |_| {}).await
+    }
+
+    pub async fn import_path_with_progress(
+        &self,
+        path: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
+        let path = path.as_ref();
+        if path.is_file() {
+            return self
+                .import_file_path_with_progress(path, &mut on_progress)
+                .await;
+        }
+        if path.is_dir() {
+            return self
+                .import_collection_path_with_progress(path, &mut on_progress)
+                .await;
+        }
+        Err(TransportError::BlobImport(format!(
+            "path {} is not a file or directory",
+            path.display()
+        )))
+    }
+
+    pub async fn fetch_blob(
+        &self,
+        provider: &PeerTicket,
+        blob: &BlobRef,
+    ) -> Result<(), TransportError> {
+        self.fetch_blob_with_progress(provider, blob, |_| {}).await
+    }
+
+    pub async fn fetch_blob_with_progress(
+        &self,
+        provider: &PeerTicket,
+        blob: &BlobRef,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<(), TransportError> {
+        let endpoint_addr =
+            filter_endpoint_addr(provider.to_endpoint_addr()?, self.inner.options.local_only);
+        if self.inner.options.local_only && endpoint_addr.addrs.is_empty() {
+            return Err(TransportError::NoLocalAddresses);
+        }
+
+        let connection = self
+            .inner
+            .endpoint
+            .connect(endpoint_addr, iroh_blobs::ALPN)
+            .await
+            .map_err(TransportError::ConnectBlob)?;
+        let wrapped = IrohConnection {
+            connection: connection.clone(),
+        };
+        self.enforce_connection_policy(&wrapped).await?;
+
+        let hash_and_format = hash_and_format_from_blob_ref(blob)?;
+        let mut stream = self
+            .inner
+            .blob_store
+            .remote()
+            .fetch(connection, hash_and_format)
+            .stream();
+        while let Some(item) = stream.next().await {
+            match item {
+                GetProgressItem::Progress(bytes_complete) => on_progress(LocalTransferProgress {
+                    phase: TransferPhase::Downloading,
+                    bytes_complete,
+                    bytes_total: None,
+                }),
+                GetProgressItem::Done(_) => {}
+                GetProgressItem::Error(error) => {
+                    return Err(TransportError::BlobFetch(error.to_string()));
+                }
+            }
+        }
+        let mut tag = self
+            .inner
+            .blob_store
+            .tags()
+            .temp_tag(hash_and_format)
+            .await
+            .map_err(|error| TransportError::BlobTag(error.to_string()))?;
+        tag.leak();
+        Ok(())
+    }
+
+    pub async fn export_blob(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+    ) -> Result<u64, TransportError> {
+        let hash = hash_from_blob_ref(blob)?;
+        self.inner
+            .blob_store
+            .blobs()
+            .export(hash, target)
+            .await
+            .map_err(|error| TransportError::BlobExport(error.to_string()))
+    }
+
+    pub async fn export_path(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+    ) -> Result<u64, TransportError> {
+        self.export_path_with_progress(blob, target, |_| {}).await
+    }
+
+    pub async fn export_path_with_progress(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
+        match blob.format {
+            BlobFormat::Blob => {
+                self.export_blob_with_progress(blob, target, &mut on_progress)
+                    .await
+            }
+            BlobFormat::Collection => {
+                self.export_collection_with_progress(blob, target.as_ref(), &mut on_progress)
+                    .await
+            }
+        }
+    }
+
     pub async fn enforce_connection_policy(
         &self,
         connection: &IrohConnection,
     ) -> Result<(), TransportError> {
-        if !self.options.local_only {
+        if !self.inner.options.local_only {
             return Ok(());
         }
 
@@ -158,14 +359,19 @@ impl IrohTransport {
                 _ => None,
             });
 
-        let remote_info_ip = self.endpoint.remote_info(remote_id).await.and_then(|info| {
-            info.into_addrs()
-                .find_map(|addr_info| match addr_info.into_addr() {
-                    TransportAddr::Ip(addr) => Some(addr.to_string()),
-                    TransportAddr::Relay(_) => None,
-                    _ => None,
-                })
-        });
+        let remote_info_ip = self
+            .inner
+            .endpoint
+            .remote_info(remote_id)
+            .await
+            .and_then(|info| {
+                info.into_addrs()
+                    .find_map(|addr_info| match addr_info.into_addr() {
+                        TransportAddr::Ip(addr) => Some(addr.to_string()),
+                        TransportAddr::Relay(_) => None,
+                        _ => None,
+                    })
+            });
 
         ConnectionStatus {
             mode,
@@ -173,8 +379,425 @@ impl IrohTransport {
         }
     }
 
-    pub async fn close(self) {
-        self.endpoint.close().await;
+    pub async fn close(&self) {
+        self.inner.endpoint.close().await;
+        if let Some(handle) = self.inner.accept_task.lock().await.take() {
+            handle.abort();
+        }
+        let _ = self.inner.blob_store.shutdown().await;
+    }
+}
+
+impl IrohTransport {
+    async fn import_file_path_with_progress(
+        &self,
+        path: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
+        let display_name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let mut total_size = None;
+        let mut stream = self.inner.blob_store.blobs().add_path(path).stream().await;
+        while let Some(item) = stream.next().await {
+            match item {
+                AddProgressItem::Size(size) => {
+                    total_size = Some(size);
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    });
+                }
+                AddProgressItem::CopyProgress(bytes_complete)
+                | AddProgressItem::OutboardProgress(bytes_complete) => {
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete,
+                        bytes_total: total_size,
+                    });
+                }
+                AddProgressItem::CopyDone => {}
+                AddProgressItem::Done(mut tag) => {
+                    let blob = blob_ref_from_hash_and_format(tag.hash_and_format());
+                    let size = total_size.unwrap_or_else(|| {
+                        std::fs::metadata(path)
+                            .map(|value| value.len())
+                            .unwrap_or(0)
+                    });
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Preparing,
+                        bytes_complete: size,
+                        bytes_total: Some(size),
+                    });
+                    tag.leak();
+                    return Ok(ImportedPath {
+                        blob,
+                        size,
+                        item_kind: TransferItemKind::File,
+                        display_name,
+                    });
+                }
+                AddProgressItem::Error(error) => {
+                    return Err(TransportError::BlobImport(error.to_string()));
+                }
+            }
+        }
+        Err(TransportError::BlobImport(
+            "import stream closed before completion".into(),
+        ))
+    }
+
+    async fn import_collection_path_with_progress(
+        &self,
+        path: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<ImportedPath, TransportError> {
+        let entries = collect_collection_entries(path)?;
+        let display_name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let mut total_size = 0_u64;
+        let mut tags = Vec::with_capacity(entries.len());
+        let mut items = Vec::with_capacity(entries.len());
+        let mut completed = 0_u64;
+
+        for entry in &entries {
+            total_size = total_size.saturating_add(entry.size);
+        }
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Preparing,
+            bytes_complete: 0,
+            bytes_total: Some(total_size),
+        });
+
+        for entry in entries {
+            let mut current = 0_u64;
+            let mut stream = self
+                .inner
+                .blob_store
+                .blobs()
+                .add_path(&entry.absolute_path)
+                .stream()
+                .await;
+            let tag = loop {
+                match stream.next().await {
+                    Some(AddProgressItem::CopyProgress(bytes_complete))
+                    | Some(AddProgressItem::OutboardProgress(bytes_complete)) => {
+                        current = current.max(bytes_complete.min(entry.size));
+                        on_progress(LocalTransferProgress {
+                            phase: TransferPhase::Preparing,
+                            bytes_complete: completed.saturating_add(current),
+                            bytes_total: Some(total_size),
+                        });
+                    }
+                    Some(AddProgressItem::Size(_)) | Some(AddProgressItem::CopyDone) => {}
+                    Some(AddProgressItem::Done(tag)) => break tag,
+                    Some(AddProgressItem::Error(error)) => {
+                        return Err(TransportError::BlobImport(error.to_string()));
+                    }
+                    None => {
+                        return Err(TransportError::BlobImport(
+                            "import stream closed before completion".into(),
+                        ));
+                    }
+                }
+            };
+            completed = completed.saturating_add(entry.size);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Preparing,
+                bytes_complete: completed,
+                bytes_total: Some(total_size),
+            });
+            let name = collection_entry_name(&entry.relative_path)?;
+            items.push((name, tag.hash()));
+            tags.push(tag);
+        }
+
+        let collection = Collection::from_iter(items);
+        let mut root = collection
+            .store(self.inner.blob_store.as_ref())
+            .await
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+        for tag in &mut tags {
+            tag.leak();
+        }
+        root.leak();
+
+        Ok(ImportedPath {
+            blob: blob_ref_from_hash_and_format(root.hash_and_format()),
+            size: total_size,
+            item_kind: TransferItemKind::Folder,
+            display_name,
+        })
+    }
+
+    async fn export_blob_with_progress(
+        &self,
+        blob: &BlobRef,
+        target: impl AsRef<Path>,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
+        let target = target.as_ref();
+        if let Some(parent) = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+        }
+        let hash = hash_from_blob_ref(blob)?;
+        let mut total_size = None;
+        let mut stream = self
+            .inner
+            .blob_store
+            .blobs()
+            .export(hash, target)
+            .stream()
+            .await;
+        while let Some(item) = stream.next().await {
+            match item {
+                ExportProgressItem::Size(size) => {
+                    total_size = Some(size);
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Exporting,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    });
+                }
+                ExportProgressItem::CopyProgress(bytes_complete) => {
+                    on_progress(LocalTransferProgress {
+                        phase: TransferPhase::Exporting,
+                        bytes_complete,
+                        bytes_total: total_size,
+                    });
+                }
+                ExportProgressItem::Done => {
+                    return Ok(total_size.unwrap_or(0));
+                }
+                ExportProgressItem::Error(error) => {
+                    return Err(TransportError::BlobExport(error.to_string()));
+                }
+            }
+        }
+        Err(TransportError::BlobExport(
+            "export stream closed before completion".into(),
+        ))
+    }
+
+    async fn export_collection_with_progress(
+        &self,
+        blob: &BlobRef,
+        target: &Path,
+        on_progress: &mut impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
+        std::fs::create_dir_all(target)
+            .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+        let hash = hash_from_blob_ref(blob)?;
+        let collection = Collection::load(hash, self.inner.blob_store.as_ref())
+            .await
+            .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+
+        let entries = collection.into_iter().collect::<Vec<_>>();
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Exporting,
+            bytes_complete: 0,
+            bytes_total: None,
+        });
+
+        let mut completed = 0_u64;
+        for (name, hash) in entries {
+            let relative_path = validated_collection_relative_path(&name)?;
+            let destination = target.join(&relative_path);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TransportError::BlobExport(error.to_string()))?;
+            }
+            let size = self
+                .export_blob_with_progress(
+                    &BlobRef {
+                        hash: hash.to_hex(),
+                        format: BlobFormat::Blob,
+                    },
+                    &destination,
+                    &mut |progress| {
+                        on_progress(LocalTransferProgress {
+                            phase: TransferPhase::Exporting,
+                            bytes_complete: completed.saturating_add(progress.bytes_complete),
+                            bytes_total: None,
+                        });
+                    },
+                )
+                .await?;
+            completed = completed.saturating_add(size);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Exporting,
+                bytes_complete: completed,
+                bytes_total: None,
+            });
+        }
+        Ok(completed)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectionEntry {
+    relative_path: PathBuf,
+    absolute_path: PathBuf,
+    size: u64,
+}
+
+fn collect_collection_entries(root: &Path) -> Result<Vec<CollectionEntry>, TransportError> {
+    let mut entries = Vec::new();
+    collect_collection_entries_recursive(root, root, &mut entries)?;
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(entries)
+}
+
+fn collect_collection_entries_recursive(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<CollectionEntry>,
+) -> Result<(), TransportError> {
+    for entry in
+        std::fs::read_dir(current).map_err(|error| TransportError::BlobImport(error.to_string()))?
+    {
+        let entry = entry.map_err(|error| TransportError::BlobImport(error.to_string()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?;
+
+        if file_type.is_dir() {
+            collect_collection_entries_recursive(root, &path, entries)?;
+            continue;
+        }
+        if !(file_type.is_file() || file_type.is_symlink()) {
+            continue;
+        }
+
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?
+            .to_path_buf();
+        let size = std::fs::metadata(&path)
+            .map_err(|error| TransportError::BlobImport(error.to_string()))?
+            .len();
+        entries.push(CollectionEntry {
+            relative_path,
+            absolute_path: path,
+            size,
+        });
+    }
+    Ok(())
+}
+
+fn collection_entry_name(relative_path: &Path) -> Result<String, TransportError> {
+    let relative_path = validated_collection_relative_path(relative_path)?;
+    Ok(relative_path.to_string_lossy().replace('\\', "/"))
+}
+
+fn validated_collection_relative_path(path: impl AsRef<Path>) -> Result<PathBuf, TransportError> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return Err(TransportError::BlobExport(format!(
+            "collection entry {} must be relative",
+            path.display()
+        )));
+    }
+
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => clean.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(TransportError::BlobExport(format!(
+                    "collection entry {} contains invalid path components",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    if clean.as_os_str().is_empty() {
+        return Err(TransportError::BlobExport(
+            "collection entry path must not be empty".into(),
+        ));
+    }
+
+    Ok(clean)
+}
+
+async fn run_accept_loop(
+    endpoint: Endpoint,
+    incoming_tx: mpsc::UnboundedSender<IrohConnection>,
+    blobs_protocol: BlobsProtocol,
+) {
+    loop {
+        let Some(incoming) = endpoint.accept().await else {
+            break;
+        };
+        let mut accepting = match incoming.accept() {
+            Ok(accepting) => accepting,
+            Err(_) => continue,
+        };
+        let alpn = match accepting.alpn().await {
+            Ok(alpn) => alpn,
+            Err(_) => continue,
+        };
+        let connection = match accepting.await {
+            Ok(connection) => connection,
+            Err(_) => continue,
+        };
+        match alpn.as_slice() {
+            SKYFFLA_ALPN => {
+                if incoming_tx.send(IrohConnection { connection }).is_err() {
+                    break;
+                }
+            }
+            iroh_blobs::ALPN => {
+                let protocol = blobs_protocol.clone();
+                tokio::spawn(async move {
+                    let _ = protocol.accept(connection).await;
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn blob_ref_from_hash_and_format(hash_and_format: HashAndFormat) -> BlobRef {
+    BlobRef {
+        hash: hash_and_format.hash.to_hex(),
+        format: blob_format_from_iroh(hash_and_format.format),
+    }
+}
+
+fn hash_from_blob_ref(blob: &BlobRef) -> Result<Hash, TransportError> {
+    Hash::from_str(&blob.hash).map_err(|error| TransportError::BlobHashDecode(error.to_string()))
+}
+
+fn hash_and_format_from_blob_ref(blob: &BlobRef) -> Result<HashAndFormat, TransportError> {
+    Ok(HashAndFormat::new(
+        hash_from_blob_ref(blob)?,
+        blob_format_to_iroh(&blob.format),
+    ))
+}
+
+fn blob_format_from_iroh(format: IrohBlobFormat) -> BlobFormat {
+    match format {
+        IrohBlobFormat::Raw => BlobFormat::Blob,
+        IrohBlobFormat::HashSeq => BlobFormat::Collection,
+    }
+}
+
+fn blob_format_to_iroh(format: &BlobFormat) -> IrohBlobFormat {
+    match format {
+        BlobFormat::Blob => IrohBlobFormat::Raw,
+        BlobFormat::Collection => IrohBlobFormat::HashSeq,
     }
 }
 
@@ -232,12 +855,17 @@ impl IrohConnection {
 pub enum TransportError {
     EndpointBind(iroh::endpoint::BindError),
     EndpointClosed,
-    Accept(iroh::endpoint::ConnectingError),
     Connect(iroh::endpoint::ConnectError),
+    ConnectBlob(iroh::endpoint::ConnectError),
     OpenBi(iroh::endpoint::ConnectionError),
     AcceptBi(iroh::endpoint::ConnectionError),
     TicketEncode(serde_json::Error),
     TicketDecode(serde_json::Error),
+    BlobImport(String),
+    BlobFetch(String),
+    BlobExport(String),
+    BlobTag(String),
+    BlobHashDecode(String),
     NoLocalAddresses,
     LocalModeRequiresDirectConnection { mode: TransportMode },
     MissingRemoteAddrForLocalMode,
@@ -250,12 +878,17 @@ impl fmt::Display for TransportError {
         match self {
             Self::EndpointBind(error) => write!(f, "failed to bind iroh endpoint: {error}"),
             Self::EndpointClosed => write!(f, "iroh endpoint closed before accepting a connection"),
-            Self::Accept(error) => write!(f, "failed to accept iroh connection: {error}"),
             Self::Connect(error) => write!(f, "failed to connect via iroh: {error}"),
+            Self::ConnectBlob(error) => write!(f, "failed to connect for blob transfer: {error}"),
             Self::OpenBi(error) => write!(f, "failed to open bidirectional stream: {error}"),
             Self::AcceptBi(error) => write!(f, "failed to accept bidirectional stream: {error}"),
             Self::TicketEncode(error) => write!(f, "failed to encode peer ticket: {error}"),
             Self::TicketDecode(error) => write!(f, "failed to decode peer ticket: {error}"),
+            Self::BlobImport(error) => write!(f, "failed to import blob: {error}"),
+            Self::BlobFetch(error) => write!(f, "failed to fetch blob: {error}"),
+            Self::BlobExport(error) => write!(f, "failed to export blob: {error}"),
+            Self::BlobTag(error) => write!(f, "failed to pin blob: {error}"),
+            Self::BlobHashDecode(error) => write!(f, "failed to decode blob hash: {error}"),
             Self::NoLocalAddresses => write!(
                 f,
                 "local mode requires a peer ticket with at least one local-network address"
@@ -286,13 +919,18 @@ impl std::error::Error for TransportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::EndpointBind(error) => Some(error),
-            Self::Accept(error) => Some(error),
             Self::Connect(error) => Some(error),
+            Self::ConnectBlob(error) => Some(error),
             Self::OpenBi(error) => Some(error),
             Self::AcceptBi(error) => Some(error),
             Self::TicketEncode(error) => Some(error),
             Self::TicketDecode(error) => Some(error),
             Self::EndpointClosed
+            | Self::BlobImport(_)
+            | Self::BlobFetch(_)
+            | Self::BlobExport(_)
+            | Self::BlobTag(_)
+            | Self::BlobHashDecode(_)
             | Self::NoLocalAddresses
             | Self::LocalModeRequiresDirectConnection { .. }
             | Self::MissingRemoteAddrForLocalMode
@@ -336,6 +974,7 @@ fn is_local_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -352,6 +991,14 @@ mod tests {
             let message = bind_error.to_string();
             message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
         })
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("skyffla-transport-{name}-{nanos}"))
     }
 
     #[tokio::test]
@@ -436,6 +1083,113 @@ mod tests {
         accept_task.await.expect("accept task should join");
         host.close().await;
         joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn import_and_export_blob_round_trip() {
+        let Some(transport) = bind_or_skip().await else {
+            return;
+        };
+        let source = unique_temp_path("blob-source");
+        let target = unique_temp_path("blob-target");
+        std::fs::write(&source, b"blob data").expect("source file should be writable");
+
+        let blob = transport
+            .import_blob_path(&source)
+            .await
+            .expect("blob import should succeed");
+        let size = transport
+            .export_blob(&blob, &target)
+            .await
+            .expect("blob export should succeed");
+
+        assert_eq!(size, 9);
+        assert_eq!(
+            std::fs::read(&target).expect("target should exist"),
+            b"blob data"
+        );
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&target);
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_downloads_from_peer() {
+        let Some(host) = bind_or_skip().await else {
+            return;
+        };
+        let Some(joiner) = bind_or_skip().await else {
+            return;
+        };
+        let source = unique_temp_path("fetch-source");
+        let target = unique_temp_path("fetch-target");
+        std::fs::write(&source, b"hello blob peer").expect("source file should be writable");
+
+        let blob = host
+            .import_blob_path(&source)
+            .await
+            .expect("host should import blob");
+        let host_ticket = host.local_ticket().expect("host ticket should encode");
+
+        joiner
+            .fetch_blob(&host_ticket, &blob)
+            .await
+            .expect("joiner should fetch blob");
+        let size = joiner
+            .export_blob(&blob, &target)
+            .await
+            .expect("joiner should export fetched blob");
+
+        assert_eq!(size, 15);
+        assert_eq!(
+            std::fs::read(&target).expect("target should exist"),
+            b"hello blob peer"
+        );
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&target);
+        host.close().await;
+        joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn import_and_export_collection_round_trip() {
+        let Some(transport) = bind_or_skip().await else {
+            return;
+        };
+        let source_dir = unique_temp_path("collection-source");
+        let nested_dir = source_dir.join("nested");
+        let target_dir = unique_temp_path("collection-target");
+        std::fs::create_dir_all(&nested_dir).expect("nested source dir should be writable");
+        std::fs::write(source_dir.join("a.txt"), b"alpha").expect("a.txt should be writable");
+        std::fs::write(nested_dir.join("b.txt"), b"beta").expect("b.txt should be writable");
+
+        let imported = transport
+            .import_path(&source_dir)
+            .await
+            .expect("collection import should succeed");
+        assert_eq!(imported.blob.format, BlobFormat::Collection);
+        assert_eq!(imported.size, 9);
+
+        let exported_size = transport
+            .export_path(&imported.blob, &target_dir)
+            .await
+            .expect("collection export should succeed");
+        assert_eq!(exported_size, 9);
+        assert_eq!(
+            std::fs::read(target_dir.join("a.txt")).expect("exported a.txt should exist"),
+            b"alpha"
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join("nested").join("b.txt"))
+                .expect("exported nested b.txt should exist"),
+            b"beta"
+        );
+
+        let _ = std::fs::remove_dir_all(&source_dir);
+        let _ = std::fs::remove_dir_all(&target_dir);
+        transport.close().await;
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-# Self-Hosting Guide
+# Self-Hosting Iroh Infrastructure
 
 Verified against official `iroh` docs on 2026-03-08.
 
@@ -9,12 +9,14 @@ This note is for someone who cloned this repo and wants to run Skyffla themselve
 Skyffla has two separate infrastructure layers:
 
 - Skyffla rendezvous
-- `iroh` peer transport
+- `iroh` peer transport and blob transfer
 
 In this repo today:
 
 - You can self-host the Skyffla rendezvous service directly.
 - The transport layer uses `iroh`'s default production setup unless code is changed.
+- File and folder transfer use `iroh-blobs` on the same endpoint stack as chat,
+  channels, and other peer traffic.
 
 Relevant local code:
 
@@ -56,7 +58,22 @@ Those defaults include:
 - public relays operated by Number 0
 - DNS-based discovery in the default `iroh` environment
 
-That means a small self-hosted Skyffla deployment is not fully self-contained by default. You host rendezvous, but transport bootstrap and relay fallback still depend on `iroh` public infrastructure.
+That means a small self-hosted Skyffla deployment is not fully self-contained by
+default. You host rendezvous, but transport bootstrap, relay fallback, and
+blob-backed file or folder transfer still depend on `iroh` public
+infrastructure.
+
+## What now uses that transport stack
+
+Today the `iroh` endpoint is used for:
+
+- room authority and peer links
+- raw duplex `--stdio`
+- blob-backed file transfer
+- blob-backed folder transfer via `iroh-blobs` collections
+
+So if you keep the default `iroh` production setup, that choice affects both the
+interactive room traffic and the file or folder payload path.
 
 ## What is fine to rely on at small scale
 
@@ -102,7 +119,8 @@ The scale-out path is:
 
 1. Keep self-hosting Skyffla rendezvous.
 2. Move from `iroh` public relays to dedicated relays.
-3. Configure clients to use custom relay configuration instead of `iroh` defaults.
+3. Configure clients to use custom relay configuration instead of `iroh`
+   defaults.
 4. If needed, also move discovery off the shared public environment.
 
 In other words:
@@ -124,4 +142,5 @@ For most people cloning this repo today, the practical recommendation is:
    - abuse or rate-limit issues
 4. Add dedicated `iroh` relay infrastructure only when those signals appear.
 
-This keeps the initial deployment small while preserving a clear route to more control later.
+This keeps the initial deployment small while preserving a clear route to more
+control later.

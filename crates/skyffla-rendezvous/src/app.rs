@@ -4,18 +4,21 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
-use axum::http::{request::Parts, HeaderMap, StatusCode};
+use axum::http::{header::HeaderValue, request::Parts, HeaderMap, StatusCode};
+use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Serialize;
 
-use crate::store::{SharedStreamStore, StoreError};
-use crate::{unix_timestamp_seconds, PutStreamRequest};
+use crate::store::{SharedRoomStore, StoreError};
+use crate::{
+    unix_timestamp_seconds, PutRoomRequest, RENDEZVOUS_API_VERSION, RENDEZVOUS_VERSION_HEADER,
+};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: SharedStreamStore,
+    pub store: SharedRoomStore,
     pub rate_limiter: Arc<IpRateLimiter>,
     pub trust_proxy_headers: bool,
 }
@@ -24,9 +27,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route(
-            "/v1/streams/{stream_id}",
-            put(put_stream).get(get_stream).delete(delete_stream),
+            "/v1/rooms/{room_id}",
+            put(put_room).get(get_room).delete(delete_room),
         )
+        .layer(map_response(add_version_header))
         .with_state(state)
 }
 
@@ -34,56 +38,65 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn put_stream(
+async fn add_version_header(mut response: Response) -> Response {
+    let value = HeaderValue::from_str(&RENDEZVOUS_API_VERSION.to_string())
+        .expect("static rendezvous version should serialize as a header");
+    response
+        .headers_mut()
+        .insert(RENDEZVOUS_VERSION_HEADER, value);
+    response
+}
+
+async fn put_room(
     State(state): State<AppState>,
-    Path(stream_id): Path<String>,
+    Path(room_id): Path<String>,
     headers: HeaderMap,
     MaybeConnectInfo(peer_addr): MaybeConnectInfo,
-    Json(request): Json<PutStreamRequest>,
-) -> Result<Json<crate::PutStreamResponse>, ApiError> {
+    Json(request): Json<PutRoomRequest>,
+) -> Result<Json<crate::PutRoomResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
     state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
-        .put(&stream_id, request, now_epoch_seconds)
+        .put(&room_id, request, now_epoch_seconds)
         .map_err(ApiError::from_store)?;
-    log_request("register", &stream_id, client_ip, StatusCode::OK, "ok");
+    log_request("register", &room_id, client_ip, StatusCode::OK, "ok");
     Ok(Json(response))
 }
 
-async fn get_stream(
+async fn get_room(
     State(state): State<AppState>,
-    Path(stream_id): Path<String>,
+    Path(room_id): Path<String>,
     headers: HeaderMap,
     MaybeConnectInfo(peer_addr): MaybeConnectInfo,
-) -> Result<Json<crate::GetStreamResponse>, ApiError> {
+) -> Result<Json<crate::GetRoomResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
     state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
-        .get(&stream_id, now_epoch_seconds)
+        .get(&room_id, now_epoch_seconds)
         .map_err(|error| {
             let api_error = ApiError::from_store(error);
             log_request(
                 "resolve",
-                &stream_id,
+                &room_id,
                 client_ip,
                 api_error.status,
                 api_error.code,
             );
             api_error
         })?;
-    log_request("resolve", &stream_id, client_ip, StatusCode::OK, "ok");
+    log_request("resolve", &room_id, client_ip, StatusCode::OK, "ok");
     Ok(Json(response))
 }
 
-async fn delete_stream(
+async fn delete_room(
     State(state): State<AppState>,
-    Path(stream_id): Path<String>,
+    Path(room_id): Path<String>,
     headers: HeaderMap,
     MaybeConnectInfo(peer_addr): MaybeConnectInfo,
 ) -> Result<StatusCode, ApiError> {
@@ -91,24 +104,18 @@ async fn delete_stream(
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
     state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
-    state.store.delete(&stream_id).map_err(|error| {
+    state.store.delete(&room_id).map_err(|error| {
         let api_error = ApiError::from_store(error);
         log_request(
             "delete",
-            &stream_id,
+            &room_id,
             client_ip,
             api_error.status,
             api_error.code,
         );
         api_error
     })?;
-    log_request(
-        "delete",
-        &stream_id,
-        client_ip,
-        StatusCode::NO_CONTENT,
-        "ok",
-    );
+    log_request("delete", &room_id, client_ip, StatusCode::NO_CONTENT, "ok");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -157,15 +164,15 @@ where
 
 fn log_request(
     operation: &str,
-    stream_id: &str,
+    room_id: &str,
     client_ip: IpAddr,
     status: StatusCode,
     outcome: &str,
 ) {
     println!(
-        "request op={} stream_id={} client_ip={} status={} outcome={}",
+        "request op={} room_id={} client_ip={} status={} outcome={}",
         operation,
-        stream_id,
+        room_id,
         client_ip,
         status.as_u16(),
         outcome
@@ -235,16 +242,16 @@ impl ApiError {
                 message: format!("ttl_seconds must be greater than zero, got {ttl_seconds}"),
                 retry_after_seconds: None,
             },
-            Some(crate::RegistryError::StreamAlreadyExists { stream_id }) => Self {
+            Some(crate::RegistryError::RoomAlreadyExists { room_id }) => Self {
                 status: StatusCode::CONFLICT,
-                code: "stream_already_exists",
-                message: format!("stream {stream_id} is already hosted"),
+                code: "room_already_exists",
+                message: format!("room {room_id} is already hosted"),
                 retry_after_seconds: None,
             },
-            Some(crate::RegistryError::StreamNotFound { stream_id }) => Self {
+            Some(crate::RegistryError::RoomNotFound { room_id }) => Self {
                 status: StatusCode::NOT_FOUND,
-                code: "stream_not_found",
-                message: format!("stream {stream_id} was not found"),
+                code: "room_not_found",
+                message: format!("room {room_id} was not found"),
                 retry_after_seconds: None,
             },
             None => Self::internal(error.to_string()),
@@ -317,29 +324,30 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::store::InMemoryStreamStore;
+    use crate::store::InMemoryRoomStore;
 
     fn test_app(rate_limit: usize, trust_proxy_headers: bool) -> Router {
         build_router(AppState {
-            store: Arc::new(InMemoryStreamStore::new()),
+            store: Arc::new(InMemoryRoomStore::new()),
             rate_limiter: Arc::new(IpRateLimiter::new(rate_limit, 60)),
             trust_proxy_headers,
         })
     }
 
     #[tokio::test]
-    async fn put_then_get_stream_via_http() {
+    async fn put_then_get_room_via_http() {
         let app = test_app(10, false);
+        let version = RENDEZVOUS_API_VERSION.to_string();
 
         let put_response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/v1/streams/demo-room")
+                    .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&crate::PutStreamRequest {
+                        serde_json::to_vec(&crate::PutRoomRequest {
                             ticket: "bootstrap-ticket".into(),
                             ttl_seconds: 600,
                             capabilities: Capabilities::default(),
@@ -352,12 +360,19 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(put_response.status(), StatusCode::OK);
+        assert_eq!(
+            put_response
+                .headers()
+                .get(RENDEZVOUS_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(version.as_str())
+        );
 
         let get_response = app
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/demo-room")
+                    .uri("/v1/rooms/demo-room")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -365,22 +380,29 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(get_response.status(), StatusCode::OK);
+        assert_eq!(
+            get_response
+                .headers()
+                .get(RENDEZVOUS_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(version.as_str())
+        );
         let body = get_response
             .into_body()
             .collect()
             .await
             .expect("body should collect")
             .to_bytes();
-        let response: crate::GetStreamResponse =
+        let response: crate::GetRoomResponse =
             serde_json::from_slice(&body).expect("response should deserialize");
-        assert_eq!(response.stream_id, "demo-room");
+        assert_eq!(response.room_id, "demo-room");
     }
 
     #[tokio::test]
-    async fn conflicting_stream_returns_conflict() {
+    async fn conflicting_room_returns_conflict() {
         let app = test_app(10, false);
 
-        let first_body = serde_json::to_vec(&crate::PutStreamRequest {
+        let first_body = serde_json::to_vec(&crate::PutRoomRequest {
             ticket: "ticket-a".into(),
             ttl_seconds: 600,
             capabilities: Capabilities::default(),
@@ -390,7 +412,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/v1/streams/demo-room")
+                    .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
                     .body(Body::from(first_body))
                     .expect("request should build"),
@@ -398,7 +420,7 @@ mod tests {
             .await
             .expect("request should succeed");
 
-        let second_body = serde_json::to_vec(&crate::PutStreamRequest {
+        let second_body = serde_json::to_vec(&crate::PutRoomRequest {
             ticket: "ticket-b".into(),
             ttl_seconds: 600,
             capabilities: Capabilities::default(),
@@ -408,7 +430,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/v1/streams/demo-room")
+                    .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
                     .body(Body::from(second_body))
                     .expect("request should build"),
@@ -428,7 +450,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -440,7 +462,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -458,7 +480,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.10")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -471,7 +493,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.11")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -490,7 +512,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.10")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -503,7 +525,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/streams/missing")
+                    .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.11")
                     .body(Body::empty())
                     .expect("request should build"),
