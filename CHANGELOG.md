@@ -6,9 +6,11 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
-### Changed
+## [1.0.0] - 2026-03-15
 
-- Bump the next release line to `1.0.0` for the room-native architecture, `machine` protocol, room TUI, and other intentional breaking changes from the old 0.x CLI/runtime model.
+- Replace the legacy interactive session path with the room-native `machine` runtime, room protocol, and multiparty session engine.
+- Add the room TUI, blob-backed file transfer flow, richer member-aware machine events, and stable duplex `--stdio` behavior.
+- Document the protocol and compatibility boundaries in `docs/machine-protocol.md`, `docs/stdio-duplex-spec.md`, `docs/room-architecture.md`, and `docs/versioning.md`, and expand end-to-end coverage around machine, room TUI, and stdio flows.
 
 ## [0.2.0] - 2026-03-10
 
