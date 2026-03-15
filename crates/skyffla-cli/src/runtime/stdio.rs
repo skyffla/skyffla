@@ -1,5 +1,5 @@
 use anyhow::Context;
-use iroh::endpoint::{RecvStream, SendStream};
+use iroh::endpoint::{ReadError, RecvStream, SendStream};
 use serde_json::json;
 use skyffla_protocol::ControlMessage;
 use skyffla_transport::IrohConnection;
@@ -94,6 +94,12 @@ pub(crate) async fn run_stdio_session(
                         }));
                     }
                     Ok(None) => {
+                        receive_closed = true;
+                        sink.emit_json_event(json!({
+                            "event": "remote_eof",
+                        }));
+                    }
+                    Err(ReadError::ClosedStream | ReadError::ConnectionLost(_)) => {
                         receive_closed = true;
                         sink.emit_json_event(json!({
                             "event": "remote_eof",
