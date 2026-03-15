@@ -159,6 +159,8 @@ that you control.
 
 - [`docs/room-architecture.md`](docs/room-architecture.md): room-native architecture and design boundaries
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
+- [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
+- [`docs/stdio-duplex-spec.md`](docs/stdio-duplex-spec.md): low-level duplex `--stdio` design note
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
 
 ## Local Development
