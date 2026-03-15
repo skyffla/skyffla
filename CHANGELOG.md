@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Raise the published Python wrapper floor to Python 3.10 because the runtime uses modern type syntax that does not import correctly on Python 3.9.
+
 ## [1.1.1] - 2026-03-15
 
 - Regenerate `wrappers/python/uv.lock` during release cuts so tagged Python wrapper publishes stay consistent with the bumped package version and `uv sync --locked` succeeds in CI.
