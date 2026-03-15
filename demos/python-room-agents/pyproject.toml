@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "python-room-agents-demo"
+version = "0.1.0"
+description = "Director and artist demo built on the Skyffla Python wrapper"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.0",
+  "python-dotenv>=1.0",
+]
+
+[project.scripts]
+room-director = "room_agents_demo.director:main"
+room-artist = "room_agents_demo.artist:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/room_agents_demo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
