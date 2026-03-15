@@ -3,10 +3,16 @@
 </p>
 
 <p align="center">
-  Multiparty peer-to-peer rooms for terminals, agents, and scripts.
+  Multi-party peer-to-peer rooms for terminals, agents, and scripts.
 </p>
 
-Skyffla is a room-first peer-to-peer system.
+Skyffla is a room-first, multi-party peer-to-peer system.
+
+Think of it as a practical mesh-oriented room layer:
+
+- multi-party rooms are the default
+- 1:1 is just the smallest room
+- once a room is established, member traffic goes peer-to-peer instead of through a central chat relay
 
 Its native model is:
 
@@ -28,7 +34,8 @@ room control, peer introduction, file transfer, and terminal UX stack first.
 
 ## Why Skyffla
 
-- Multiparty is native. A room is the product abstraction; 1:1 is just a room with two members.
+- Multi-party is native. A room is the product abstraction; 1:1 is just a room with two members.
+- Mesh-oriented where it matters. Room authority is host-owned, but chat and payload traffic are peer-to-peer between members.
 - Direct by default. Chat, file/folder transfer, and channel traffic stay peer-to-peer once a room is established.
 - One room model across human and machine surfaces. The TUI and `machine` speak the same room protocol.
 - Easy to adopt. Use the public rendezvous by default, or self-host `skyffla-rendezvous` when you need control.
@@ -116,7 +123,7 @@ documented for the CLI runtime. The public wrapper-facing contract is in
 
 Both the default TUI and `machine` are room-native:
 
-- they join the same kind of multiparty room
+- they join the same kind of multi-party room
 - they see the same room/member/channel concepts
 - they differ only in presentation and automation surface
 

@@ -4,7 +4,7 @@ Status: active architecture reference
 
 ## Goal
 
-Make multiparty rooms the native Skyffla abstraction.
+Make multi-party rooms the native Skyffla abstraction.
 
 - a room is the thing users join
 - 1:1 is just a room with two members
@@ -12,11 +12,19 @@ Make multiparty rooms the native Skyffla abstraction.
 - TUI, `machine`, and language wrappers must all sit on the same room model
 - wrappers must not reimplement transport or protocol logic
 
-This is not a full network mesh in v1. It is a native multiparty product model with:
+This is not a full network mesh in v1. It is a native multi-party, mesh-oriented
+product model with:
 
 - host-owned room authority
 - direct peer-to-peer member messaging
 - direct peer-to-peer payload channels
+
+So the design target is:
+
+- room-first
+- multi-party by default
+- mesh-style peer traffic after room setup
+- without requiring a fully decentralized room authority model in v1
 
 This room-first architecture applies to:
 

@@ -1,6 +1,11 @@
 # Skyffla Machine Protocol
 
-This document defines the wrapper-facing `machine` contract for Skyffla rooms.
+This document defines the wrapper-facing `machine` contract for Skyffla's
+multi-party room model.
+
+`machine` is the room-native automation surface. It is the API wrappers should
+use when they want to participate in Skyffla rooms rather than raw 1:1 byte
+streams.
 
 The source of truth is the Rust schema in:
 
