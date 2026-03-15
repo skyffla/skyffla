@@ -17,7 +17,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub const MACHINE_PROTOCOL_VERSION: u16 = 1;
+use crate::ProtocolVersion;
+
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -305,7 +307,7 @@ impl MachineCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MachineEvent {
     RoomWelcome {
-        protocol_version: u16,
+        protocol_version: ProtocolVersion,
         room_id: RoomId,
         self_member: MemberId,
         host_member: MemberId,
@@ -396,7 +398,7 @@ impl MachineEvent {
                 self_member,
                 host_member,
             } => {
-                if *protocol_version == 0 {
+                if protocol_version.major == 0 {
                     return Err(RoomProtocolError::EmptyIdentifier {
                         kind: "protocol_version",
                     });

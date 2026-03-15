@@ -3,6 +3,7 @@
 - Keep docs and examples portable. Use relative paths and repo-relative commands; do not hardcode local absolute paths, personal hostnames, or machine-specific directories.
 - Avoid hardcoding GitHub owner names in docs, examples, or scripts unless the value is genuinely required input.
 - Treat `skyffla` and `skyffla-rendezvous` as separate deliverables. Packaging, install docs, and release notes should keep their install paths distinct.
+- Protocol and compatibility changes should stay explicitly documented. Keep the machine/wire/rendezvous version policy in `docs/versioning.md` up to date when changing handshake fields, protocol versions, or compatibility rules.
 - Prefer fast local tooling: use `rg` for search, `cargo test` for verification, and keep checks scoped to the code you changed when possible.
 - Keep the default test lane fast and honest:
   - prefer targeted `cargo test -p ...` runs for the code you changed before reaching for the full workspace or package suite

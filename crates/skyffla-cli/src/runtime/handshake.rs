@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::{
     Capabilities, ChatMessage, ControlMessage, Envelope, Hello, HelloAck, TransferKind,
-    TransportCapability, PROTOCOL_VERSION,
+    TransportCapability, WIRE_PROTOCOL_VERSION,
 };
 use skyffla_session::{RuntimeEvent, SessionPeer};
 
@@ -23,7 +23,7 @@ pub(crate) async fn exchange_hello(
         session_id,
         next_message_id(),
         ControlMessage::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: WIRE_PROTOCOL_VERSION,
             session_id: session_id.to_string(),
             peer_name: config.peer_name.clone(),
             peer_fingerprint: local_fingerprint.map(ToOwned::to_owned),
@@ -40,10 +40,10 @@ pub(crate) async fn exchange_hello(
         .context("peer closed control stream before sending hello")?;
     let peer = match peer_hello.payload {
         ControlMessage::Hello(hello) => {
-            if hello.protocol_version != PROTOCOL_VERSION {
+            if !hello.protocol_version.is_compatible_with(WIRE_PROTOCOL_VERSION) {
                 bail!(
                     "protocol version mismatch: local {}, peer {}",
-                    PROTOCOL_VERSION,
+                    WIRE_PROTOCOL_VERSION,
                     hello.protocol_version
                 );
             }
@@ -68,7 +68,7 @@ pub(crate) async fn exchange_hello(
         session_id,
         next_message_id(),
         ControlMessage::HelloAck(HelloAck {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: WIRE_PROTOCOL_VERSION,
             session_id: session_id.to_string(),
         }),
     );
@@ -78,10 +78,12 @@ pub(crate) async fn exchange_hello(
         .await?
         .context("peer closed control stream before sending hello ack")?;
     match peer_ack.payload {
-        ControlMessage::HelloAck(ack) if ack.protocol_version == PROTOCOL_VERSION => Ok(peer),
+        ControlMessage::HelloAck(ack) if ack.protocol_version.is_compatible_with(WIRE_PROTOCOL_VERSION) => {
+            Ok(peer)
+        }
         ControlMessage::HelloAck(ack) => bail!(
             "protocol version mismatch in hello ack: local {}, peer {}",
-            PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
             ack.protocol_version
         ),
         other => bail!("expected hello ack from peer, got {:?}", other),

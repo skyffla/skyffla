@@ -1,10 +1,13 @@
 use std::fmt;
 
 use anyhow::{Context, Result};
-use reqwest::{Client, StatusCode};
+use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde::Deserialize;
-use skyffla_protocol::Capabilities;
-use skyffla_rendezvous::{GetRoomResponse, PutRoomRequest, DEFAULT_TTL_SECONDS};
+use skyffla_protocol::{Capabilities, ProtocolVersion};
+use skyffla_rendezvous::{
+    GetRoomResponse, PutRoomRequest, DEFAULT_TTL_SECONDS, RENDEZVOUS_API_VERSION,
+    RENDEZVOUS_VERSION_HEADER,
+};
 use skyffla_transport::PeerTicket;
 
 use crate::config::SessionConfig;
@@ -25,6 +28,7 @@ pub(crate) async fn register_room(
         .await
         .context("failed to register room with rendezvous server")
         .map_err(RegisterRoomError::Other)?;
+    ensure_rendezvous_compatible(response.headers()).map_err(RegisterRoomError::Other)?;
 
     if response.status() == StatusCode::CONFLICT {
         let message = response
@@ -55,6 +59,7 @@ pub(crate) async fn resolve_room(
         .send()
         .await
         .context("failed to resolve room from rendezvous server")?;
+    ensure_rendezvous_compatible(response.headers())?;
 
     if response.status() == StatusCode::NOT_FOUND {
         return Ok(None);
@@ -75,6 +80,7 @@ pub(crate) async fn delete_room(client: &Client, config: &SessionConfig) -> Resu
         .send()
         .await
         .context("failed to delete room from rendezvous server")?;
+    ensure_rendezvous_compatible(response.headers())?;
 
     if is_delete_success(response.status()) {
         return Ok(());
@@ -84,6 +90,33 @@ pub(crate) async fn delete_room(client: &Client, config: &SessionConfig) -> Resu
         .error_for_status()
         .context("rendezvous server rejected room deletion")?;
     Ok(())
+}
+
+fn ensure_rendezvous_compatible(headers: &HeaderMap) -> Result<()> {
+    let raw = headers
+        .get(RENDEZVOUS_VERSION_HEADER)
+        .context("rendezvous server did not send a protocol version header")?
+        .to_str()
+        .context("rendezvous server sent a non-utf8 protocol version header")?;
+    let version = parse_rendezvous_version(raw)?;
+    if !version.is_compatible_with(RENDEZVOUS_API_VERSION) {
+        anyhow::bail!(
+            "rendezvous api version mismatch: local {}, server {}",
+            RENDEZVOUS_API_VERSION,
+            version
+        );
+    }
+    Ok(())
+}
+
+fn parse_rendezvous_version(value: &str) -> Result<ProtocolVersion> {
+    let (major, minor) = value
+        .split_once('.')
+        .context("rendezvous protocol version must be in <major>.<minor> form")?;
+    Ok(ProtocolVersion::new(
+        major.parse().context("invalid rendezvous major version")?,
+        minor.parse().context("invalid rendezvous minor version")?,
+    ))
 }
 
 fn is_delete_success(status: StatusCode) -> bool {
@@ -128,7 +161,12 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{is_delete_success, room_url, RendezvousErrorResponse};
+    use super::{
+        ensure_rendezvous_compatible, is_delete_success, parse_rendezvous_version, room_url,
+        RendezvousErrorResponse,
+    };
+    use reqwest::header::{HeaderMap, HeaderValue};
+    use skyffla_rendezvous::{RENDEZVOUS_API_VERSION, RENDEZVOUS_VERSION_HEADER};
 
     #[test]
     fn room_url_trims_trailing_slash_from_server() {
@@ -166,5 +204,25 @@ mod tests {
         assert!(is_delete_success(StatusCode::NO_CONTENT));
         assert!(is_delete_success(StatusCode::NOT_FOUND));
         assert!(!is_delete_success(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn parses_rendezvous_version_header() {
+        let parsed = parse_rendezvous_version("1.7").unwrap();
+        assert_eq!(parsed.major, 1);
+        assert_eq!(parsed.minor, 7);
+    }
+
+    #[test]
+    fn rejects_incompatible_rendezvous_major_version() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RENDEZVOUS_VERSION_HEADER,
+            HeaderValue::from_static("2.0"),
+        );
+        let error = ensure_rendezvous_compatible(&headers).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("local {}, server 2.0", RENDEZVOUS_API_VERSION)));
     }
 }

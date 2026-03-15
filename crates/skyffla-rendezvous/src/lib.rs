@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use skyffla_protocol::Capabilities;
+use skyffla_protocol::{Capabilities, ProtocolVersion};
 
 pub const DEFAULT_TTL_SECONDS: u64 = 600;
 pub const MAX_TTL_SECONDS: u64 = 3600;
+pub const RENDEZVOUS_API_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const RENDEZVOUS_VERSION_HEADER: &str = "x-skyffla-rendezvous-version";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PutRoomRequest {

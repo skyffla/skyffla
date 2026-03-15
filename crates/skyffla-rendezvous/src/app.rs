@@ -4,14 +4,17 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
-use axum::http::{request::Parts, HeaderMap, StatusCode};
+use axum::http::{header::HeaderValue, request::Parts, HeaderMap, StatusCode};
+use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::store::{SharedRoomStore, StoreError};
-use crate::{unix_timestamp_seconds, PutRoomRequest};
+use crate::{
+    unix_timestamp_seconds, PutRoomRequest, RENDEZVOUS_API_VERSION, RENDEZVOUS_VERSION_HEADER,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,11 +30,21 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/rooms/{room_id}",
             put(put_room).get(get_room).delete(delete_room),
         )
+        .layer(map_response(add_version_header))
         .with_state(state)
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn add_version_header(mut response: Response) -> Response {
+    let value = HeaderValue::from_str(&RENDEZVOUS_API_VERSION.to_string())
+        .expect("static rendezvous version should serialize as a header");
+    response
+        .headers_mut()
+        .insert(RENDEZVOUS_VERSION_HEADER, value);
+    response
 }
 
 async fn put_room(

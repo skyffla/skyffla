@@ -1192,7 +1192,7 @@ fn room_help_lines() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use skyffla_protocol::room::Member;
+    use skyffla_protocol::room::{Member, MACHINE_PROTOCOL_VERSION};
 
     use super::*;
 
@@ -1350,7 +1350,7 @@ mod tests {
             &mut state,
             &mut ui,
             MachineEvent::RoomWelcome {
-                protocol_version: 1,
+                protocol_version: MACHINE_PROTOCOL_VERSION,
                 room_id: skyffla_protocol::room::RoomId::new("demo-room").unwrap(),
                 self_member: MemberId::new("m2").unwrap(),
                 host_member: MemberId::new("m1").unwrap(),

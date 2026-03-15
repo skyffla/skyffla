@@ -28,9 +28,15 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `1`
+- `1.0`
 
 The version is emitted in the initial `room_welcome` event.
+
+Compatibility rule:
+
+- same major: compatible
+- different major: incompatible
+- minor versions are additive within one major
 
 ## Identifiers
 
@@ -192,7 +198,7 @@ For `machine` and `clipboard` channels:
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":1,
+  "protocol_version":{"major":1,"minor":0},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
