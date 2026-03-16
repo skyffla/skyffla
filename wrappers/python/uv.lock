@@ -233,7 +233,7 @@ wheels = [
 
 [[package]]
 name = "skyffla"
-version = "1.1.3"
+version = "1.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

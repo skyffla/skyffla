@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-03-16
+
 - Clarify the PyPI wrapper package page so it leads with installing the `skyffla` binary, shows a working host/join Python example, and points readers to GitHub for deeper docs.
 
 ## [1.1.3] - 2026-03-15
