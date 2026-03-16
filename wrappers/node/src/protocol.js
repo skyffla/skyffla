@@ -178,7 +178,7 @@ function parseMember(value, fieldName = "member") {
 }
 
 function parseOpenChannelLike(input, fieldName = "message") {
-  const blob = input.blob === undefined ? undefined : parseBlobRef(input.blob);
+  const blob = input.blob == null ? undefined : parseBlobRef(input.blob);
   const kind = requireEnum(input.kind, `${fieldName}.kind`, CHANNEL_KINDS);
   if (kind === ChannelKind.FILE && blob === undefined) {
     throw new SkyfflaProtocolError(`${fieldName}.blob is required for file channels`);

@@ -73,6 +73,27 @@ test("documented open channel command shape round trips", () => {
   });
 });
 
+test("channel opened tolerates null blob for non-file channels", () => {
+  const event = parseMachineEvent({
+    type: "channel_opened",
+    channel_id: "c7",
+    kind: "machine",
+    from: "m2",
+    from_name: "beta",
+    to: { type: "member", member_id: "m1" },
+    name: "agent-link",
+    blob: null,
+  });
+
+  assert.equal(event.type, "channel_opened");
+  assert.equal(event.channel_id, "c7");
+  assert.equal(event.kind, ChannelKind.MACHINE);
+  assert.equal(event.from, "m2");
+  assert.equal(event.from_name, "beta");
+  assert.deepEqual(event.to, { type: "member", member_id: "m1" });
+  assert.equal("blob" in event, false);
+});
+
 test("normalize route accepts all and member ids", () => {
   assert.deepEqual(normalizeRoute("all"), { type: "all" });
   assert.deepEqual(normalizeRoute("m9"), { type: "member", member_id: "m9" });
