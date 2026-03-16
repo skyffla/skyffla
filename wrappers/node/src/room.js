@@ -62,7 +62,7 @@ export async function probeBinaryVersion(binary = defaultBinary()) {
       `failed to run ${JSON.stringify(binary)} --version: ${output.stderr || output.stdout}`,
     );
   }
-  return parseCliVersion(output.stdout || output.stderr);
+  return parseCliVersion(output.stdout);
 }
 
 export async function ensureBinaryVersion(binary = defaultBinary()) {
