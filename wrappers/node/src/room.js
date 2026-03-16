@@ -23,45 +23,46 @@ function defaultBinary() {
 }
 
 async function collectOutput(child) {
-  const stdout = [];
-  const stderr = [];
-
-  if (child.stdout) {
-    for await (const chunk of child.stdout) {
-      stdout.push(chunk);
+  const readStream = async (stream) => {
+    if (!stream) {
+      return "";
     }
-  }
-  if (child.stderr) {
-    for await (const chunk of child.stderr) {
-      stderr.push(chunk);
-    }
-  }
 
-  return {
-    stdout: Buffer.concat(stdout).toString("utf8").trim(),
-    stderr: Buffer.concat(stderr).toString("utf8").trim(),
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString("utf8").trim();
   };
+
+  const [stdout, stderr] = await Promise.all([
+    readStream(child.stdout),
+    readStream(child.stderr),
+  ]);
+
+  return { stdout, stderr };
 }
 
 export async function probeBinaryVersion(binary = defaultBinary()) {
   const child = spawn(binary, ["--version"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const outputPromise = collectOutput(child);
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", resolve);
+    child.once("close", resolve);
   }).catch((error) => {
     throw new SkyfflaVersionMismatch(
       `failed to run ${JSON.stringify(binary)} --version: ${error.message}`,
     );
   });
-  const output = await collectOutput(child);
+  const output = await outputPromise;
   if (exitCode !== 0) {
     throw new SkyfflaVersionMismatch(
       `failed to run ${JSON.stringify(binary)} --version: ${output.stderr || output.stdout}`,
     );
   }
-  return parseCliVersion(output.stdout);
+  return parseCliVersion(output.stdout || output.stderr);
 }
 
 export async function ensureBinaryVersion(binary = defaultBinary()) {
