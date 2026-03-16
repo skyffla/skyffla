@@ -1,6 +1,8 @@
 # Skyffla Node.js Wrapper
 
-Use this package to control an installed `skyffla` CLI from Node.js.
+Multi-party peer-to-peer rooms for terminals, agents, and scripts.
+
+Use this package to join and automate installed `skyffla` rooms from Node.js.
 
 `npm install skyffla` installs the Node.js wrapper only. Install the `skyffla`
 binary separately first.

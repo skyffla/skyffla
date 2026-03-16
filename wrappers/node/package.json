@@ -1,7 +1,7 @@
 {
   "name": "skyffla",
   "version": "1.2.0",
-  "description": "Node.js wrapper for skyffla peer-to-peer rooms and automation",
+  "description": "Multi-party peer-to-peer rooms for terminals, agents, and scripts",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

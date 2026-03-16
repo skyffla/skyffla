@@ -1,6 +1,8 @@
 # Skyffla Python Wrapper
 
-Use this package to control an installed `skyffla` CLI from Python.
+Multi-party peer-to-peer rooms for terminals, agents, and scripts.
+
+Use this package to join and automate installed `skyffla` rooms from Python.
 
 `pip install skyffla` installs the Python wrapper only. Install the `skyffla`
 binary separately first.
