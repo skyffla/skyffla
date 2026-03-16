@@ -6,6 +6,11 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-16
+
+- Add the first published Node.js wrapper under `wrappers/node`, including typed machine protocol parsing, async room clients, runnable chat examples, smoke coverage against the local `skyffla` binary, and a gated npm publish workflow.
+- Align the Node.js wrapper's `skyffla --version` probing behavior with the Python wrapper while fixing short-lived process output collection.
+
 ## [1.1.3] - 2026-03-15
 
 - Add Python wrapper models and exports for transfer progress events so wrapper users can parse file transfer progress updates from the machine event stream.
