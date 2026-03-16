@@ -39,7 +39,7 @@ jobs:
 
       - name: Run Node wrapper tests
         env:
-          SKYFFLA_BIN: target/debug/skyffla
+          SKYFFLA_BIN: ../../target/debug/skyffla
         run: npm test --prefix wrappers/node
 
       - name: Verify tag matches Node package version
