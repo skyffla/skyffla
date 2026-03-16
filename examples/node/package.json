@@ -1,0 +1,14 @@
+{
+  "name": "skyffla-node-examples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable Node.js examples for the Skyffla wrapper",
+  "type": "module",
+  "scripts": {
+    "simple-chat": "node simple-chat/main.mjs",
+    "sync-chat-and-channel": "node sync-chat-and-channel/main.mjs"
+  },
+  "dependencies": {
+    "skyffla": "^1.1.3"
+  }
+}

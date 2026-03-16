@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skyffla"
-version = "1.1.4"
-description = "Python wrapper for skyffla peer-to-peer rooms and automation"
+version = "1.2.0"
+description = "Multi-party peer-to-peer rooms for terminals, agents, and scripts"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

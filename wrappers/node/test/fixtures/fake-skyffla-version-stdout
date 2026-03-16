@@ -1,0 +1,2 @@
+#!/bin/sh
+printf 'skyffla 1.2.3\n'
