@@ -1,0 +1,101 @@
+name: Node Wrapper
+
+on:
+  pull_request:
+    paths:
+      - "wrappers/node/**"
+      - "examples/node/**"
+      - ".github/workflows/node-package.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-pack:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Build local skyffla binary for smoke tests
+        run: cargo build -p skyffla --locked
+
+      - name: Install Node wrapper dependencies
+        run: npm ci --prefix wrappers/node
+
+      - name: Run Node wrapper tests
+        env:
+          SKYFFLA_BIN: target/debug/skyffla
+        run: npm test --prefix wrappers/node
+
+      - name: Verify tag matches Node package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: wrappers/node
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "${package_version}" != "${tag_version}" ]; then
+            echo "package.json version ${package_version} does not match tag ${tag_version}" >&2
+            exit 1
+          fi
+
+      - name: Pack npm package
+        working-directory: wrappers/node
+        run: npm pack --pack-destination ../../dist/node
+
+      - name: Upload Node package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-dist
+          path: dist/node/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NODE_PACKAGE == '1'
+    needs: test-and-pack
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download Node package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: node-dist
+          path: dist/node
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public dist/node/*.tgz
+
+  publish-disabled:
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NODE_PACKAGE != '1'
+    needs: test-and-pack
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Explain why npm publish is skipped
+        run: |
+          echo "Skipping npm publish because repo variable PUBLISH_NODE_PACKAGE is not set to 1."
+          echo "Enable it after the skyffla package name is claimed and trusted publishing is configured."

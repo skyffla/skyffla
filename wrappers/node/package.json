@@ -1,0 +1,38 @@
+{
+  "name": "skyffla",
+  "version": "1.1.3",
+  "description": "Node.js wrapper for skyffla peer-to-peer rooms and automation",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "types": "./src/index.d.ts",
+  "files": [
+    "src",
+    "README.md",
+    "PUBLISHING.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "skyffla",
+    "p2p",
+    "rooms",
+    "automation"
+  ],
+  "author": "Skyffla",
+  "license": "MIT",
+  "homepage": "https://github.com/skyffla/skyffla",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skyffla/skyffla.git"
+  },
+  "bugs": {
+    "url": "https://github.com/skyffla/skyffla/issues"
+  }
+}

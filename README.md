@@ -229,6 +229,13 @@ uv sync
 uv run pytest
 ```
 
+Run the Node.js wrapper checks:
+
+```sh
+npm ci --prefix wrappers/node
+npm test --prefix wrappers/node
+```
+
 Run the rendezvous server locally:
 
 ```sh
