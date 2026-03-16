@@ -71,10 +71,13 @@ function requireBody(value, fieldName) {
 }
 
 function optionalString(value, fieldName) {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return undefined;
   }
-  return requireString(value, fieldName);
+  if (typeof value !== "string") {
+    throw new SkyfflaProtocolError(`${fieldName} must be a string`);
+  }
+  return value;
 }
 
 function optionalInteger(value, fieldName, { min = 0 } = {}) {

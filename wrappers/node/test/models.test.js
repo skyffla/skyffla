@@ -94,6 +94,21 @@ test("channel opened tolerates null blob for non-file channels", () => {
   assert.equal("blob" in event, false);
 });
 
+test("channel opened tolerates empty optional mime for non-file channels", () => {
+  const event = parseMachineEvent({
+    type: "channel_opened",
+    channel_id: "c8",
+    kind: "machine",
+    from: "m2",
+    from_name: "beta",
+    to: { type: "member", member_id: "m1" },
+    mime: "",
+  });
+
+  assert.equal(event.type, "channel_opened");
+  assert.equal(event.mime, "");
+});
+
 test("normalize route accepts all and member ids", () => {
   assert.deepEqual(normalizeRoute("all"), { type: "all" });
   assert.deepEqual(normalizeRoute("m9"), { type: "member", member_id: "m9" });
