@@ -55,7 +55,9 @@ jobs:
 
       - name: Pack npm package
         working-directory: wrappers/node
-        run: npm pack --pack-destination ../../dist/node
+        run: |
+          mkdir -p ../../dist/node
+          npm pack --pack-destination ../../dist/node
 
       - name: Upload Node package artifacts
         uses: actions/upload-artifact@v4
