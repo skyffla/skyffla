@@ -1,74 +1,108 @@
 # Skyffla Python Wrapper
 
-This package is a thin async wrapper over `skyffla host|join <room> machine --json`.
+Use this package to control an installed `skyffla` CLI from Python.
 
-## Install
+`pip install skyffla` installs the Python wrapper only. Install the `skyffla`
+binary separately first.
+
+## 1. Install the `skyffla` binary
+
+Add the Homebrew tap once:
 
 ```sh
-cd wrappers/python
-uv sync
+brew tap skyffla/skyffla
+```
+
+Install the CLI:
+
+```sh
+brew install skyffla
+```
+
+Check that the binary is available:
+
+```sh
+skyffla --version
+```
+
+If you want source code, release notes, or other install paths, see the
+[Skyffla repository on GitHub](https://github.com/skyffla/skyffla).
+
+## 2. Install the Python wrapper
+
+```sh
+python -m pip install skyffla
 ```
 
 The wrapper expects a `skyffla` binary in `PATH`. Override it with `SKYFFLA_BIN`
 or the `binary=` argument when starting a room.
 
-Versioning is split across two layers:
+## 3. Small example
 
-- machine protocol compatibility follows [`docs/versioning.md`](../../docs/versioning.md)
-  and [`docs/machine-protocol.md`](../../docs/machine-protocol.md): the wrapper
-  requires the same machine protocol major version and tolerates additive minor
-  changes
-- release pairing is stricter for published packages: by default, the wrapper
-  also checks that the spawned `skyffla` binary has the exact same release
-  version as the Python package
-
-Set `SKYFFLA_SKIP_VERSION_CHECK=1` only when you intentionally want to bypass
-the release-version pairing check. It does not bypass the machine protocol
-compatibility check.
-
-## Async Example
+Save this as `example.py`. Start `host` in one terminal, then start `join` in
+another.
 
 ```python
 import asyncio
+import sys
 
 from skyffla import Room
 
 
-async def main() -> None:
-    async with await Room.join("warehouse", name="python-agent") as room:
+async def main(role: str) -> None:
+    opener = Room.host if role == "host" else Room.join
+
+    async with await opener("warehouse", name=role) as room:
         await room.wait_for_welcome()
-        await room.send_chat("all", "hello from python")
-        print(await room.wait_for_chat())
+        if role == "host":
+            await room.wait_for_member_joined(name="join")
+            await room.send_chat("all", "hello from python")
+            print(await room.wait_for_chat(from_name="join"))
+        else:
+            await room.wait_for_member_snapshot(min_members=2)
+            print(await room.wait_for_chat(from_name="host"))
+            await room.send_chat("all", "hello from join")
 
 
-asyncio.run(main())
+asyncio.run(main(sys.argv[1]))
 ```
 
-## Sync Example
-
-```python
-from skyffla import SyncRoom
-
-
-with SyncRoom.join("warehouse", name="python-agent") as room:
-    room.wait_for_welcome()
-    room.send_chat("all", "hello from sync python")
-    print(room.wait_for_chat())
+```sh
+python example.py host
+python example.py join
 ```
 
-## Examples
+## Version checks
 
-Runnable example apps live under [`../../examples/python`](../../examples/python).
-That project deliberately installs the published `skyffla` package from PyPI so
-the setup matches external usage rather than importing this source tree
-directly.
+Versioning is split across two layers:
 
-Included examples:
+- machine protocol compatibility follows the
+  [versioning policy](https://github.com/skyffla/skyffla/blob/main/docs/versioning.md)
+  and
+  [machine protocol reference](https://github.com/skyffla/skyffla/blob/main/docs/machine-protocol.md):
+  the wrapper requires the same machine protocol major version and tolerates
+  additive minor changes
+- release pairing is stricter for published packages: by default, the wrapper
+  also checks that the spawned `skyffla` binary has the exact same release
+  version as the Python package
 
-- [`../../examples/python`](../../examples/python): shared Python example project
-- [`../../examples/python/room-agents-studio/README.md`](../../examples/python/room-agents-studio/README.md): multi-agent OpenAI poster studio with a live browser gallery and image transfer
+Set `SKYFFLA_SKIP_VERSION_CHECK=1` only if you intentionally want to run the
+wrapper against a different `skyffla` release. This skips the package-to-binary
+release match, but machine protocol compatibility is still enforced.
+
+## More examples
+
+Runnable example apps live under `examples/python` in the GitHub repository:
+
+- [examples/python](https://github.com/skyffla/skyffla/tree/main/examples/python):
+  shared Python example project
+- [examples/python/room-agents-studio](https://github.com/skyffla/skyffla/tree/main/examples/python/room-agents-studio):
+  multi-agent OpenAI poster studio with a live browser gallery and image
+  transfer
 
 ## Tests
+
+From a repository checkout:
 
 ```sh
 cd wrappers/python
