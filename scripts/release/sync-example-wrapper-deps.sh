@@ -28,7 +28,7 @@ ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "${ROOT_DIR}"
 
 perl -0pi -e 's/"skyffla": "[^"]+"/"skyffla": "'"${VERSION}"'"/' examples/node/package.json
-perl -0pi -e 's/("skyffla)([^"]*)"/${1}=='"${VERSION}"'"/' examples/python/pyproject.toml
+perl -0pi -e 's/^  "skyffla[^"]*",$/  "skyffla=='"${VERSION}"'",/m' examples/python/pyproject.toml
 
 npm install --package-lock-only --prefix examples/node >/dev/null
 uv lock --project examples/python >/dev/null
