@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Make `cut-release.sh` bump both Python and Node wrapper versions together with the published-package dependencies in `examples/python` and `examples/node`, so wrapper releases and runnable examples stay aligned.
+- Update the Node wrapper publish workflow to current GitHub Actions and a newer Node/npm toolchain, and log the Node/npm versions so trusted-publishing failures are easier to debug.
+
 ## [1.2.0] - 2026-03-17
 
 - Add the first published Node.js wrapper under `wrappers/node`, including typed machine protocol parsing, async room clients, runnable chat examples, smoke coverage against the local `skyffla` binary, and a gated npm publish workflow.

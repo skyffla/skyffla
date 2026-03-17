@@ -3,6 +3,7 @@
 These examples are intentionally separate from the wrapper source tree. They
 install the published [`skyffla`](https://www.npmjs.com/package/skyffla)
 package from npm so the setup stays close to what an external user would do.
+The checked-in dependency version should track the latest published wrapper release.
 
 ## Setup
 

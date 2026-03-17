@@ -8,7 +8,8 @@ The Python wrapper lives at `wrappers/python` and publishes to PyPI as
 - Release versions:
   - the Python package version lives in `wrappers/python/pyproject.toml`
   - the runtime wrapper version also lives in `wrappers/python/src/skyffla/__about__.py`
-  - both should track the repo release tag version exactly
+  - the runnable example dependency also lives in `examples/python/pyproject.toml`
+  - both wrapper files and the example dependency should track the repo release tag version exactly
   - a Git tag `vX.Y.Z` should only be pushed after the Python package version is
     set to `X.Y.Z`
 
@@ -31,6 +32,8 @@ pairing check.
    - `Cargo.toml`
    - `wrappers/python/pyproject.toml`
    - `wrappers/python/src/skyffla/__about__.py`
+   - `examples/python/pyproject.toml`
+   - `examples/python/uv.lock`
 2. Run the wrapper checks locally:
 
 ```sh
@@ -51,6 +54,9 @@ git push origin vX.Y.Z
    - build the sdist and wheel
    - verify `pyproject.toml` matches the tag version
    - publish `skyffla` to PyPI only if the repository variable `PUBLISH_PYTHON_PACKAGE=1`
+
+The runnable examples are treated as release consumers, not separate packages.
+They should depend on the same published wrapper version as the release they ship with.
 
 By default, tagged releases do not publish the Python package. This keeps normal
 release tags safe until the PyPI package is claimed and trusted publishing is

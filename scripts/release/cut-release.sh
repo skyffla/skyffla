@@ -191,13 +191,33 @@ if ! grep -q "^## \\[${VERSION}\\]" CHANGELOG.md; then
 fi
 
 perl -0pi -e 's/(\[workspace\.package\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' Cargo.toml
+perl -0pi -e 's/"version": "[^"]+"/"version": "'"${VERSION}"'"/' wrappers/node/package.json
+perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/node/src/version.js
 perl -0pi -e 's/(\[project\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' wrappers/python/pyproject.toml
 perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/python/src/skyffla/__about__.py
+perl -0pi -e 's/"skyffla": "[^"]+"/"skyffla": "'"${VERSION}"'"/' examples/node/package.json
+perl -0pi -e 's/("skyffla)([^"]*)"/${1}=='"${VERSION}"'"/' examples/python/pyproject.toml
 
+npm install --package-lock-only --prefix wrappers/node >/dev/null
+npm install --package-lock-only --prefix examples/node >/dev/null
 uv lock --project wrappers/python >/dev/null
+uv lock --project examples/python >/dev/null
 cargo check >/dev/null
 
-FILES=(Cargo.toml CHANGELOG.md wrappers/python/pyproject.toml wrappers/python/src/skyffla/__about__.py wrappers/python/uv.lock)
+FILES=(
+  Cargo.toml
+  CHANGELOG.md
+  wrappers/node/package.json
+  wrappers/node/package-lock.json
+  wrappers/node/src/version.js
+  wrappers/python/pyproject.toml
+  wrappers/python/src/skyffla/__about__.py
+  wrappers/python/uv.lock
+  examples/node/package.json
+  examples/node/package-lock.json
+  examples/python/pyproject.toml
+  examples/python/uv.lock
+)
 if ! git diff --quiet -- Cargo.lock; then
   FILES+=(Cargo.lock)
 fi

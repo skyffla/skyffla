@@ -7,7 +7,8 @@ The Node.js wrapper lives at `wrappers/node` and publishes to npm as `skyffla`.
 - Release versions:
   - the npm package version lives in `wrappers/node/package.json`
   - the runtime wrapper version also lives in `wrappers/node/src/version.js`
-  - both should track the repo release tag version exactly
+  - the runnable example dependency also lives in `examples/node/package.json`
+  - both wrapper files and the example dependency should track the repo release tag version exactly
   - a Git tag `vX.Y.Z` should only be pushed after the Node.js package version
     is set to `X.Y.Z`
 
@@ -30,6 +31,8 @@ pairing check.
    - `Cargo.toml`
    - `wrappers/node/package.json`
    - `wrappers/node/src/version.js`
+   - `examples/node/package.json`
+   - `examples/node/package-lock.json`
 2. Run the wrapper checks locally:
 
 ```sh
@@ -52,6 +55,9 @@ git push origin vX.Y.Z
    - publish `skyffla` to npm only if the repository variable
      `PUBLISH_NODE_PACKAGE=1`
 
+The runnable examples are treated as release consumers, not separate packages.
+They should depend on the same published wrapper version as the release they ship with.
+
 By default, tagged releases do not publish the npm package. This keeps normal
 release tags safe until the npm package is claimed and trusted publishing is
 configured.
@@ -64,8 +70,15 @@ Configure trusted publishing on npm for the GitHub repository that owns
 `.github/workflows/node-package.yml`:
 
 - workflow: `Node Wrapper`
-- workflow file: `.github/workflows/node-package.yml`
+- workflow filename: `node-package.yml`
 - environment: not required
+
+npm expects the workflow filename only here, not the full `.github/workflows/...`
+path. All trusted-publisher fields are case-sensitive.
+
+npm's trusted-publishing docs currently require npm CLI `11.5.1` or newer, so
+keep the workflow on a recent Node/npm toolchain and log `npm --version` when
+debugging publish failures.
 
 No npm automation token should be stored once trusted publishing is configured.
 

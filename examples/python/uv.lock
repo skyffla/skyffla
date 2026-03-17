@@ -424,15 +424,15 @@ wheels = [
 
 [[package]]
 name = "skyffla"
-version = "1.1.3"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5b/e8/35ff743de3ef341fc9bf1f32cf8ff415ba46fe2bd052b0eca2a363e15a69/skyffla-1.1.3.tar.gz", hash = "sha256:a8dde5b9a94919d7796910b151997b8a026915249eafd9decf46ecad2ee30629", size = 33639, upload-time = "2026-03-15T20:39:33.937Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/02/1438ed86b7a3667c2e13d405fbf28ca0bfb88024c550b45fec7b6dc8d34f/skyffla-1.2.0.tar.gz", hash = "sha256:84687d332b22a5584024c4351b133bfb90559e07142dab4425148ba68a62807c", size = 32582, upload-time = "2026-03-17T08:02:15.26Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a4/26/b5b0716ec3732853bfc47476e1c6cf27cb7f39415fe0e6c3567a3c41f1a2/skyffla-1.1.3-py3-none-any.whl", hash = "sha256:ce5d03bc3e14df60346335191817a2b4066e3e6207fc51bf3d9fda0dd6ba234e", size = 11164, upload-time = "2026-03-15T20:39:32.523Z" },
+    { url = "https://files.pythonhosted.org/packages/11/ab/d59d04151fea0b96ebc0f064ffa801535b6971afed3ebc45a0ce960e554a/skyffla-1.2.0-py3-none-any.whl", hash = "sha256:8d401b0676919ce61a6cab5137138475f9fdc3b36e0982fd8d717ccf6e17debd", size = 11326, upload-time = "2026-03-17T08:02:14.207Z" },
 ]
 
 [[package]]
@@ -456,7 +456,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.8,<3" },
     { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "skyffla", specifier = ">=1.1.3,<2" },
+    { name = "skyffla", specifier = "==1.2.0" },
 ]
 
 [package.metadata.requires-dev]
