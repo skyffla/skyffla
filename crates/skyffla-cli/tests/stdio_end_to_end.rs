@@ -58,8 +58,10 @@ async fn stdio_join_to_join_transfers_payload_end_to_end() -> Result<()> {
             "--json",
         ],
     )?;
-    host.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
-    join.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    host.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
+    join.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
     host.write_stdin_and_close(payload, "host stdin").await?;
 
     let join_output = join.wait_with_output("join process").await?;
@@ -153,8 +155,10 @@ async fn stdio_host_to_join_transfers_payload_end_to_end() -> Result<()> {
     )?;
 
     let payload = b"hello from integration test\nsecond line\n";
-    host.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
-    join.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    host.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
+    join.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
     host.write_stdin_and_close(payload, "host stdin").await?;
 
     let join_output = join.wait_with_output("join process").await?;

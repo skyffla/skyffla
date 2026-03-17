@@ -43,8 +43,10 @@ async fn stdio_host_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["join", room.as_str(), "--name", "join"],
     )?;
-    host.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
-    join.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    host.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
+    join.wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
     host.write_stdin_and_close(host_payload, "host stdin")
         .await?;
     join.write_stdin_and_close(join_payload, "join stdin")
@@ -104,11 +106,14 @@ async fn stdio_join_to_join_streams_bytes_both_directions_end_to_end() -> Result
         &server.url,
         ["join", room.as_str(), "--name", "second"],
     )?;
-    // Wait until both peers have negotiated into stdio mode before sending bytes.
-    // The promoted-join host path is otherwise timing-sensitive in CI.
-    first.wait_for_stderr_contains("\"state\":\"Stdio ").await?;
+    // Wait until both peers report an established connection before sending bytes.
+    // The promoted-join host path can still be finalizing after the stdio state transition,
+    // so using the later connection_status event removes that race without blocking startup.
+    first
+        .wait_for_stderr_contains("\"event\":\"connection_status\"")
+        .await?;
     second
-        .wait_for_stderr_contains("\"state\":\"Stdio ")
+        .wait_for_stderr_contains("\"event\":\"connection_status\"")
         .await?;
     first
         .write_stdin_and_close(first_payload, "first join stdin")
