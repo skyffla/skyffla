@@ -6,7 +6,7 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
-- Make `cut-release.sh` bump both Python and Node wrapper versions together with the published-package dependencies in `examples/python` and `examples/node`, so wrapper releases and runnable examples stay aligned.
+- Make `cut-release.sh` bump both Python and Node wrapper versions together, and add a separate helper for syncing the published-package dependencies in `examples/python` and `examples/node` after wrapper releases land on PyPI and npm.
 - Update the Node wrapper publish workflow to current GitHub Actions and a newer Node/npm toolchain, and log the Node/npm versions so trusted-publishing failures are easier to debug.
 
 ## [1.2.0] - 2026-03-17

@@ -195,13 +195,8 @@ perl -0pi -e 's/"version": "[^"]+"/"version": "'"${VERSION}"'"/' wrappers/node/p
 perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/node/src/version.js
 perl -0pi -e 's/(\[project\]\n(?:[^\n]*\n)*?version = \")([^\"]+)(\")/${1}'"${VERSION}"'${3}/s' wrappers/python/pyproject.toml
 perl -0pi -e 's/__version__ = "[^"]+"/__version__ = "'"${VERSION}"'"/' wrappers/python/src/skyffla/__about__.py
-perl -0pi -e 's/"skyffla": "[^"]+"/"skyffla": "'"${VERSION}"'"/' examples/node/package.json
-perl -0pi -e 's/("skyffla)([^"]*)"/${1}=='"${VERSION}"'"/' examples/python/pyproject.toml
-
 npm install --package-lock-only --prefix wrappers/node >/dev/null
-npm install --package-lock-only --prefix examples/node >/dev/null
 uv lock --project wrappers/python >/dev/null
-uv lock --project examples/python >/dev/null
 cargo check >/dev/null
 
 FILES=(
@@ -213,10 +208,6 @@ FILES=(
   wrappers/python/pyproject.toml
   wrappers/python/src/skyffla/__about__.py
   wrappers/python/uv.lock
-  examples/node/package.json
-  examples/node/package-lock.json
-  examples/python/pyproject.toml
-  examples/python/uv.lock
 )
 if ! git diff --quiet -- Cargo.lock; then
   FILES+=(Cargo.lock)

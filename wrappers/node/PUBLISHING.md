@@ -8,7 +8,8 @@ The Node.js wrapper lives at `wrappers/node` and publishes to npm as `skyffla`.
   - the npm package version lives in `wrappers/node/package.json`
   - the runtime wrapper version also lives in `wrappers/node/src/version.js`
   - the runnable example dependency also lives in `examples/node/package.json`
-  - both wrapper files and the example dependency should track the repo release tag version exactly
+  - the wrapper files should track the repo release tag version exactly
+  - the example dependency should track the latest published wrapper release
   - a Git tag `vX.Y.Z` should only be pushed after the Node.js package version
     is set to `X.Y.Z`
 
@@ -31,8 +32,6 @@ pairing check.
    - `Cargo.toml`
    - `wrappers/node/package.json`
    - `wrappers/node/src/version.js`
-   - `examples/node/package.json`
-   - `examples/node/package-lock.json`
 2. Run the wrapper checks locally:
 
 ```sh
@@ -55,8 +54,15 @@ git push origin vX.Y.Z
    - publish `skyffla` to npm only if the repository variable
      `PUBLISH_NODE_PACKAGE=1`
 
-The runnable examples are treated as release consumers, not separate packages.
-They should depend on the same published wrapper version as the release they ship with.
+5. After the npm package is actually published, sync the runnable examples in a
+   follow-up commit:
+
+```sh
+scripts/release/sync-example-wrapper-deps.sh X.Y.Z
+```
+
+The runnable examples are treated as published-package consumers, not separate
+packages. Update them only after the matching wrapper release exists on npm.
 
 By default, tagged releases do not publish the npm package. This keeps normal
 release tags safe until the npm package is claimed and trusted publishing is
