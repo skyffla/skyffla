@@ -104,6 +104,7 @@
 }
 
 .subtitle,
+.productStatement,
 .lede,
 .messageCard p,
 .footnote {
@@ -115,6 +116,13 @@
 .subtitle {
   text-align: center;
   font-style: italic;
+}
+
+.productStatement {
+  text-align: center;
+  color: var(--ink-900);
+  font-size: clamp(1.35rem, 2.4vw, 1.7rem);
+  line-height: 1.2;
 }
 
 .lede {
@@ -130,10 +138,25 @@
   margin: 0;
 }
 
+.ledeLink {
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.12em;
+  text-decoration-color: rgba(90, 52, 0, 0.5);
+}
+
+.ledeLink:hover,
+.ledeLink:focus-visible {
+  text-decoration-color: rgba(90, 52, 0, 0.9);
+}
+
 .contentGrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
+  justify-content: center;
+  align-items: start;
   justify-items: center;
   text-align: left;
 }
@@ -149,17 +172,38 @@
 .messageCard {
   width: min(100%, 28rem);
   padding: 1.1rem 1.1rem 1.2rem;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.8rem;
 }
 
 .installCard {
-  gap: 0.8rem;
-  width: min(100%, 24rem);
+  width: min(100%, 50rem);
   padding: 1rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 248, 228, 0.68)),
     rgba(255, 255, 255, 0.56);
+}
+
+.installColumns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  width: 100%;
+}
+
+.installColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.installGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
 }
 
 .sectionLabel {
@@ -178,12 +222,12 @@
 }
 
 .installHeader {
-  display: grid;
-  gap: 0.2rem;
+  display: flex;
+  flex-direction: column;
 }
 
 .installHint {
-  margin-top: 0.1rem;
+  margin-top: 0;
 }
 
 .messageCard code,
@@ -272,11 +316,22 @@
   gap: 0.85rem;
 }
 
+.bottomActions {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  align-items: center;
+  width: min(75%, 100%);
+  justify-self: center;
+  gap: 0;
+}
+
 .primaryAction {
   display: inline-flex;
   align-items: center;
   gap: 0.75rem;
   padding: 0.95rem 1.25rem;
+  border: 1px solid transparent;
   border-radius: 999px;
   background: linear-gradient(180deg, #7f5000 0%, #5c3900 100%);
   color: var(--gold-100);
@@ -295,14 +350,68 @@
   box-shadow: 0 18px 34px rgba(80, 48, 0, 0.28);
 }
 
+.brandAction {
+  justify-content: center;
+  gap: 0;
+  padding: 0.72rem 0.82rem;
+  box-shadow: 0 14px 28px rgba(80, 48, 0, 0.14);
+}
+
+.githubAction {
+  background: #f6f8fa;
+  border-color: #d0d7de;
+  color: #24292f;
+}
+
+.xAction {
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
+
+.pypiAction {
+  background: #f7fbff;
+  border-color: #c4d5e7;
+  color: #214c72;
+}
+
+.npmAction {
+  background: #fff5f5;
+  border-color: #f0b5b5;
+  color: #8f1d1d;
+}
+
+.brandBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+  padding: 0.24rem 0.42rem;
+  border-radius: 0.45rem;
+  font-size: 0.78rem;
+  line-height: 1;
+  letter-spacing: 0.04em;
+}
+
+.pypiBadge {
+  background: linear-gradient(135deg, #3775a9 0%, #3775a9 68%, #ffd343 68%, #ffd343 100%);
+  color: #fff;
+}
+
+.npmBadge {
+  background: #cb3837;
+  color: #fff;
+  text-transform: lowercase;
+}
+
 .githubMark {
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 1.05rem;
+  height: 1.05rem;
 }
 
 .xMark {
-  width: 1rem;
-  height: 1rem;
+  width: 0.95rem;
+  height: 0.95rem;
 }
 
 @keyframes swing {
@@ -338,6 +447,14 @@
 
   .heroCard {
     border-radius: 1.6rem;
+  }
+
+  .installColumns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .installColumn {
+    gap: 0.9rem;
   }
 
   .commandBlock code {

@@ -134,55 +134,143 @@ export default function App() {
         </button>
 
         <p className="subtitle">- moving your bits, seamless and secure!</p>
+        <p className="productStatement">
+          multi-party peer-to-peer rooms for terminals, agents, and scripts
+        </p>
 
         <ul className="lede" aria-label="intro notes">
           <li>skyffla is now a terminal-native application written in rust</li>
-          <li>browser support might come back later</li>
+          <li>
+            <a
+              className="ledeLink"
+              href="https://pypi.org/project/skyffla/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              python
+            </a>{" "}
+            and{" "}
+            <a
+              className="ledeLink"
+              href="https://www.npmjs.com/package/skyffla"
+              target="_blank"
+              rel="noreferrer"
+            >
+              npm
+            </a>{" "}
+            wrappers plug skyffla straight into your agents
+          </li>
+          <li>
+            see examples on{" "}
+            <a
+              className="ledeLink"
+              href="https://github.com/skyffla/skyffla"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub
+            </a>{" "}
+            and{" "}
+            <a
+              className="ledeLink"
+              href="https://x.com/skyffla"
+              target="_blank"
+              rel="noreferrer"
+            >
+              follow on X
+            </a>{" "}
+            to come along for the ride
+          </li>
         </ul>
 
         <div className="contentGrid">
           <section className="messageCard installCard">
-            <div className="installHeader">
-              <h2 className="sectionLabel">Install</h2>
+            <div className="installColumns">
+              <div className="installColumn">
+                <section className="installGroup">
+                  <div className="installHeader">
+                    <h2 className="sectionLabel">install cli</h2>
+                  </div>
+                  <CommandBlock
+                    lines={[
+                      "brew tap skyffla/skyffla",
+                      "brew install skyffla",
+                      "skyffla help",
+                    ]}
+                  />
+                </section>
+
+                <section className="installGroup">
+                  <p className="sectionLabel installHint">Need Homebrew? macOS/Linux</p>
+                  <CommandBlock
+                    lines={[
+                      '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+                    ]}
+                  />
+                </section>
+              </div>
+
+              <div className="installColumn">
+                <section className="installGroup">
+                  <div className="installHeader">
+                    <h2 className="sectionLabel">python wrapper</h2>
+                  </div>
+                  <CommandBlock lines={["pip install skyffla"]} />
+                </section>
+
+                <section className="installGroup">
+                  <p className="sectionLabel installHint">Node.js wrapper</p>
+                  <CommandBlock lines={["npm install skyffla"]} />
+                </section>
+              </div>
             </div>
-
-            <CommandBlock
-              lines={[
-                "brew tap skyffla/skyffla",
-                "brew install skyffla",
-                "skyffla help",
-              ]}
-            />
-
-            <p className="sectionLabel installHint">
-              Need Homebrew? macOS/Linux
-            </p>
-            <CommandBlock
-              lines={[
-                '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-              ]}
-            />
           </section>
         </div>
 
-        <div className="actions">
+        <div className="actions bottomActions">
           <a
-            className="primaryAction"
+            className="primaryAction brandAction githubAction"
             href="https://github.com/skyffla/skyffla"
             target="_blank"
             rel="noreferrer"
+            aria-label="Open on GitHub"
+            title="Open on GitHub"
           >
             <GitHubMark />
-            <span>Open GitHub home</span>
           </a>
           <a
-            className="primaryAction secondaryAction"
+            className="primaryAction brandAction xAction"
             href="https://x.com/skyffla"
             target="_blank"
             rel="noreferrer"
+            aria-label="Follow on X"
+            title="Follow on X"
           >
             <XMark />
-            <span>Follow on X</span>
+          </a>
+          <a
+            className="primaryAction brandAction pypiAction"
+            href="https://pypi.org/project/skyffla/"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open on PyPI"
+            title="Open on PyPI"
+          >
+            <span className="brandBadge pypiBadge" aria-hidden="true">
+              PyPI
+            </span>
+          </a>
+          <a
+            className="primaryAction brandAction npmAction"
+            href="https://www.npmjs.com/package/skyffla"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open on npm"
+            title="Open on npm"
+          >
+            <span className="brandBadge npmBadge" aria-hidden="true">
+              npm
+            </span>
           </a>
         </div>
       </section>

@@ -11,6 +11,14 @@ on:
       - main
     tags:
       - "v*"
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "wrappers/node/**"
+      - "examples/node/**"
+      - ".github/workflows/node-package.yml"
   workflow_dispatch:
 
 permissions:
