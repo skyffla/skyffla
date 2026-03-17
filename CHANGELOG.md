@@ -10,6 +10,7 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 - Add the first published Node.js wrapper under `wrappers/node`, including typed machine protocol parsing, async room clients, runnable chat examples, smoke coverage against the local `skyffla` binary, and a gated npm publish workflow.
 - Align the Node.js wrapper's `skyffla --version` probing behavior with the Python wrapper while fixing short-lived process output collection.
+- Upgrade the GitHub Actions workflows to `actions/checkout@v6` and `actions/setup-node@v6` so the pipelines stop warning about the Node 20 to Node 24 migration.
 
 ## [1.1.4] - 2026-03-16
 
