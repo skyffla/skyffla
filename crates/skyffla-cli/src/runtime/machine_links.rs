@@ -16,6 +16,7 @@ use crate::cli_error::CliError;
 use crate::config::SessionConfig;
 use crate::net::framing::{read_framed, write_framed};
 use crate::runtime::handshake::exchange_hello;
+use crate::runtime::transfer_progress::ProgressEmissionGate;
 
 #[derive(Debug)]
 pub(crate) struct ConnectedPeer {
@@ -466,6 +467,7 @@ pub(crate) fn spawn_join_direct_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         match transport
             .receive_file_with_progress(
                 &provider,
@@ -473,6 +475,13 @@ pub(crate) fn spawn_join_direct_receive(
                 &expected_hash,
                 &target_path,
                 |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
                     let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),
@@ -520,6 +529,7 @@ pub(crate) fn spawn_host_direct_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         match transport
             .receive_file_with_progress(
                 &provider,
@@ -527,6 +537,13 @@ pub(crate) fn spawn_host_direct_receive(
                 &expected_hash,
                 &target_path,
                 |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
                     let _ = host_tx.send(HostInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),
@@ -574,6 +591,7 @@ pub(crate) fn spawn_join_direct_directory_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         match transport
             .receive_directory_with_progress(
                 &provider,
@@ -581,6 +599,13 @@ pub(crate) fn spawn_join_direct_directory_receive(
                 &transfer_digest,
                 &target_path,
                 |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
                     let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),
@@ -638,6 +663,7 @@ pub(crate) fn spawn_host_direct_directory_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         match transport
             .receive_directory_with_progress(
                 &provider,
@@ -645,6 +671,13 @@ pub(crate) fn spawn_host_direct_directory_receive(
                 &transfer_digest,
                 &target_path,
                 |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
                     let _ = host_tx.send(HostInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),

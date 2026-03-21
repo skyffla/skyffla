@@ -6,3 +6,4 @@ pub(crate) mod machine_state;
 pub(crate) mod room_tui;
 pub(crate) mod session;
 pub(crate) mod stdio;
+pub(crate) mod transfer_progress;

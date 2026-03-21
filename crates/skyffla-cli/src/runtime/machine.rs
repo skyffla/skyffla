@@ -40,6 +40,7 @@ use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
     join_pending_file_transfer, HostState, JoinState, PendingFileTransfer,
 };
+use crate::runtime::transfer_progress::ProgressEmissionGate;
 
 #[derive(Debug)]
 enum JoinStdinInput {
@@ -51,11 +52,6 @@ enum JoinStdinInput {
 enum LoopControl {
     Continue,
     Break,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ProgressGate {
-    last_step: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,31 +69,16 @@ struct ResolvedSendPath {
     provisional_size: Option<u64>,
 }
 
-impl ProgressGate {
-    fn should_emit(&mut self, progress: &LocalTransferProgress) -> bool {
-        match progress.bytes_total {
-            Some(0) | None => {
-                let step = progress.bytes_complete / (256 * 1024);
-                let emit = self.last_step != Some(step);
-                self.last_step = Some(step);
-                emit
-            }
-            Some(total) => {
-                let step = ((progress.bytes_complete.saturating_mul(100)) / total) / 10;
-                let emit = self.last_step != Some(step) || progress.bytes_complete >= total;
-                self.last_step = Some(step);
-                emit
-            }
-        }
-    }
-}
-
 fn spawn_join_transfer_progress_forwarder(
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
 ) -> mpsc::UnboundedSender<TransferRuntimeProgress> {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TransferRuntimeProgress>();
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         while let Some(progress) = progress_rx.recv().await {
+            if !gate.should_emit(&progress.phase, progress.bytes_complete, progress.bytes_total) {
+                continue;
+            }
             let channel_id = match ChannelId::new(progress.channel_id) {
                 Ok(channel_id) => channel_id,
                 Err(_) => continue,
@@ -122,7 +103,11 @@ fn spawn_host_transfer_progress_forwarder(
 ) -> mpsc::UnboundedSender<TransferRuntimeProgress> {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TransferRuntimeProgress>();
     tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
         while let Some(progress) = progress_rx.recv().await {
+            if !gate.should_emit(&progress.phase, progress.bytes_complete, progress.bytes_total) {
+                continue;
+            }
             let channel_id = match ChannelId::new(progress.channel_id) {
                 Ok(channel_id) => channel_id,
                 Err(_) => continue,
@@ -153,10 +138,14 @@ fn spawn_host_prepare_path_task(
     tokio::spawn(async move {
         match item_kind {
             TransferItemKind::File => {
-                let mut gate = ProgressGate::default();
+                let mut gate = ProgressEmissionGate::default();
                 let prepared_result = transport
                     .prepare_file_path_with_progress(&path, |progress| {
-                        if gate.should_emit(&progress) {
+                        if gate.should_emit(
+                            &progress.phase,
+                            progress.bytes_complete,
+                            progress.bytes_total,
+                        ) {
                             let _ = host_tx.send(HostInput::LocalEvent {
                                 event: transfer_progress_event(
                                     &channel_id,
@@ -195,10 +184,14 @@ fn spawn_host_prepare_path_task(
                 }
             }
             TransferItemKind::Folder => {
-                let mut gate = ProgressGate::default();
+                let mut gate = ProgressEmissionGate::default();
                 let prepared_result = transport
                     .prepare_directory_path_with_progress(&path, |progress| {
-                        if gate.should_emit(&progress) {
+                        if gate.should_emit(
+                            &progress.phase,
+                            progress.bytes_complete,
+                            progress.bytes_total,
+                        ) {
                             let _ = host_tx.send(HostInput::LocalEvent {
                                 event: transfer_progress_event(
                                     &channel_id,
@@ -251,10 +244,14 @@ fn spawn_join_prepare_path_task(
     tokio::spawn(async move {
         match item_kind {
             TransferItemKind::File => {
-                let mut gate = ProgressGate::default();
+                let mut gate = ProgressEmissionGate::default();
                 let prepared_result = transport
                     .prepare_file_path_with_progress(&path, |progress| {
-                        if gate.should_emit(&progress) {
+                        if gate.should_emit(
+                            &progress.phase,
+                            progress.bytes_complete,
+                            progress.bytes_total,
+                        ) {
                             let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                                 event: transfer_progress_event(
                                     &channel_id,
@@ -293,10 +290,14 @@ fn spawn_join_prepare_path_task(
                 }
             }
             TransferItemKind::Folder => {
-                let mut gate = ProgressGate::default();
+                let mut gate = ProgressEmissionGate::default();
                 let prepared_result = transport
                     .prepare_directory_path_with_progress(&path, |progress| {
-                        if gate.should_emit(&progress) {
+                        if gate.should_emit(
+                            &progress.phase,
+                            progress.bytes_complete,
+                            progress.bytes_total,
+                        ) {
                             let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                                 event: transfer_progress_event(
                                     &channel_id,
