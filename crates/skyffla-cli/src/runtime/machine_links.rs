@@ -11,6 +11,7 @@ use skyffla_protocol::ProtocolVersion;
 use skyffla_session::SessionPeer;
 use skyffla_transport::{
     ConnectionStatus, IrohConnection, IrohTransport, PeerTicket, ReceivedFile,
+    DEFAULT_DIRECTORY_TRANSFER_WORKERS,
 };
 use tokio::sync::mpsc;
 
@@ -587,7 +588,6 @@ pub(crate) fn spawn_join_direct_directory_receive(
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    transfer_digest: String,
     name: String,
     size: Option<u64>,
     target_path: PathBuf,
@@ -598,8 +598,8 @@ pub(crate) fn spawn_join_direct_directory_receive(
             .receive_directory_with_progress(
                 &provider,
                 channel_id.as_str(),
-                &transfer_digest,
                 &target_path,
+                directory_transfer_worker_count(),
                 |progress| {
                     if !gate.should_emit(
                         &TransferPhase::Downloading,
@@ -659,7 +659,6 @@ pub(crate) fn spawn_host_direct_directory_receive(
     host_tx: mpsc::UnboundedSender<HostInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    transfer_digest: String,
     name: String,
     size: Option<u64>,
     target_path: PathBuf,
@@ -670,8 +669,8 @@ pub(crate) fn spawn_host_direct_directory_receive(
             .receive_directory_with_progress(
                 &provider,
                 channel_id.as_str(),
-                &transfer_digest,
                 &target_path,
+                directory_transfer_worker_count(),
                 |progress| {
                     if !gate.should_emit(
                         &TransferPhase::Downloading,
@@ -724,6 +723,14 @@ pub(crate) fn spawn_host_direct_directory_receive(
             }
         }
     });
+}
+
+fn directory_transfer_worker_count() -> usize {
+    std::env::var("SKYFFLA_DIRECTORY_TRANSFER_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_DIRECTORY_TRANSFER_WORKERS)
 }
 
 pub(crate) fn introduce_member_to_existing_peers(

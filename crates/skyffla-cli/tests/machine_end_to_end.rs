@@ -500,8 +500,7 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
         event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
-            && event.pointer("/transfer/integrity/algorithm")
-                == Some(&Value::String("blake3".into()))
+            && event.pointer("/transfer/integrity") == Some(&Value::Null)
     })
     .await?;
 
@@ -1071,8 +1070,7 @@ async fn machine_native_folder_transfer_reports_baseline() -> Result<()> {
         event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
             && event.get("channel_id") == Some(&Value::String("perftree1".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
-            && event.pointer("/transfer/integrity/algorithm")
-                == Some(&Value::String("blake3".into()))
+            && event.pointer("/transfer/integrity") == Some(&Value::Null)
     })
     .await?;
 

@@ -223,7 +223,7 @@ fn spawn_host_prepare_path_task(
                         let _ = host_tx.send(HostInput::PreparedTransferReady {
                             channel_id,
                             size: prepared.total_size,
-                            transfer: folder_transfer_offer(prepared.transfer_digest),
+                            transfer: folder_transfer_offer(),
                         });
                     }
                     Err(error) => {
@@ -326,7 +326,7 @@ fn spawn_join_prepare_path_task(
                         let _ = peer_tx.send(JoinPeerInput::PreparedTransferReady {
                             channel_id,
                             size: prepared.total_size,
-                            transfer: folder_transfer_offer(prepared.transfer_digest),
+                            transfer: folder_transfer_offer(),
                         });
                     }
                     Err(error) => {
@@ -1842,13 +1842,10 @@ fn resolve_send_path(path: &str) -> Result<ResolvedSendPath, CliError> {
     }
 }
 
-fn folder_transfer_offer(transfer_digest: String) -> TransferOffer {
+fn folder_transfer_offer() -> TransferOffer {
     TransferOffer {
         item_kind: TransferItemKind::Folder,
-        integrity: Some(TransferDigest {
-            algorithm: "blake3".into(),
-            value: transfer_digest,
-        }),
+        integrity: None,
     }
 }
 
@@ -1990,8 +1987,8 @@ fn maybe_start_join_pending_receive(
     else {
         return Ok(());
     };
-    match (transfer.item_kind.clone(), transfer.integrity.clone()) {
-        (TransferItemKind::Folder, Some(integrity)) => {
+    match transfer.item_kind.clone() {
+        TransferItemKind::Folder => {
             let target_path = receive_target_path(download_dir, &name)?;
             state.pending_accepted_files.remove(channel_id);
             spawn_join_direct_directory_receive(
@@ -2001,19 +1998,12 @@ fn maybe_start_join_pending_receive(
                     encoded: provider_ticket,
                 },
                 channel_id.clone(),
-                integrity.value,
                 name,
                 size,
                 target_path,
             );
         }
-        (TransferItemKind::File, _) => {}
-        _ => {
-            return Err(CliError::runtime(format!(
-                "file channel {} has unsupported transfer metadata",
-                channel_id.as_str()
-            )));
-        }
+        TransferItemKind::File => {}
     }
     Ok(())
 }
@@ -2084,11 +2074,8 @@ fn maybe_start_host_pending_receive(
     else {
         return Ok(());
     };
-    match (
-        file.transfer.item_kind.clone(),
-        file.transfer.integrity.clone(),
-    ) {
-        (TransferItemKind::Folder, Some(integrity)) => {
+    match file.transfer.item_kind.clone() {
+        TransferItemKind::Folder => {
             let target_path = receive_target_path(download_dir, &file.name)?;
             host_state.pending_accepted_files.remove(channel_id);
             spawn_host_direct_directory_receive(
@@ -2096,19 +2083,12 @@ fn maybe_start_host_pending_receive(
                 host_tx.clone(),
                 provider,
                 channel_id.clone(),
-                integrity.value,
                 file.name,
                 file.size,
                 target_path,
             );
         }
-        (TransferItemKind::File, _) => {}
-        _ => {
-            return Err(CliError::runtime(format!(
-                "file channel {} has unsupported transfer metadata",
-                channel_id.as_str()
-            )));
-        }
+        TransferItemKind::File => {}
     }
     Ok(())
 }

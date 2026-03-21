@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 2);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -666,6 +666,13 @@ mod tests {
         }
     }
 
+    fn folder_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::Folder,
+            integrity: None,
+        }
+    }
+
     fn sample_member(id: &str, name: &str) -> Member {
         Member {
             member_id: MemberId::new(id).expect("valid member id"),
@@ -965,8 +972,8 @@ mod tests {
             "channel_id":"c7",
             "size":1234,
             "transfer":{
-                "item_kind":"file",
-                "integrity":{"algorithm":"blake3","value":"feedbeef"}
+                "item_kind":"folder",
+                "integrity":null
             }
         }"#;
 
@@ -978,7 +985,7 @@ mod tests {
             MachineEvent::ChannelTransferReady {
                 channel_id: ChannelId::new("c7").expect("valid channel id"),
                 size: Some(1234),
-                transfer: file_transfer_offer(),
+                transfer: folder_transfer_offer(),
             }
         );
         event

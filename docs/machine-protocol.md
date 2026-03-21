@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `2.2`
+- `3.0`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -158,9 +158,11 @@ Current behavior:
   `transfer.item_kind = "file"` and `transfer.integrity = null`, allow the
   receiver to accept or reject immediately, then publish final transfer
   metadata with `update_channel_transfer` once preparation completes
-- directories: prepare a directory manifest, open a `file` channel with
-  `transfer.item_kind = "folder"` and a whole-transfer digest, then stream
-  files over the native transfer path
+- directories: open a provisional `file` channel early with
+  `transfer.item_kind = "folder"` and `transfer.integrity = null`, do a cheap
+  directory discovery pass, then publish folder readiness with
+  `update_channel_transfer`; per-file verification happens inside the native
+  transfer workers instead of up front
 
 Accepted transfers are saved automatically into the receiver's resolved
 download directory. There is no separate export step in the normal flow.
@@ -237,7 +239,7 @@ directory.
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":2,"minor":2},
+  "protocol_version":{"major":3,"minor":0},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
@@ -317,16 +319,15 @@ finalizing the transfer metadata.
   "channel_id":"f1",
   "size":1234,
   "transfer":{
-    "item_kind":"file",
-    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+    "item_kind":"folder",
+    "integrity":null
   }
 }
 ```
 
-This event updates a previously opened provisional file channel with the final
-transfer metadata for a prepared folder transfer. A receiver that already
-accepted the folder should begin the native receive path once this event
-arrives.
+This event updates a previously opened provisional folder channel once the
+lightweight folder plan is ready. A receiver that already accepted the folder
+should begin the native receive path once this event arrives.
 
 ### `channel_transfer_finalized`
 
