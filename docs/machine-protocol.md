@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `1.1`
+- `2.0`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -88,7 +88,7 @@ Peer-delivered events:
 
 - `chat`
 - `channel_data`
-- file readiness/export completion once the channel is established
+- file transfer progress and receive completion once the channel is established
 
 Wrappers should not need to care which transport link carried an event, but they should understand that:
 
@@ -136,19 +136,29 @@ Open a file channel:
   "name":"report.pdf",
   "size":1234,
   "mime":"application/pdf",
-  "blob":{"hash":"abc123","format":"blob"}
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
 }
 ```
 
 Rules:
 
-- `file` channels require `blob`
-- `machine` and `clipboard` channels must not include `blob`
+- `file` channels require `transfer`
+- `file` channels may optionally include `blob` during the folder-transfer migration path
+- `machine` and `clipboard` channels must not include `transfer` or `blob`
 
 ### `send_path`
 
-`send_path` is the local convenience command for sending a file or folder. It
-imports the local path, then lowers to `open_channel(kind=file, blob=...)`.
+`send_path` is the local convenience command for sending a file or folder.
+
+Current lowering behavior:
+
+- regular files: prepare direct-transfer metadata, open a `file` channel with
+  `transfer`, then stream bytes over the native transfer path
+- directories: currently lower to a blob-backed collection transfer while the
+  manifest/scheduler redesign is still in progress
 
 ```json
 {
@@ -200,7 +210,7 @@ directory.
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":1,"minor":1},
+  "protocol_version":{"major":2,"minor":0},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
@@ -317,7 +327,8 @@ For folders, `path` is the saved directory root.
 - `send_chat.text` must not be empty
 - `send_channel_data.body` must not be empty
 - `member_snapshot.members` must not be empty
-- `file` channels require blob metadata
+- `file` channels require transfer metadata
+- non-file channels must not include transfer metadata
 - non-file channels must not include blob metadata
 - `send_path` is a local machine command, not a peer-forwarded room command
 

@@ -3,7 +3,7 @@ use std::fmt;
 
 use skyffla_protocol::room::{
     BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError,
-    Route, MACHINE_PROTOCOL_VERSION,
+    Route, TransferOffer, MACHINE_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,7 @@ struct ChannelState {
     name: Option<String>,
     size: Option<u64>,
     mime: Option<String>,
+    transfer: Option<TransferOffer>,
     blob: Option<BlobRef>,
 }
 
@@ -53,6 +54,7 @@ pub struct RoomChannel {
     pub name: Option<String>,
     pub size: Option<u64>,
     pub mime: Option<String>,
+    pub transfer: Option<TransferOffer>,
     pub blob: Option<BlobRef>,
 }
 
@@ -105,6 +107,7 @@ impl RoomEngine {
             name: channel.name.clone(),
             size: channel.size,
             mime: channel.mime.clone(),
+            transfer: channel.transfer.clone(),
             blob: channel.blob.clone(),
         })
     }
@@ -222,6 +225,7 @@ impl RoomEngine {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        transfer: Option<TransferOffer>,
         blob: Option<BlobRef>,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(from)?;
@@ -240,6 +244,7 @@ impl RoomEngine {
             name,
             size,
             mime,
+            transfer,
             blob,
         };
         event.validate()?;
@@ -252,6 +257,7 @@ impl RoomEngine {
                 name: event_name(&event),
                 size: event_size(&event),
                 mime: event_mime(&event),
+                transfer: event_transfer(&event),
                 blob: event_blob(&event),
             },
         );
@@ -510,6 +516,13 @@ fn event_blob(event: &MachineEvent) -> Option<BlobRef> {
     }
 }
 
+fn event_transfer(event: &MachineEvent) -> Option<TransferOffer> {
+    match event {
+        MachineEvent::ChannelOpened { transfer, .. } => transfer.clone(),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomEngineError {
     Protocol(RoomProtocolError),
@@ -580,9 +593,21 @@ impl From<RoomProtocolError> for RoomEngineError {
 
 #[cfg(test)]
 mod tests {
-    use skyffla_protocol::room::{BlobFormat, ChannelKind, MachineEvent};
+    use skyffla_protocol::room::{
+        BlobFormat, ChannelKind, MachineEvent, TransferDigest, TransferItemKind, TransferOffer,
+    };
 
     use super::*;
+
+    fn file_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: Some(TransferDigest {
+                algorithm: "blake3".into(),
+                value: "feedbeef".into(),
+            }),
+        }
+    }
 
     fn member_id(value: &str) -> MemberId {
         MemberId::new(value).expect("valid member id")
@@ -733,6 +758,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("channel opens");
 
@@ -767,6 +793,7 @@ mod tests {
             Some("report.txt".into()),
             Some(5),
             Some("text/plain".into()),
+            Some(file_transfer_offer()),
             Some(BlobRef {
                 hash: "abc123".into(),
                 format: BlobFormat::Blob,
@@ -804,6 +831,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("channel opens");
 
@@ -829,6 +857,7 @@ mod tests {
             Route::Member {
                 member_id: beta.member.member_id.clone(),
             },
+            None,
             None,
             None,
             None,
@@ -877,6 +906,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("channel opens");
 
@@ -908,6 +938,7 @@ mod tests {
                 channel_id("c1"),
                 ChannelKind::Machine,
                 Route::All,
+                None,
                 None,
                 None,
                 None,
@@ -950,6 +981,7 @@ mod tests {
             Some("report.txt".into()),
             Some(12),
             Some("text/plain".into()),
+            Some(file_transfer_offer()),
             Some(BlobRef {
                 hash: "abc123".into(),
                 format: BlobFormat::Blob,
@@ -993,6 +1025,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("channel opens");
 
@@ -1032,6 +1065,7 @@ mod tests {
             Some("report.pdf".into()),
             Some(1024),
             Some("application/pdf".into()),
+            Some(file_transfer_offer()),
             Some(BlobRef {
                 hash: "abc123".into(),
                 format: BlobFormat::Blob,

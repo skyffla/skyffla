@@ -312,7 +312,7 @@ async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -> Result<()> {
+async fn machine_file_channel_requires_transfer_metadata_and_rejects_inline_data() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
     };
@@ -335,13 +335,13 @@ async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -
         .await?;
 
     host.send(
-        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","blob":{"hash":"abc123","format":"blob"}}"#,
+        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","transfer":{"item_kind":"file","integrity":{"algorithm":"blake3","value":"feedbeef"}},"blob":{"hash":"abc123","format":"blob"}}"#,
     )
     .await?;
     beta.expect_event("file channel_opened", |event| {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("c1".into()))
-            && event.pointer("/blob/hash") == Some(&Value::String("abc123".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
     })
     .await?;
 
@@ -411,7 +411,9 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
             && event.get("name") == Some(&Value::String("report.txt".into()))
-            && event.pointer("/blob/hash").is_some()
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
+            && event.pointer("/transfer/integrity/algorithm")
+                == Some(&Value::String("blake3".into()))
     })
     .await?;
 
@@ -421,13 +423,6 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
             && event.get("channel_id") == Some(&Value::String("f1".into()))
             && event.get("name") == Some(&Value::String("report.txt".into()))
             && event.get("phase") == Some(&Value::String("downloading".into()))
-    })
-    .await?;
-    beta.expect_event("export progress", |event| {
-        event.get("type") == Some(&Value::String("transfer_progress".into()))
-            && event.get("channel_id") == Some(&Value::String("f1".into()))
-            && event.get("name") == Some(&Value::String("report.txt".into()))
-            && event.get("phase") == Some(&Value::String("exporting".into()))
     })
     .await?;
     beta.expect_event("file received", |event| {
@@ -588,10 +583,10 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     beta.send("/channel accept f-all").await?;
     gamma.send("/channel reject f-all busy").await?;
 
-    beta.expect_event("broadcast export progress", |event| {
+    beta.expect_event("broadcast download progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("f-all".into()))
-            && event.get("phase") == Some(&Value::String("exporting".into()))
+            && event.get("phase") == Some(&Value::String("downloading".into()))
     })
     .await?;
     host.expect_event("gamma rejected", |event| {

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -28,7 +28,8 @@ pub enum RoomProtocolError {
     EmptyChatMessage,
     EmptyChannelData,
     EmptyMemberSnapshot,
-    MissingBlobRef,
+    MissingTransferOffer,
+    UnexpectedTransferOffer,
     UnexpectedBlobRef,
 }
 
@@ -40,7 +41,10 @@ impl fmt::Display for RoomProtocolError {
             Self::EmptyChatMessage => write!(f, "chat message must not be empty"),
             Self::EmptyChannelData => write!(f, "channel data must not be empty"),
             Self::EmptyMemberSnapshot => write!(f, "member snapshot must not be empty"),
-            Self::MissingBlobRef => write!(f, "file channels require blob metadata"),
+            Self::MissingTransferOffer => write!(f, "file channels require transfer metadata"),
+            Self::UnexpectedTransferOffer => {
+                write!(f, "transfer metadata is only allowed for file channels")
+            }
             Self::UnexpectedBlobRef => write!(f, "blob metadata is only allowed for file channels"),
         }
     }
@@ -169,6 +173,44 @@ impl BlobRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferDigest {
+    pub algorithm: String,
+    pub value: String,
+}
+
+impl TransferDigest {
+    pub fn validate(&self) -> Result<(), RoomProtocolError> {
+        if self.algorithm.trim().is_empty() {
+            return Err(RoomProtocolError::EmptyIdentifier {
+                kind: "digest_algorithm",
+            });
+        }
+        if self.value.trim().is_empty() {
+            return Err(RoomProtocolError::EmptyIdentifier {
+                kind: "digest_value",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferOffer {
+    pub item_kind: TransferItemKind,
+    #[serde(default)]
+    pub integrity: Option<TransferDigest>,
+}
+
+impl TransferOffer {
+    pub fn validate(&self) -> Result<(), RoomProtocolError> {
+        if let Some(integrity) = &self.integrity {
+            integrity.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Member {
     pub member_id: MemberId,
     pub name: String,
@@ -218,6 +260,7 @@ pub enum MachineCommand {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        transfer: Option<TransferOffer>,
         blob: Option<BlobRef>,
     },
     AcceptChannel {
@@ -277,6 +320,7 @@ impl MachineCommand {
                 channel_id,
                 kind,
                 to,
+                transfer,
                 blob,
                 ..
             } => {
@@ -284,7 +328,7 @@ impl MachineCommand {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
                 }
                 to.validate()?;
-                validate_channel_blob(kind, blob.as_ref())
+                validate_channel_transfer(kind, transfer.as_ref(), blob.as_ref())
             }
             Self::AcceptChannel { channel_id }
             | Self::RejectChannel { channel_id, .. }
@@ -353,6 +397,7 @@ pub enum MachineEvent {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
+        transfer: Option<TransferOffer>,
         blob: Option<BlobRef>,
     },
     ChannelAccepted {
@@ -480,6 +525,7 @@ impl MachineEvent {
                 from,
                 from_name,
                 to,
+                transfer,
                 blob,
                 ..
             } => {
@@ -495,7 +541,7 @@ impl MachineEvent {
                     });
                 }
                 to.validate()?;
-                validate_channel_blob(kind, blob.as_ref())
+                validate_channel_transfer(kind, transfer.as_ref(), blob.as_ref())
             }
             Self::ChannelAccepted {
                 channel_id,
@@ -593,25 +639,45 @@ impl MachineEvent {
     }
 }
 
-fn validate_channel_blob(
+fn validate_channel_transfer(
     kind: &ChannelKind,
+    transfer: Option<&TransferOffer>,
     blob: Option<&BlobRef>,
 ) -> Result<(), RoomProtocolError> {
     match kind {
-        ChannelKind::File => match blob {
-            Some(blob) => blob.validate(),
-            None => Err(RoomProtocolError::MissingBlobRef),
-        },
-        ChannelKind::Machine | ChannelKind::Clipboard => match blob {
-            Some(_) => Err(RoomProtocolError::UnexpectedBlobRef),
-            None => Ok(()),
-        },
+        ChannelKind::File => {
+            let transfer = transfer.ok_or(RoomProtocolError::MissingTransferOffer)?;
+            transfer.validate()?;
+            if let Some(blob) = blob {
+                blob.validate()?;
+            }
+            Ok(())
+        }
+        ChannelKind::Machine | ChannelKind::Clipboard => {
+            if transfer.is_some() {
+                return Err(RoomProtocolError::UnexpectedTransferOffer);
+            }
+            match blob {
+                Some(_) => Err(RoomProtocolError::UnexpectedBlobRef),
+                None => Ok(()),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: Some(TransferDigest {
+                algorithm: "blake3".into(),
+                value: "feedbeef".into(),
+            }),
+        }
+    }
 
     fn sample_member(id: &str, name: &str) -> Member {
         Member {
@@ -736,6 +802,7 @@ mod tests {
                 name: Some("agent-link".into()),
                 size: None,
                 mime: None,
+                transfer: None,
                 blob: None,
             }
         );
@@ -828,6 +895,10 @@ mod tests {
             "name":"report.pdf",
             "size":1234,
             "mime":"application/pdf",
+            "transfer":{
+                "item_kind":"file",
+                "integrity":{"algorithm":"blake3","value":"feedbeef"}
+            },
             "blob":{"hash":"abc123","format":"blob"}
         }"#;
 
@@ -845,6 +916,7 @@ mod tests {
                 name: Some("report.pdf".into()),
                 size: Some(1234),
                 mime: Some("application/pdf".into()),
+                transfer: Some(file_transfer_offer()),
                 blob: Some(BlobRef {
                     hash: "abc123".into(),
                     format: BlobFormat::Blob,
@@ -878,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn file_channel_requires_blob_ref() {
+    fn file_channel_requires_transfer_offer() {
         let command = MachineCommand::OpenChannel {
             channel_id: ChannelId::new("c1").expect("valid channel id"),
             kind: ChannelKind::File,
@@ -886,10 +958,14 @@ mod tests {
             name: Some("report.pdf".into()),
             size: None,
             mime: None,
+            transfer: None,
             blob: None,
         };
 
-        assert_eq!(command.validate(), Err(RoomProtocolError::MissingBlobRef));
+        assert_eq!(
+            command.validate(),
+            Err(RoomProtocolError::MissingTransferOffer)
+        );
     }
 
     #[test]

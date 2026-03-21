@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ReadError, ReadExactError, RecvStream, SendStream};
 use iroh::protocol::ProtocolHandler;
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
 use iroh_blobs::api::proto::{AddProgressItem, ExportProgressItem};
@@ -13,11 +13,17 @@ use iroh_blobs::api::remote::GetProgressItem;
 use iroh_blobs::format::collection::Collection;
 use iroh_blobs::store::mem::MemStore;
 use iroh_blobs::{BlobFormat as IrohBlobFormat, BlobsProtocol, Hash, HashAndFormat};
+use serde::{Deserialize, Serialize};
 use skyffla_protocol::room::{BlobFormat, BlobRef, TransferItemKind, TransferPhase};
 use skyffla_protocol::TransportCapability;
 use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
+pub const SKYFFLA_TRANSFER_ALPN: &[u8] = b"skyffla/transfer/1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportMode {
@@ -71,8 +77,10 @@ struct TransportInner {
     endpoint: Endpoint,
     options: TransportOptions,
     incoming: Mutex<mpsc::UnboundedReceiver<IrohConnection>>,
+    transfer_incoming: Mutex<mpsc::UnboundedReceiver<IrohConnection>>,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     blob_store: MemStore,
+    outgoing_files: Mutex<std::collections::BTreeMap<String, RegisteredFile>>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,10 +102,40 @@ pub struct ImportedPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFile {
+    pub size: u64,
+    pub display_name: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredFile {
+    path: PathBuf,
+    prepared: PreparedFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalTransferProgress {
     pub phase: TransferPhase,
     pub bytes_complete: u64,
     pub bytes_total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TransferRequest {
+    channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TransferResponse {
+    Ready {
+        size: u64,
+        content_hash: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl IrohTransport {
@@ -106,8 +144,11 @@ impl IrohTransport {
     }
 
     pub async fn bind_with_options(options: TransportOptions) -> Result<Self, TransportError> {
-        let mut builder =
-            Endpoint::builder().alpns(vec![SKYFFLA_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]);
+        let mut builder = Endpoint::builder().alpns(vec![
+            SKYFFLA_ALPN.to_vec(),
+            SKYFFLA_TRANSFER_ALPN.to_vec(),
+            iroh_blobs::ALPN.to_vec(),
+        ]);
         if options.local_only {
             builder = builder.relay_mode(RelayMode::Disabled);
         }
@@ -115,9 +156,11 @@ impl IrohTransport {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (transfer_incoming_tx, transfer_incoming_rx) = mpsc::unbounded_channel();
         let accept_task = tokio::spawn(run_accept_loop(
             endpoint.clone(),
             incoming_tx,
+            transfer_incoming_tx,
             blobs_protocol,
         ));
 
@@ -126,8 +169,10 @@ impl IrohTransport {
                 endpoint,
                 options,
                 incoming: Mutex::new(incoming_rx),
+                transfer_incoming: Mutex::new(transfer_incoming_rx),
                 accept_task: Mutex::new(Some(accept_task)),
                 blob_store,
+                outgoing_files: Mutex::new(std::collections::BTreeMap::new()),
             }),
         })
     }
@@ -154,6 +199,16 @@ impl IrohTransport {
             .ok_or(TransportError::EndpointClosed)
     }
 
+    pub async fn accept_transfer_connection(&self) -> Result<IrohConnection, TransportError> {
+        self.inner
+            .transfer_incoming
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(TransportError::EndpointClosed)
+    }
+
     pub async fn connect(&self, ticket: &PeerTicket) -> Result<IrohConnection, TransportError> {
         let endpoint_addr =
             filter_endpoint_addr(ticket.to_endpoint_addr()?, self.inner.options.local_only);
@@ -166,6 +221,24 @@ impl IrohTransport {
             .connect(endpoint_addr, SKYFFLA_ALPN)
             .await
             .map_err(TransportError::Connect)?;
+        Ok(IrohConnection { connection })
+    }
+
+    pub async fn connect_transfer(
+        &self,
+        ticket: &PeerTicket,
+    ) -> Result<IrohConnection, TransportError> {
+        let endpoint_addr =
+            filter_endpoint_addr(ticket.to_endpoint_addr()?, self.inner.options.local_only);
+        if self.inner.options.local_only && endpoint_addr.addrs.is_empty() {
+            return Err(TransportError::NoLocalAddresses);
+        }
+        let connection = self
+            .inner
+            .endpoint
+            .connect(endpoint_addr, SKYFFLA_TRANSFER_ALPN)
+            .await
+            .map_err(TransportError::ConnectTransfer)?;
         Ok(IrohConnection { connection })
     }
 
@@ -212,6 +285,242 @@ impl IrohTransport {
             "path {} is not a file or directory",
             path.display()
         )))
+    }
+
+    pub async fn prepare_file_path_with_progress(
+        &self,
+        path: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<PreparedFile, TransportError> {
+        let path = path.as_ref();
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
+        if !metadata.is_file() {
+            return Err(TransportError::DirectFilePrepare(format!(
+                "path {} is not a regular file",
+                path.display()
+            )));
+        }
+
+        let size = metadata.len();
+        let display_name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let mut file = File::open(path)
+            .await
+            .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut bytes_complete = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Preparing,
+            bytes_complete: 0,
+            bytes_total: Some(size),
+        });
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            bytes_complete = bytes_complete.saturating_add(read as u64);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Preparing,
+                bytes_complete,
+                bytes_total: Some(size),
+            });
+        }
+        Ok(PreparedFile {
+            size,
+            display_name,
+            content_hash: hasher.finalize().to_hex().to_string(),
+        })
+    }
+
+    pub async fn register_outgoing_file(
+        &self,
+        channel_id: impl Into<String>,
+        path: impl AsRef<Path>,
+        prepared: PreparedFile,
+    ) {
+        self.inner.outgoing_files.lock().await.insert(
+            channel_id.into(),
+            RegisteredFile {
+                path: path.as_ref().to_path_buf(),
+                prepared,
+            },
+        );
+    }
+
+    pub async fn unregister_outgoing_file(&self, channel_id: &str) {
+        self.inner.outgoing_files.lock().await.remove(channel_id);
+    }
+
+    pub async fn receive_file_with_progress(
+        &self,
+        provider: &PeerTicket,
+        channel_id: &str,
+        expected_hash: &str,
+        target: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<u64, TransportError> {
+        let connection = self.connect_transfer(provider).await?;
+        self.enforce_connection_policy(&connection).await?;
+        let (mut send, mut recv) = connection.open_data_stream().await?;
+        write_transfer_message(
+            &mut send,
+            &TransferRequest {
+                channel_id: channel_id.to_string(),
+            },
+            "transfer request",
+        )
+        .await?;
+
+        let response: Option<TransferResponse> =
+            read_transfer_message(&mut recv, "transfer response").await?;
+        let response = response.ok_or_else(|| {
+            TransportError::DirectFileReceive(
+                "peer closed transfer connection before responding".into(),
+            )
+        })?;
+        let size = match response {
+            TransferResponse::Ready { size, content_hash } => {
+                if content_hash != expected_hash {
+                    return Err(TransportError::DirectFileReceive(format!(
+                        "transfer hash mismatch for {channel_id}: expected {expected_hash}, provider advertised {content_hash}"
+                    )));
+                }
+                size
+            }
+            TransferResponse::Error { message } => {
+                return Err(TransportError::DirectFileReceive(message));
+            }
+        };
+
+        let target = target.as_ref();
+        if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        }
+        let temp_target = temp_target_path(target);
+        let mut file = File::create(&temp_target)
+            .await
+            .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut bytes_complete = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        on_progress(LocalTransferProgress {
+            phase: TransferPhase::Downloading,
+            bytes_complete: 0,
+            bytes_total: Some(size),
+        });
+        loop {
+            let read = match tokio::io::AsyncReadExt::read(&mut recv, &mut buffer).await {
+                Ok(read) => read,
+                Err(_error) if bytes_complete >= size => 0,
+                Err(error) => {
+                    return Err(TransportError::DirectFileReceive(error.to_string()));
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])
+                .await
+                .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+            hasher.update(&buffer[..read]);
+            bytes_complete = bytes_complete.saturating_add(read as u64);
+            on_progress(LocalTransferProgress {
+                phase: TransferPhase::Downloading,
+                bytes_complete,
+                bytes_total: Some(size),
+            });
+        }
+        file.flush()
+            .await
+            .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        drop(file);
+
+        if bytes_complete != size {
+            let _ = tokio::fs::remove_file(&temp_target).await;
+            return Err(TransportError::DirectFileReceive(format!(
+                "transfer size mismatch for {channel_id}: expected {size} bytes, received {bytes_complete}"
+            )));
+        }
+        let actual_hash = hasher.finalize().to_hex().to_string();
+        if actual_hash != expected_hash {
+            let _ = tokio::fs::remove_file(&temp_target).await;
+            return Err(TransportError::DirectFileReceive(format!(
+                "transfer hash mismatch for {channel_id}: expected {expected_hash}, received {actual_hash}"
+            )));
+        }
+        tokio::fs::rename(&temp_target, target)
+            .await
+            .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        Ok(size)
+    }
+
+    pub async fn serve_registered_file(&self, connection: IrohConnection) -> Result<(), TransportError> {
+        let (mut send, mut recv) = connection.accept_data_stream().await?;
+        let request: Option<TransferRequest> =
+            read_transfer_message(&mut recv, "transfer request").await?;
+        let Some(request) = request else {
+            return Ok(());
+        };
+        let registered = self
+            .inner
+            .outgoing_files
+            .lock()
+            .await
+            .get(&request.channel_id)
+            .cloned();
+        let Some(registered) = registered else {
+            write_transfer_message(
+                &mut send,
+                &TransferResponse::Error {
+                    message: format!("unknown transfer channel {}", request.channel_id),
+                },
+                "transfer response",
+            )
+            .await?;
+            return Ok(());
+        };
+
+        write_transfer_message(
+            &mut send,
+            &TransferResponse::Ready {
+                size: registered.prepared.size,
+                content_hash: registered.prepared.content_hash.clone(),
+            },
+            "transfer response",
+        )
+        .await?;
+
+        let mut file = File::open(&registered.path)
+            .await
+            .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            send.write_all(&buffer[..read])
+                .await
+                .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+        }
+        send.finish()
+            .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+        Ok(())
     }
 
     pub async fn fetch_blob(
@@ -731,9 +1040,75 @@ fn validated_collection_relative_path(path: impl AsRef<Path>) -> Result<PathBuf,
     Ok(clean)
 }
 
+fn temp_target_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "transfer".into());
+    target.with_file_name(format!("{file_name}.skyffla.part"))
+}
+
+async fn write_transfer_message<T>(
+    send: &mut SendStream,
+    value: &T,
+    label: &str,
+) -> Result<(), TransportError>
+where
+    T: Serialize,
+{
+    let bytes = skyffla_protocol::encode_frame(value)
+        .map_err(|error| TransportError::TransferProtocol(error.to_string()))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|error| TransportError::TransferProtocol(format!("failed to write {label}: {error}")))?;
+    send.flush()
+        .await
+        .map_err(|error| TransportError::TransferProtocol(format!("failed to flush {label}: {error}")))?;
+    Ok(())
+}
+
+async fn read_transfer_message<T>(
+    recv: &mut RecvStream,
+    label: &str,
+) -> Result<Option<T>, TransportError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut prefix = [0_u8; 4];
+    match recv.read_exact(&mut prefix).await {
+        Ok(_) => {}
+        Err(ReadExactError::FinishedEarly(0)) => return Ok(None),
+        Err(ReadExactError::FinishedEarly(bytes_read)) => {
+            return Err(TransportError::TransferProtocol(format!(
+                "peer closed {label} mid-frame after {bytes_read} bytes"
+            )))
+        }
+        Err(ReadExactError::ReadError(ReadError::ClosedStream))
+        | Err(ReadExactError::ReadError(ReadError::ConnectionLost(_))) => return Ok(None),
+        Err(ReadExactError::ReadError(error)) => {
+            return Err(TransportError::TransferProtocol(format!(
+                "failed to read {label} prefix: {error}"
+            )))
+        }
+    }
+    let payload_len = u32::from_be_bytes(prefix) as usize;
+    let mut frame = Vec::with_capacity(4 + payload_len);
+    frame.extend_from_slice(&prefix);
+    frame.resize(4 + payload_len, 0);
+    recv.read_exact(&mut frame[4..])
+        .await
+        .map_err(|error| TransportError::TransferProtocol(format!(
+            "failed to read {label} payload: {error}"
+        )))?;
+    skyffla_protocol::decode_frame(&frame)
+        .map(Some)
+        .map_err(|error| TransportError::TransferProtocol(error.to_string()))
+}
+
 async fn run_accept_loop(
     endpoint: Endpoint,
     incoming_tx: mpsc::UnboundedSender<IrohConnection>,
+    transfer_incoming_tx: mpsc::UnboundedSender<IrohConnection>,
     blobs_protocol: BlobsProtocol,
 ) {
     loop {
@@ -755,6 +1130,14 @@ async fn run_accept_loop(
         match alpn.as_slice() {
             SKYFFLA_ALPN => {
                 if incoming_tx.send(IrohConnection { connection }).is_err() {
+                    break;
+                }
+            }
+            SKYFFLA_TRANSFER_ALPN => {
+                if transfer_incoming_tx
+                    .send(IrohConnection { connection })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -857,6 +1240,7 @@ pub enum TransportError {
     EndpointClosed,
     Connect(iroh::endpoint::ConnectError),
     ConnectBlob(iroh::endpoint::ConnectError),
+    ConnectTransfer(iroh::endpoint::ConnectError),
     OpenBi(iroh::endpoint::ConnectionError),
     AcceptBi(iroh::endpoint::ConnectionError),
     TicketEncode(serde_json::Error),
@@ -866,6 +1250,10 @@ pub enum TransportError {
     BlobExport(String),
     BlobTag(String),
     BlobHashDecode(String),
+    DirectFilePrepare(String),
+    DirectFileSend(String),
+    DirectFileReceive(String),
+    TransferProtocol(String),
     NoLocalAddresses,
     LocalModeRequiresDirectConnection { mode: TransportMode },
     MissingRemoteAddrForLocalMode,
@@ -880,6 +1268,9 @@ impl fmt::Display for TransportError {
             Self::EndpointClosed => write!(f, "iroh endpoint closed before accepting a connection"),
             Self::Connect(error) => write!(f, "failed to connect via iroh: {error}"),
             Self::ConnectBlob(error) => write!(f, "failed to connect for blob transfer: {error}"),
+            Self::ConnectTransfer(error) => {
+                write!(f, "failed to connect for direct transfer: {error}")
+            }
             Self::OpenBi(error) => write!(f, "failed to open bidirectional stream: {error}"),
             Self::AcceptBi(error) => write!(f, "failed to accept bidirectional stream: {error}"),
             Self::TicketEncode(error) => write!(f, "failed to encode peer ticket: {error}"),
@@ -889,6 +1280,16 @@ impl fmt::Display for TransportError {
             Self::BlobExport(error) => write!(f, "failed to export blob: {error}"),
             Self::BlobTag(error) => write!(f, "failed to pin blob: {error}"),
             Self::BlobHashDecode(error) => write!(f, "failed to decode blob hash: {error}"),
+            Self::DirectFilePrepare(error) => {
+                write!(f, "failed to prepare direct file transfer: {error}")
+            }
+            Self::DirectFileSend(error) => write!(f, "failed to send direct file: {error}"),
+            Self::DirectFileReceive(error) => {
+                write!(f, "failed to receive direct file: {error}")
+            }
+            Self::TransferProtocol(error) => {
+                write!(f, "direct transfer protocol error: {error}")
+            }
             Self::NoLocalAddresses => write!(
                 f,
                 "local mode requires a peer ticket with at least one local-network address"
@@ -921,6 +1322,7 @@ impl std::error::Error for TransportError {
             Self::EndpointBind(error) => Some(error),
             Self::Connect(error) => Some(error),
             Self::ConnectBlob(error) => Some(error),
+            Self::ConnectTransfer(error) => Some(error),
             Self::OpenBi(error) => Some(error),
             Self::AcceptBi(error) => Some(error),
             Self::TicketEncode(error) => Some(error),
@@ -931,6 +1333,10 @@ impl std::error::Error for TransportError {
             | Self::BlobExport(_)
             | Self::BlobTag(_)
             | Self::BlobHashDecode(_)
+            | Self::DirectFilePrepare(_)
+            | Self::DirectFileSend(_)
+            | Self::DirectFileReceive(_)
+            | Self::TransferProtocol(_)
             | Self::NoLocalAddresses
             | Self::LocalModeRequiresDirectConnection { .. }
             | Self::MissingRemoteAddrForLocalMode
@@ -1145,6 +1551,55 @@ mod tests {
         assert_eq!(
             std::fs::read(&target).expect("target should exist"),
             b"hello blob peer"
+        );
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&target);
+        host.close().await;
+        joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn direct_file_transfer_downloads_from_peer() {
+        let Some(host) = bind_or_skip().await else {
+            return;
+        };
+        let Some(joiner) = bind_or_skip().await else {
+            return;
+        };
+        let source = unique_temp_path("direct-source");
+        let target = unique_temp_path("direct-target");
+        std::fs::write(&source, b"hello direct peer").expect("source file should be writable");
+
+        let prepared = host
+            .prepare_file_path_with_progress(&source, |_| {})
+            .await
+            .expect("host should prepare direct file");
+        host.register_outgoing_file("c1", &source, prepared.clone()).await;
+        let host_ticket = host.local_ticket().expect("host ticket should encode");
+
+        let server = host.clone();
+        let serve_task = tokio::spawn(async move {
+            let connection = server
+                .accept_transfer_connection()
+                .await
+                .expect("host should accept transfer connection");
+            server
+                .serve_registered_file(connection)
+                .await
+                .expect("host should serve registered file");
+        });
+
+        let size = joiner
+            .receive_file_with_progress(&host_ticket, "c1", &prepared.content_hash, &target, |_| {})
+            .await
+            .expect("joiner should receive direct file");
+        serve_task.await.expect("serve task should complete");
+
+        assert_eq!(size, 17);
+        assert_eq!(
+            std::fs::read(&target).expect("target should exist"),
+            b"hello direct peer"
         );
 
         let _ = std::fs::remove_file(&source);

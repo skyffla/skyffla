@@ -63,6 +63,10 @@ Current constant:
 
 Wrappers should fail on machine major mismatch and tolerate additive minor changes.
 
+The current machine major reflects the file-channel contract change from
+blob-required metadata to explicit transfer metadata. Wrappers speaking the
+older `1.x` file-channel shape should be treated as incompatible with `2.x`.
+
 ### Rendezvous HTTP API
 
 Defined in:

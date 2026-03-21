@@ -138,6 +138,54 @@ pub(crate) fn spawn_accept_loop(
     })
 }
 
+pub(crate) fn spawn_host_transfer_accept_loop(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let connection = match transport.accept_transfer_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = host_tx.send(HostInput::PeerProtocolError {
+                        message: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            if let Err(error) = transport.serve_registered_file(connection).await {
+                let _ = host_tx.send(HostInput::PeerProtocolError {
+                    message: error.to_string(),
+                });
+            }
+        }
+    })
+}
+
+pub(crate) fn spawn_join_transfer_accept_loop(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let connection = match transport.accept_transfer_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            if let Err(error) = transport.serve_registered_file(connection).await {
+                let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                    message: error.to_string(),
+                });
+            }
+        }
+    })
+}
+
 pub(crate) fn spawn_host_authority_reader(
     mut recv: RecvStream,
     member_id: MemberId,
@@ -540,6 +588,120 @@ pub(crate) fn spawn_host_blob_receive(
                 let _ = host_tx.send(HostInput::LocalEvent {
                     event: MachineEvent::Error {
                         code: "blob_fetch_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_join_direct_receive(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    expected_hash: String,
+    name: String,
+    size: Option<u64>,
+    target_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut last_step = None;
+        match transport
+            .receive_file_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &expected_hash,
+                &target_path,
+                |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: TransferItemKind::File,
+                                name: name.clone(),
+                                phase: TransferPhase::Downloading,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                },
+            )
+            .await
+        {
+            Ok(size) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::ChannelPathReceived {
+                        channel_id,
+                        path: target_path.display().to_string(),
+                        size,
+                    },
+                });
+            }
+            Err(error) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "direct_receive_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_host_direct_receive(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    expected_hash: String,
+    name: String,
+    size: Option<u64>,
+    target_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut last_step = None;
+        match transport
+            .receive_file_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &expected_hash,
+                &target_path,
+                |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = host_tx.send(HostInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: TransferItemKind::File,
+                                name: name.clone(),
+                                phase: TransferPhase::Downloading,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                },
+            )
+            .await
+        {
+            Ok(size) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::ChannelPathReceived {
+                        channel_id,
+                        path: target_path.display().to_string(),
+                        size,
+                    },
+                });
+            }
+            Err(error) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "direct_receive_failed".into(),
                         message: error.to_string(),
                         channel_id: Some(channel_id),
                     },

@@ -5,7 +5,7 @@ use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
     ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId,
-    TransferItemKind, MACHINE_PROTOCOL_VERSION,
+    TransferDigest, TransferItemKind, TransferOffer, MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_protocol::{ProtocolVersion, FILE_TRANSFER_PROTOCOL_VERSION};
@@ -30,10 +30,11 @@ use crate::net::framing::write_framed;
 use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
-    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_receive, spawn_host_peer_link,
-    spawn_join_accept_loop, spawn_join_blob_receive, spawn_join_host_peer_accept,
-    spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput,
-    PeerHandle,
+    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_receive,
+    spawn_host_direct_receive, spawn_host_peer_link, spawn_host_transfer_accept_loop,
+    spawn_join_accept_loop, spawn_join_blob_receive, spawn_join_direct_receive,
+    spawn_join_host_peer_accept, spawn_join_transfer_accept_loop, spawn_link_writer,
+    spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput, PeerHandle,
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
@@ -59,7 +60,8 @@ struct ProgressGate {
 
 #[derive(Debug, Clone)]
 struct FileTransferTarget {
-    blob: skyffla_protocol::room::BlobRef,
+    transfer: TransferOffer,
+    blob: Option<skyffla_protocol::room::BlobRef>,
     item_kind: TransferItemKind,
     name: String,
     size: Option<u64>,
@@ -117,6 +119,7 @@ pub(crate) async fn run_machine_host(
         Some(identity.fingerprint.clone()),
         local_ticket.encoded,
     );
+    let transfer_accept_handle = spawn_host_transfer_accept_loop(transport.clone(), host_tx.clone());
 
     let mut machine_state_entered = false;
     let mut local_input_closed = false;
@@ -148,6 +151,7 @@ pub(crate) async fn run_machine_host(
     }
 
     accept_handle.abort();
+    transfer_accept_handle.abort();
     stdin_handle.abort();
     peers.clear();
     sink.emit_json_event(serde_json::json!({
@@ -196,6 +200,8 @@ pub(crate) async fn run_machine_join_session(
         join_state.local_fingerprint.clone(),
         join_state.local_ticket.clone(),
     );
+    let transfer_accept_handle =
+        spawn_join_transfer_accept_loop(transport.clone(), peer_tx.clone());
     let host_peer_accept_handle = spawn_join_host_peer_accept(connection.clone(), peer_tx.clone());
     let stdin_handle = spawn_join_stdin_task(stdin_tx);
 
@@ -231,6 +237,7 @@ pub(crate) async fn run_machine_join_session(
     }
 
     accept_handle.abort();
+    transfer_accept_handle.abort();
     host_peer_accept_handle.abort();
     stdin_handle.abort();
 
@@ -902,6 +909,7 @@ async fn handle_join_command(
             name,
             size,
             mime,
+            transfer,
             blob,
         } => {
             let local_event = MachineEvent::ChannelOpened {
@@ -913,6 +921,7 @@ async fn handle_join_command(
                 name: name.clone(),
                 size,
                 mime: mime.clone(),
+                transfer: transfer.clone(),
                 blob: blob.clone(),
             };
             send_peer_command(
@@ -924,6 +933,7 @@ async fn handle_join_command(
                     name,
                     size,
                     mime,
+                    transfer,
                     blob,
                 },
             )
@@ -941,6 +951,7 @@ async fn handle_join_command(
             .await?;
             if let Some(PendingFileTransfer {
                 provider_ticket,
+                transfer,
                 blob,
                 item_kind,
                 name,
@@ -948,19 +959,43 @@ async fn handle_join_command(
             }) = join_pending_file_transfer(state, &self_member, &channel_id)?
             {
                 let target_path = receive_target_path(download_dir, &name)?;
-                spawn_join_blob_receive(
-                    transport.clone(),
-                    peer_tx,
-                    PeerTicket {
-                        encoded: provider_ticket,
-                    },
-                    channel_id,
-                    blob,
-                    item_kind,
-                    name,
-                    size,
-                    target_path,
-                );
+                match (transfer.item_kind.clone(), transfer.integrity.clone(), blob) {
+                    (TransferItemKind::File, Some(integrity), None) => {
+                        spawn_join_direct_receive(
+                            transport.clone(),
+                            peer_tx,
+                            PeerTicket {
+                                encoded: provider_ticket,
+                            },
+                            channel_id,
+                            integrity.value,
+                            name,
+                            size,
+                            target_path,
+                        );
+                    }
+                    (_, _, Some(blob)) => {
+                        spawn_join_blob_receive(
+                            transport.clone(),
+                            peer_tx,
+                            PeerTicket {
+                                encoded: provider_ticket,
+                            },
+                            channel_id,
+                            blob,
+                            item_kind,
+                            name,
+                            size,
+                            target_path,
+                        );
+                    }
+                    _ => {
+                        return Err(CliError::runtime(format!(
+                            "file channel {} has unsupported transfer metadata",
+                            channel_id.as_str()
+                        )));
+                    }
+                }
             }
             Ok(())
         }
@@ -1030,38 +1065,81 @@ async fn send_path_from_join(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let item_kind = if expanded_path.is_dir() {
-        TransferItemKind::Folder
-    } else {
-        TransferItemKind::File
-    };
-    let display_name = expanded_path
-        .file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| expanded_path.display().to_string());
-    let ImportedPath { blob, size, .. } = transport
-        .import_path_with_progress(&expanded_path, {
-            let channel_id = channel_id.clone();
-            let peer_tx = peer_tx.clone();
-            let item_kind = item_kind.clone();
-            let display_name = display_name.clone();
-            let mut gate = ProgressGate::default();
-            move |progress| {
-                if gate.should_emit(&progress) {
-                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                        event: transfer_progress_event(
-                            &channel_id,
-                            item_kind.clone(),
-                            &display_name,
-                            &progress,
-                            None,
-                        ),
-                    });
+    let (display_name, size, transfer, blob) = if expanded_path.is_file() {
+        let display_name = expanded_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| expanded_path.display().to_string());
+        let prepared = transport
+            .prepare_file_path_with_progress(&expanded_path, {
+                let channel_id = channel_id.clone();
+                let peer_tx = peer_tx.clone();
+                let display_name = display_name.clone();
+                let mut gate = ProgressGate::default();
+                move |progress| {
+                    if gate.should_emit(&progress) {
+                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                            event: transfer_progress_event(
+                                &channel_id,
+                                TransferItemKind::File,
+                                &display_name,
+                                &progress,
+                                None,
+                            ),
+                        });
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
+            })
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?;
+        transport
+            .register_outgoing_file(channel_id.as_str().to_string(), &expanded_path, prepared.clone())
+            .await;
+        (
+            display_name,
+            prepared.size,
+            file_transfer_offer(prepared.content_hash),
+            None,
+        )
+    } else if expanded_path.is_dir() {
+        let display_name = expanded_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| expanded_path.display().to_string());
+        let ImportedPath { blob, size, .. } = transport
+            .import_path_with_progress(&expanded_path, {
+                let channel_id = channel_id.clone();
+                let peer_tx = peer_tx.clone();
+                let display_name = display_name.clone();
+                let mut gate = ProgressGate::default();
+                move |progress| {
+                    if gate.should_emit(&progress) {
+                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                            event: transfer_progress_event(
+                                &channel_id,
+                                TransferItemKind::Folder,
+                                &display_name,
+                                &progress,
+                                None,
+                            ),
+                        });
+                    }
+                }
+            })
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?;
+        (
+            display_name,
+            size,
+            folder_transfer_offer(),
+            Some(blob),
+        )
+    } else {
+        return Err(CliError::usage(format!(
+            "path {} is not a file or directory",
+            expanded_path.display()
+        )));
+    };
     let name = name.or(Some(display_name));
     let local_event = MachineEvent::ChannelOpened {
         channel_id: channel_id.clone(),
@@ -1072,7 +1150,8 @@ async fn send_path_from_join(
         name: name.clone(),
         size: Some(size),
         mime: mime.clone(),
-        blob: Some(blob.clone()),
+        transfer: Some(transfer.clone()),
+        blob: blob.clone(),
     };
     send_peer_command(
         authority_send,
@@ -1083,7 +1162,8 @@ async fn send_path_from_join(
             name,
             size: Some(size),
             mime,
-            blob: Some(blob),
+            transfer: Some(transfer),
+            blob,
         },
     )
     .await?;
@@ -1239,42 +1319,82 @@ async fn send_path_from_host(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let item_kind = if expanded_path.is_dir() {
-        TransferItemKind::Folder
+    let (size, transfer, blob, open_name) = if expanded_path.is_file() {
+        let display_name = expanded_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| expanded_path.display().to_string());
+        let mut gate = ProgressGate::default();
+        let prepared = transport
+            .prepare_file_path_with_progress(&expanded_path, |progress| {
+                if gate.should_emit(&progress) {
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: transfer_progress_event(
+                            &channel_id,
+                            TransferItemKind::File,
+                            &display_name,
+                            &progress,
+                            None,
+                        ),
+                    });
+                }
+            })
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?;
+        transport
+            .register_outgoing_file(channel_id.as_str().to_string(), &expanded_path, prepared.clone())
+            .await;
+        (
+            prepared.size,
+            file_transfer_offer(prepared.content_hash),
+            None,
+            name.or(Some(display_name)),
+        )
+    } else if expanded_path.is_dir() {
+        let display_name = expanded_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| expanded_path.display().to_string());
+        let mut gate = ProgressGate::default();
+        let ImportedPath { blob, size, .. } = transport
+            .import_path_with_progress(&expanded_path, |progress| {
+                if gate.should_emit(&progress) {
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: transfer_progress_event(
+                            &channel_id,
+                            TransferItemKind::Folder,
+                            &display_name,
+                            &progress,
+                            None,
+                        ),
+                    });
+                }
+            })
+            .await
+            .map_err(|error| CliError::transport(error.to_string()))?;
+        (
+            size,
+            folder_transfer_offer(),
+            Some(blob),
+            name.or(Some(display_name)),
+        )
     } else {
-        TransferItemKind::File
+        return Err(CliError::usage(format!(
+            "path {} is not a file or directory",
+            expanded_path.display()
+        )));
     };
-    let display_name = expanded_path
-        .file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| expanded_path.display().to_string());
-    let mut gate = ProgressGate::default();
-    let ImportedPath { blob, size, .. } = transport
-        .import_path_with_progress(&expanded_path, |progress| {
-            if gate.should_emit(&progress) {
-                let _ = host_tx.send(HostInput::LocalEvent {
-                    event: transfer_progress_event(
-                        &channel_id,
-                        item_kind.clone(),
-                        &display_name,
-                        &progress,
-                        None,
-                    ),
-                });
-            }
-        })
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
     let routed = room
         .open_channel(
             sender,
             channel_id,
             ChannelKind::File,
             to,
-            name.or(Some(display_name)),
+            open_name,
             Some(size),
             mime,
-            Some(blob),
+            Some(transfer),
+            blob,
         )
         .map_err(room_error)?;
     deliver_routed_events(room.host_member(), routed, stdout, peers).await
@@ -1294,6 +1414,23 @@ fn transfer_progress_event(
         phase: progress.phase.clone(),
         bytes_complete: progress.bytes_complete,
         bytes_total: total_override.or(progress.bytes_total),
+    }
+}
+
+fn file_transfer_offer(content_hash: String) -> TransferOffer {
+    TransferOffer {
+        item_kind: TransferItemKind::File,
+        integrity: Some(TransferDigest {
+            algorithm: "blake3".into(),
+            value: content_hash,
+        }),
+    }
+}
+
+fn folder_transfer_offer() -> TransferOffer {
+    TransferOffer {
+        item_kind: TransferItemKind::Folder,
+        integrity: None,
     }
 }
 
@@ -1319,9 +1456,9 @@ fn host_pending_file_download(
             channel_id.as_str()
         )));
     }
-    let blob = channel.blob.ok_or_else(|| {
+    let transfer = channel.transfer.ok_or_else(|| {
         CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
+            "file channel {} is missing transfer metadata",
             channel_id.as_str()
         ))
     })?;
@@ -1334,14 +1471,12 @@ fn host_pending_file_download(
                 channel.opener.as_str()
             ))
         })?;
-    let item_kind = match blob.format {
-        skyffla_protocol::room::BlobFormat::Blob => TransferItemKind::File,
-        skyffla_protocol::room::BlobFormat::Collection => TransferItemKind::Folder,
-    };
+    let item_kind = transfer.item_kind.clone();
     Ok(Some((
         PeerTicket { encoded: ticket },
         FileTransferTarget {
-            blob,
+            transfer,
+            blob: channel.blob,
             item_kind,
             name: channel
                 .name
@@ -1390,10 +1525,11 @@ async fn handle_host_command(
             name,
             size,
             mime,
+            transfer,
             blob,
         } => {
             let routed = room
-                .open_channel(sender, channel_id, kind, to, name, size, mime, blob)
+                .open_channel(sender, channel_id, kind, to, name, size, mime, transfer, blob)
                 .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
@@ -1477,17 +1613,43 @@ async fn handle_host_command(
                     host_pending_file_download(room, peers, sender, &channel_id)?
                 {
                     let target_path = receive_target_path(download_dir, &file.name)?;
-                    spawn_host_blob_receive(
-                        transport.clone(),
-                        host_tx.clone(),
-                        provider,
-                        channel_id.clone(),
+                    match (
+                        file.transfer.item_kind.clone(),
+                        file.transfer.integrity.clone(),
                         file.blob,
-                        file.item_kind,
-                        file.name,
-                        file.size,
-                        target_path,
-                    );
+                    ) {
+                        (TransferItemKind::File, Some(integrity), None) => {
+                            spawn_host_direct_receive(
+                                transport.clone(),
+                                host_tx.clone(),
+                                provider,
+                                channel_id.clone(),
+                                integrity.value,
+                                file.name,
+                                file.size,
+                                target_path,
+                            );
+                        }
+                        (_, _, Some(blob)) => {
+                            spawn_host_blob_receive(
+                                transport.clone(),
+                                host_tx.clone(),
+                                provider,
+                                channel_id.clone(),
+                                blob,
+                                file.item_kind,
+                                file.name,
+                                file.size,
+                                target_path,
+                            );
+                        }
+                        _ => {
+                            return Err(CliError::runtime(format!(
+                                "file channel {} has unsupported transfer metadata",
+                                channel_id.as_str()
+                            )));
+                        }
+                    }
                 }
             }
             deliver_routed_events(room.host_member(), routed, stdout, peers).await

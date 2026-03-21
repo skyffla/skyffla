@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
     BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferItemKind,
+    TransferOffer,
 };
 use skyffla_protocol::room_link::PeerLinkMessage;
 use tokio::sync::mpsc;
@@ -32,6 +33,7 @@ pub(super) struct JoinChannelState {
     pub(super) item_kind: Option<TransferItemKind>,
     pub(super) name: Option<String>,
     pub(super) size: Option<u64>,
+    pub(super) transfer: Option<TransferOffer>,
     pub(super) blob: Option<BlobRef>,
     pub(super) local_file_ready: bool,
 }
@@ -39,7 +41,8 @@ pub(super) struct JoinChannelState {
 #[derive(Debug, Clone)]
 pub(super) struct PendingFileTransfer {
     pub(super) provider_ticket: String,
-    pub(super) blob: BlobRef,
+    pub(super) transfer: TransferOffer,
+    pub(super) blob: Option<BlobRef>,
     pub(super) item_kind: TransferItemKind,
     pub(super) name: String,
     pub(super) size: Option<u64>,
@@ -82,6 +85,7 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             to,
             name,
             size,
+            transfer,
             blob,
             ..
         } => {
@@ -92,14 +96,10 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                         opener: from.clone(),
                         kind: kind.clone(),
                         participants,
-                        item_kind: blob.as_ref().map(|blob| match blob.format {
-                            skyffla_protocol::room::BlobFormat::Blob => TransferItemKind::File,
-                            skyffla_protocol::room::BlobFormat::Collection => {
-                                TransferItemKind::Folder
-                            }
-                        }),
+                        item_kind: transfer.as_ref().map(|transfer| transfer.item_kind.clone()),
                         name: name.clone(),
                         size: *size,
+                        transfer: transfer.clone(),
                         blob: blob.clone(),
                         local_file_ready: state.self_member.as_ref() == Some(from),
                     },
@@ -230,9 +230,9 @@ pub(super) fn join_pending_file_transfer(
             channel_id.as_str()
         )));
     }
-    let blob = channel.blob.clone().ok_or_else(|| {
+    let transfer = channel.transfer.clone().ok_or_else(|| {
         CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
+            "file channel {} is missing transfer metadata",
             channel_id.as_str()
         ))
     })?;
@@ -248,7 +248,8 @@ pub(super) fn join_pending_file_transfer(
         })?;
     Ok(Some(PendingFileTransfer {
         provider_ticket,
-        blob,
+        transfer,
+        blob: channel.blob.clone(),
         item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
         name: channel
             .name
