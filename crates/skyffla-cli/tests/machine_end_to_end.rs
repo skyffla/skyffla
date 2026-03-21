@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -858,6 +860,118 @@ async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual performance baseline; run with --ignored --nocapture and optionally SKYFFLA_PERF_FILE_MIB=2048"]
+async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        println!("skipping perf baseline test: local rendezvous/transport test harness unavailable");
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-perf-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-perf-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let size_mib = perf_file_size_mib();
+    let source_path = ensure_perf_source_file(size_mib)?;
+    let source_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("perf source file should have a valid UTF-8 filename")?
+        .to_string();
+    let source_size = std::fs::metadata(&source_path)?.len();
+    let saved_path = beta_home.join(&source_name);
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
+
+    let command = serde_json::json!({
+        "type": "send_path",
+        "channel_id": "perf1",
+        "to": { "type": "member", "member_id": "m2" },
+        "path": source_path.display().to_string(),
+    });
+
+    let send_started_at = Instant::now();
+    host.send(&command.to_string()).await?;
+
+    host.expect_event_with_timeout("sender prepare progress", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("perf1".into()))
+            && event.get("phase") == Some(&Value::String("preparing".into()))
+    })
+    .await?;
+    beta.expect_event_with_timeout("file opened from host", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("perf1".into()))
+            && event.get("name") == Some(&Value::String(source_name.clone()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
+    })
+    .await?;
+
+    beta.send("/channel accept perf1").await?;
+
+    beta.expect_event_with_timeout("file transfer ready", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("perf1".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
+            && event.pointer("/transfer/integrity/algorithm")
+                == Some(&Value::String("blake3".into()))
+    })
+    .await?;
+    let ready_at = Instant::now();
+
+    beta.expect_event_with_timeout("download progress", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("perf1".into()))
+            && event.get("phase") == Some(&Value::String("downloading".into()))
+    })
+    .await?;
+    let first_download_progress_at = Instant::now();
+
+    beta.expect_event_with_timeout("file received", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_path_received".into()))
+            && event.get("channel_id") == Some(&Value::String("perf1".into()))
+            && event.get("path") == Some(&Value::String(saved_path.display().to_string()))
+    })
+    .await?;
+    let received_at = Instant::now();
+
+    assert_eq!(std::fs::metadata(&saved_path)?.len(), source_size);
+
+    let total_elapsed = received_at.duration_since(send_started_at);
+    let prepare_elapsed = ready_at.duration_since(send_started_at);
+    let transfer_elapsed = received_at.duration_since(first_download_progress_at);
+    let accept_to_receive_elapsed = received_at.duration_since(ready_at);
+
+    println!(
+        "skyffla perf baseline: source={} size={}MiB prep={} transfer={} accept_to_receive={} total={} transfer_rate={} end_to_end_rate={}",
+        source_path.display(),
+        bytes_to_mib(source_size),
+        format_duration_short(prepare_elapsed),
+        format_duration_short(transfer_elapsed),
+        format_duration_short(accept_to_receive_elapsed),
+        format_duration_short(total_elapsed),
+        format_mib_per_sec(source_size, transfer_elapsed),
+        format_mib_per_sec(source_size, total_elapsed),
+    );
+
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
 struct MachineProc {
     label: String,
     child: Child,
@@ -943,7 +1057,20 @@ impl MachineProc {
     where
         F: Fn(&Value) -> bool,
     {
-        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        self.expect_event_with_timeout(label, PROCESS_TIMEOUT, predicate)
+            .await
+    }
+
+    async fn expect_event_with_timeout<F>(
+        &mut self,
+        label: &str,
+        timeout_window: Duration,
+        predicate: F,
+    ) -> Result<Value>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let deadline = Instant::now() + timeout_window;
         loop {
             if let Some(found) = self
                 .stdout_seen
@@ -1146,4 +1273,85 @@ fn linked_member_id_named(lines: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn perf_file_size_mib() -> u64 {
+    std::env::var("SKYFFLA_PERF_FILE_MIB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(512)
+}
+
+fn perf_timeout() -> Duration {
+    std::env::var("SKYFFLA_PERF_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(180))
+}
+
+fn ensure_perf_source_file(size_mib: u64) -> Result<PathBuf> {
+    let cache_root = std::env::temp_dir().join("skyffla-transfer-perf");
+    std::fs::create_dir_all(&cache_root)
+        .with_context(|| format!("failed to create {}", cache_root.display()))?;
+    let path = cache_root.join(format!("perf-random-{size_mib}m.bin"));
+    let expected_len = size_mib * 1024 * 1024;
+    if std::fs::metadata(&path)
+        .map(|meta| meta.len() == expected_len)
+        .unwrap_or(false)
+    {
+        return Ok(path);
+    }
+
+    let file = File::create(&path)
+        .with_context(|| format!("failed to create perf source file {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut remaining = expected_len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(buffer.len() as u64) as usize;
+        fill_pseudorandom_bytes(&mut buffer[..chunk_len], &mut state);
+        writer
+            .write_all(&buffer[..chunk_len])
+            .with_context(|| format!("failed writing perf source file {}", path.display()))?;
+        remaining -= chunk_len as u64;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("failed flushing perf source file {}", path.display()))?;
+    Ok(path)
+}
+
+fn fill_pseudorandom_bytes(buf: &mut [u8], state: &mut u64) {
+    for chunk in buf.chunks_mut(8) {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        let value = state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+        let len = chunk.len();
+        chunk.copy_from_slice(&value[..len]);
+    }
+}
+
+fn bytes_to_mib(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
+fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
+    if elapsed.is_zero() {
+        return "inf MiB/s".into();
+    }
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("{:.1}MiB/s", mib / elapsed.as_secs_f64())
+}
+
+fn format_duration_short(elapsed: Duration) -> String {
+    if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", elapsed.as_secs_f64())
+    } else {
+        format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
+    }
 }
