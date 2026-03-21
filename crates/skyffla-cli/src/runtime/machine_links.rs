@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use iroh::endpoint::{RecvStream, SendStream};
-use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
     ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind, TransferPhase,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
+use skyffla_protocol::ProtocolVersion;
 use skyffla_session::SessionPeer;
 use skyffla_transport::{
     ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
@@ -565,20 +565,26 @@ pub(crate) fn spawn_join_direct_directory_receive(
     tokio::spawn(async move {
         let mut last_step = None;
         match transport
-            .receive_directory_with_progress(&provider, channel_id.as_str(), &transfer_digest, &target_path, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
-                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                        event: MachineEvent::TransferProgress {
-                            channel_id: channel_id.clone(),
-                            item_kind: TransferItemKind::Folder,
-                            name: name.clone(),
-                            phase: TransferPhase::Downloading,
-                            bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
-                        },
-                    });
-                }
-            })
+            .receive_directory_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &transfer_digest,
+                &target_path,
+                |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: TransferItemKind::Folder,
+                                name: name.clone(),
+                                phase: TransferPhase::Downloading,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                },
+            )
             .await
         {
             Ok(size) => {
@@ -626,20 +632,26 @@ pub(crate) fn spawn_host_direct_directory_receive(
     tokio::spawn(async move {
         let mut last_step = None;
         match transport
-            .receive_directory_with_progress(&provider, channel_id.as_str(), &transfer_digest, &target_path, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: MachineEvent::TransferProgress {
-                            channel_id: channel_id.clone(),
-                            item_kind: TransferItemKind::Folder,
-                            name: name.clone(),
-                            phase: TransferPhase::Downloading,
-                            bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
-                        },
-                    });
-                }
-            })
+            .receive_directory_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &transfer_digest,
+                &target_path,
+                |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = host_tx.send(HostInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: TransferItemKind::Folder,
+                                name: name.clone(),
+                                phase: TransferPhase::Downloading,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                },
+            )
             .await
         {
             Ok(size) => {
@@ -684,7 +696,7 @@ fn should_emit_progress(
         Some(total) if total > 0 => (progress.bytes_complete.saturating_mul(100) / total) / 10,
         _ => progress.bytes_complete / (256 * 1024),
     };
-    let emit = *last_step != Some(step) || progress.bytes_complete == 0;
+    let emit = *last_step != Some(step);
     *last_step = Some(step);
     emit
 }

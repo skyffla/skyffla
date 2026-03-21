@@ -27,6 +27,7 @@ pub(crate) struct UiState {
     pub(crate) host_member_id: Option<String>,
     pub(crate) room_members: BTreeMap<String, String>,
     events: Vec<EventLine>,
+    status: Option<String>,
     input_buffer: String,
     cursor_index: usize,
     input_history: Vec<String>,
@@ -70,6 +71,7 @@ impl UiState {
             host_member_id: None,
             room_members: BTreeMap::new(),
             events: Vec::new(),
+            status: None,
             input_buffer: String::new(),
             cursor_index: 0,
             input_history: state.history,
@@ -85,6 +87,14 @@ impl UiState {
 
     pub(crate) fn chat(&mut self, speaker: &str, text: &str) {
         self.push_event(format!("{speaker}: {text}"));
+    }
+
+    pub(crate) fn set_status(&mut self, message: impl Into<String>) {
+        self.status = Some(message.into());
+    }
+
+    pub(crate) fn clear_status(&mut self) {
+        self.status = None;
     }
 
     pub(crate) fn set_room_identity(
@@ -120,12 +130,14 @@ impl UiState {
         let height = terminal_height();
         let divider = "-".repeat(width);
         let prompt_row = height.saturating_sub(1) as u16;
+        let status_row = self.status.as_ref().map(|_| prompt_row.saturating_sub(1));
         let (visible_input, cursor_col) = self.prompt_window(width);
         let header_lines = self.header_lines(width);
         let header_start = 1u16;
         let header_end = header_start + header_lines.len() as u16;
         let event_start = header_end + 1;
-        let event_capacity = prompt_row.saturating_sub(event_start) as usize;
+        let event_end = status_row.unwrap_or(prompt_row);
+        let event_capacity = event_end.saturating_sub(event_start) as usize;
         let mut stdout = std::io::stdout();
 
         let _ = queue!(stdout, MoveTo(0, 0), Clear(ClearType::All));
@@ -167,6 +179,14 @@ impl UiState {
                 MoveTo(0, event_start + index as u16),
                 Clear(ClearType::CurrentLine),
                 Print(clip_line(line, width))
+            );
+        }
+        if let Some((row, status)) = status_row.zip(self.status.as_ref()) {
+            let _ = queue!(
+                stdout,
+                MoveTo(0, row),
+                Clear(ClearType::CurrentLine),
+                Print(clip_line(status, width))
             );
         }
 
@@ -393,6 +413,21 @@ impl UiState {
         } else {
             name.to_string()
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_text(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_event_text(&self) -> Option<&str> {
+        self.events.last().map(|event| event.text.as_str())
     }
 }
 

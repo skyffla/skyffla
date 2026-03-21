@@ -108,7 +108,7 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
-    join.expect_line_contains("sending file report.txt to alpha")
+    join.expect_line_contains("preparing file report.txt to send to alpha")
         .await?;
     host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;
@@ -160,7 +160,7 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
     join.send_line(r#"/send m1 ~/artpack"#).await?;
-    join.expect_line_contains("sending folder artpack to alpha")
+    join.expect_line_contains("preparing folder artpack to send to alpha")
         .await?;
     host.expect_line_contains("beta wants to send folder artpack (9B) - /accept or /reject")
         .await?;
@@ -215,7 +215,7 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     gamma.expect_line_contains("members:").await?;
 
     beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
-    beta.expect_line_contains("sending file secret.txt to alpha")
+    beta.expect_line_contains("preparing file secret.txt to send to alpha")
         .await?;
     alpha
         .expect_line_contains("beta wants to send file secret.txt (6B) - /accept or /reject")
@@ -332,7 +332,7 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
         .await?;
 
     join.send_line(r#"/send m1 ~/report.txt"#).await?;
-    join.expect_line_contains("sending file report.txt to alpha")
+    join.expect_line_contains("preparing file report.txt to send to alpha")
         .await?;
     host.expect_line_contains("beta wants to send file report.txt (11B) - /accept or /reject")
         .await?;

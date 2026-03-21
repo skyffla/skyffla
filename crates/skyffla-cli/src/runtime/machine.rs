@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId,
-    TransferDigest, TransferItemKind, TransferOffer, MACHINE_PROTOCOL_VERSION,
+    ChannelId, ChannelKind, MachineCommand, MachineEvent, Member, MemberId, RoomId, TransferDigest,
+    TransferItemKind, TransferOffer, MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_protocol::{ProtocolVersion, FILE_TRANSFER_PROTOCOL_VERSION};
@@ -15,6 +15,7 @@ use skyffla_session::{
 };
 use skyffla_transport::{
     ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
+    TransferRuntimeProgress,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -69,20 +70,68 @@ impl ProgressGate {
         match progress.bytes_total {
             Some(0) | None => {
                 let step = progress.bytes_complete / (256 * 1024);
-                let emit = self.last_step != Some(step) || progress.bytes_complete == 0;
+                let emit = self.last_step != Some(step);
                 self.last_step = Some(step);
                 emit
             }
             Some(total) => {
                 let step = ((progress.bytes_complete.saturating_mul(100)) / total) / 10;
-                let emit = self.last_step != Some(step)
-                    || progress.bytes_complete == 0
-                    || progress.bytes_complete >= total;
+                let emit = self.last_step != Some(step) || progress.bytes_complete >= total;
                 self.last_step = Some(step);
                 emit
             }
         }
     }
+}
+
+fn spawn_join_transfer_progress_forwarder(
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+) -> mpsc::UnboundedSender<TransferRuntimeProgress> {
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TransferRuntimeProgress>();
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let channel_id = match ChannelId::new(progress.channel_id) {
+                Ok(channel_id) => channel_id,
+                Err(_) => continue,
+            };
+            let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                event: MachineEvent::TransferProgress {
+                    channel_id,
+                    item_kind: progress.item_kind,
+                    name: progress.name,
+                    phase: progress.phase,
+                    bytes_complete: progress.bytes_complete,
+                    bytes_total: progress.bytes_total,
+                },
+            });
+        }
+    });
+    progress_tx
+}
+
+fn spawn_host_transfer_progress_forwarder(
+    host_tx: mpsc::UnboundedSender<HostInput>,
+) -> mpsc::UnboundedSender<TransferRuntimeProgress> {
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TransferRuntimeProgress>();
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let channel_id = match ChannelId::new(progress.channel_id) {
+                Ok(channel_id) => channel_id,
+                Err(_) => continue,
+            };
+            let _ = host_tx.send(HostInput::LocalEvent {
+                event: MachineEvent::TransferProgress {
+                    channel_id,
+                    item_kind: progress.item_kind,
+                    name: progress.name,
+                    phase: progress.phase,
+                    bytes_complete: progress.bytes_complete,
+                    bytes_total: progress.bytes_total,
+                },
+            });
+        }
+    });
+    progress_tx
 }
 
 pub(crate) async fn run_machine_host(
@@ -116,7 +165,8 @@ pub(crate) async fn run_machine_host(
         Some(identity.fingerprint.clone()),
         local_ticket.encoded,
     );
-    let transfer_accept_handle = spawn_host_transfer_accept_loop(transport.clone(), host_tx.clone());
+    let transfer_accept_handle =
+        spawn_host_transfer_accept_loop(transport.clone(), host_tx.clone());
 
     let mut machine_state_entered = false;
     let mut local_input_closed = false;
@@ -1084,8 +1134,14 @@ async fn send_path_from_join(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
         transport
-            .register_outgoing_file(channel_id.as_str().to_string(), &expanded_path, prepared.clone())
+            .register_outgoing_file(
+                channel_id.as_str().to_string(),
+                &expanded_path,
+                prepared.clone(),
+                Some(progress_tx),
+            )
             .await;
         (
             display_name,
@@ -1118,11 +1174,13 @@ async fn send_path_from_join(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
         transport
             .register_outgoing_directory(
                 channel_id.as_str().to_string(),
                 &expanded_path,
                 prepared.clone(),
+                Some(progress_tx),
             )
             .await;
         (
@@ -1213,8 +1271,9 @@ fn sanitized_receive_name(name: &str) -> Result<String, CliError> {
 
 fn receive_target_path(download_dir: &Path, name: &str) -> Result<PathBuf, CliError> {
     let root = resolve_download_dir(download_dir);
-    std::fs::create_dir_all(&root)
-        .map_err(|error| CliError::local_io(format!("failed to create {}: {error}", root.display())))?;
+    std::fs::create_dir_all(&root).map_err(|error| {
+        CliError::local_io(format!("failed to create {}: {error}", root.display()))
+    })?;
     Ok(unique_path_in_dir(&root, &sanitized_receive_name(name)?))
 }
 
@@ -1335,8 +1394,14 @@ async fn send_path_from_host(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
         transport
-            .register_outgoing_file(channel_id.as_str().to_string(), &expanded_path, prepared.clone())
+            .register_outgoing_file(
+                channel_id.as_str().to_string(),
+                &expanded_path,
+                prepared.clone(),
+                Some(progress_tx),
+            )
             .await;
         (
             prepared.size,
@@ -1365,11 +1430,13 @@ async fn send_path_from_host(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
         transport
             .register_outgoing_directory(
                 channel_id.as_str().to_string(),
                 &expanded_path,
                 prepared.clone(),
+                Some(progress_tx),
             )
             .await;
         (
