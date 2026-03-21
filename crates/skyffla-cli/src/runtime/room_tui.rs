@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyEventKind};
 use serde_json::Value;
 use skyffla_protocol::room::{
-    BlobFormat, ChannelId, ChannelKind, MachineCommand, MachineEvent, MemberId, Route,
-    TransferItemKind, TransferPhase,
+    ChannelId, ChannelKind, MachineCommand, MachineEvent, MemberId, Route, TransferItemKind,
+    TransferPhase,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
@@ -961,7 +961,6 @@ fn format_room_event_lines(
             name,
             size,
             transfer,
-            blob,
             ..
         } => {
             let route = match &to {
@@ -972,10 +971,7 @@ fn format_room_event_lines(
                 let item_kind = transfer
                     .as_ref()
                     .map(|transfer| transfer.item_kind.clone())
-                    .unwrap_or_else(|| match blob.as_ref().map(|blob| &blob.format) {
-                        Some(BlobFormat::Collection) => TransferItemKind::Folder,
-                        _ => TransferItemKind::File,
-                    });
+                    .unwrap_or(TransferItemKind::File);
                 let display_name = name
                     .clone()
                     .unwrap_or_else(|| channel_id.as_str().to_string());
@@ -1112,28 +1108,6 @@ fn format_room_event_lines(
                         .as_deref()
                         .map(|value| format!(" - {value}"))
                         .unwrap_or_default()
-                ))],
-                None,
-            )
-        }
-        MachineEvent::ChannelFileReady { channel_id, .. } => {
-            state.pending_incoming_files.retain(|id| id != &channel_id);
-            (Vec::new(), None)
-        }
-        MachineEvent::ChannelFileExported {
-            channel_id,
-            path,
-            size,
-        } => {
-            let label = state
-                .channel_summary(&channel_id)
-                .unwrap_or_else(|| channel_id.as_str().to_string());
-            state.ready_files.retain(|id| id != &channel_id);
-            (
-                vec![RoomLine::System(format!(
-                    "{label} saved to {} ({})",
-                    display_path(&path),
-                    format_bytes(size)
                 ))],
                 None,
             )

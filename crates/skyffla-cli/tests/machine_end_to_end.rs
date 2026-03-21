@@ -335,7 +335,7 @@ async fn machine_file_channel_requires_transfer_metadata_and_rejects_inline_data
         .await?;
 
     host.send(
-        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","transfer":{"item_kind":"file","integrity":{"algorithm":"blake3","value":"feedbeef"}},"blob":{"hash":"abc123","format":"blob"}}"#,
+        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","transfer":{"item_kind":"file","integrity":{"algorithm":"blake3","value":"feedbeef"}}}"#,
     )
     .await?;
     beta.expect_event("file channel_opened", |event| {

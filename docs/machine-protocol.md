@@ -146,8 +146,7 @@ Open a file channel:
 Rules:
 
 - `file` channels require `transfer`
-- `file` channels may optionally include `blob` only for older compatibility/migration paths
-- `machine` and `clipboard` channels must not include `transfer` or `blob`
+- `machine` and `clipboard` channels must not include `transfer`
 
 ### `send_path`
 
@@ -269,8 +268,7 @@ directory.
   "to":{"type":"member","member_id":"m1"},
   "name":"agent-link",
   "size":null,
-  "mime":null,
-  "blob":null
+  "mime":null
 }
 ```
 
@@ -330,7 +328,6 @@ For folders, `path` is the saved directory root.
 - `member_snapshot.members` must not be empty
 - `file` channels require transfer metadata
 - non-file channels must not include transfer metadata
-- non-file channels must not include blob metadata
 - `send_path` is a local machine command, not a peer-forwarded room command
 
 ## Wrapper Guidance

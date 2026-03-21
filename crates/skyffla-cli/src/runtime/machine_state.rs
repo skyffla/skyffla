@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferItemKind,
-    TransferOffer,
+    ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferOffer,
 };
 use skyffla_protocol::room_link::PeerLinkMessage;
 use tokio::sync::mpsc;
@@ -30,11 +29,9 @@ pub(super) struct JoinChannelState {
     pub(super) opener: MemberId,
     pub(super) kind: ChannelKind,
     pub(super) participants: BTreeSet<MemberId>,
-    pub(super) item_kind: Option<TransferItemKind>,
     pub(super) name: Option<String>,
     pub(super) size: Option<u64>,
     pub(super) transfer: Option<TransferOffer>,
-    pub(super) blob: Option<BlobRef>,
     pub(super) local_file_ready: bool,
 }
 
@@ -42,8 +39,6 @@ pub(super) struct JoinChannelState {
 pub(super) struct PendingFileTransfer {
     pub(super) provider_ticket: String,
     pub(super) transfer: TransferOffer,
-    pub(super) blob: Option<BlobRef>,
-    pub(super) item_kind: TransferItemKind,
     pub(super) name: String,
     pub(super) size: Option<u64>,
 }
@@ -86,7 +81,6 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             name,
             size,
             transfer,
-            blob,
             ..
         } => {
             if let Ok(participants) = event_participants(state, from, to) {
@@ -96,18 +90,15 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                         opener: from.clone(),
                         kind: kind.clone(),
                         participants,
-                        item_kind: transfer.as_ref().map(|transfer| transfer.item_kind.clone()),
                         name: name.clone(),
                         size: *size,
                         transfer: transfer.clone(),
-                        blob: blob.clone(),
                         local_file_ready: state.self_member.as_ref() == Some(from),
                     },
                 );
             }
         }
-        MachineEvent::ChannelFileReady { channel_id, .. }
-        | MachineEvent::ChannelPathReceived { channel_id, .. } => {
+        MachineEvent::ChannelPathReceived { channel_id, .. } => {
             if let Some(channel) = state.channels.get_mut(channel_id) {
                 channel.local_file_ready = true;
             }
@@ -190,7 +181,7 @@ pub(super) fn join_channel_recipients(
         .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
     if channel.kind == ChannelKind::File {
         return Err(CliError::runtime(format!(
-            "channel {} is blob-backed and does not accept inline channel data",
+            "channel {} is transfer-backed and does not accept inline channel data",
             channel_id.as_str()
         )));
     }
@@ -249,8 +240,6 @@ pub(super) fn join_pending_file_transfer(
     Ok(Some(PendingFileTransfer {
         provider_ticket,
         transfer,
-        blob: channel.blob.clone(),
-        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
         name: channel
             .name
             .clone()

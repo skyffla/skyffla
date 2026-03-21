@@ -30,7 +30,6 @@ pub enum RoomProtocolError {
     EmptyMemberSnapshot,
     MissingTransferOffer,
     UnexpectedTransferOffer,
-    UnexpectedBlobRef,
 }
 
 impl fmt::Display for RoomProtocolError {
@@ -45,7 +44,6 @@ impl fmt::Display for RoomProtocolError {
             Self::UnexpectedTransferOffer => {
                 write!(f, "transfer metadata is only allowed for file channels")
             }
-            Self::UnexpectedBlobRef => write!(f, "blob metadata is only allowed for file channels"),
         }
     }
 }
@@ -137,13 +135,6 @@ pub enum ChannelKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum BlobFormat {
-    Blob,
-    Collection,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum TransferItemKind {
     File,
     Folder,
@@ -155,21 +146,6 @@ pub enum TransferPhase {
     Preparing,
     Downloading,
     Exporting,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BlobRef {
-    pub hash: String,
-    pub format: BlobFormat,
-}
-
-impl BlobRef {
-    pub fn validate(&self) -> Result<(), RoomProtocolError> {
-        if self.hash.trim().is_empty() {
-            return Err(RoomProtocolError::EmptyIdentifier { kind: "blob_hash" });
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,7 +237,6 @@ pub enum MachineCommand {
         size: Option<u64>,
         mime: Option<String>,
         transfer: Option<TransferOffer>,
-        blob: Option<BlobRef>,
     },
     AcceptChannel {
         channel_id: ChannelId,
@@ -321,14 +296,13 @@ impl MachineCommand {
                 kind,
                 to,
                 transfer,
-                blob,
                 ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
                     return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
                 }
                 to.validate()?;
-                validate_channel_transfer(kind, transfer.as_ref(), blob.as_ref())
+                validate_channel_transfer(kind, transfer.as_ref())
             }
             Self::AcceptChannel { channel_id }
             | Self::RejectChannel { channel_id, .. }
@@ -398,7 +372,6 @@ pub enum MachineEvent {
         size: Option<u64>,
         mime: Option<String>,
         transfer: Option<TransferOffer>,
-        blob: Option<BlobRef>,
     },
     ChannelAccepted {
         channel_id: ChannelId,
@@ -422,15 +395,6 @@ pub enum MachineEvent {
         member_id: MemberId,
         member_name: String,
         reason: Option<String>,
-    },
-    ChannelFileReady {
-        channel_id: ChannelId,
-        blob: BlobRef,
-    },
-    ChannelFileExported {
-        channel_id: ChannelId,
-        path: String,
-        size: u64,
     },
     ChannelPathReceived {
         channel_id: ChannelId,
@@ -526,7 +490,6 @@ impl MachineEvent {
                 from_name,
                 to,
                 transfer,
-                blob,
                 ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -541,7 +504,7 @@ impl MachineEvent {
                     });
                 }
                 to.validate()?;
-                validate_channel_transfer(kind, transfer.as_ref(), blob.as_ref())
+                validate_channel_transfer(kind, transfer.as_ref())
             }
             Self::ChannelAccepted {
                 channel_id,
@@ -595,16 +558,7 @@ impl MachineEvent {
                 }
                 Ok(())
             }
-            Self::ChannelFileReady { channel_id, blob } => {
-                if channel_id.as_str().trim().is_empty() {
-                    return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
-                }
-                blob.validate()
-            }
-            Self::ChannelFileExported {
-                channel_id, path, ..
-            }
-            | Self::ChannelPathReceived {
+            Self::ChannelPathReceived {
                 channel_id, path, ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -642,25 +596,18 @@ impl MachineEvent {
 fn validate_channel_transfer(
     kind: &ChannelKind,
     transfer: Option<&TransferOffer>,
-    blob: Option<&BlobRef>,
 ) -> Result<(), RoomProtocolError> {
     match kind {
         ChannelKind::File => {
             let transfer = transfer.ok_or(RoomProtocolError::MissingTransferOffer)?;
             transfer.validate()?;
-            if let Some(blob) = blob {
-                blob.validate()?;
-            }
             Ok(())
         }
         ChannelKind::Machine | ChannelKind::Clipboard => {
             if transfer.is_some() {
                 return Err(RoomProtocolError::UnexpectedTransferOffer);
             }
-            match blob {
-                Some(_) => Err(RoomProtocolError::UnexpectedBlobRef),
-                None => Ok(()),
-            }
+            Ok(())
         }
     }
 }
@@ -803,7 +750,6 @@ mod tests {
                 size: None,
                 mime: None,
                 transfer: None,
-                blob: None,
             }
         );
     }
@@ -886,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn documented_file_channel_command_with_blob_round_trips() {
+    fn documented_file_channel_command_with_transfer_round_trips() {
         let json = r#"{
             "type":"open_channel",
             "channel_id":"c8",
@@ -898,8 +844,7 @@ mod tests {
             "transfer":{
                 "item_kind":"file",
                 "integrity":{"algorithm":"blake3","value":"feedbeef"}
-            },
-            "blob":{"hash":"abc123","format":"blob"}
+            }
         }"#;
 
         let command: MachineCommand =
@@ -917,10 +862,6 @@ mod tests {
                 size: Some(1234),
                 mime: Some("application/pdf".into()),
                 transfer: Some(file_transfer_offer()),
-                blob: Some(BlobRef {
-                    hash: "abc123".into(),
-                    format: BlobFormat::Blob,
-                }),
             }
         );
         command.validate().expect("file channel should validate");
@@ -959,39 +900,12 @@ mod tests {
             size: None,
             mime: None,
             transfer: None,
-            blob: None,
         };
 
         assert_eq!(
             command.validate(),
             Err(RoomProtocolError::MissingTransferOffer)
         );
-    }
-
-    #[test]
-    fn file_ready_event_with_blob_round_trips() {
-        let json = r#"{
-            "type":"channel_file_ready",
-            "channel_id":"c1",
-            "blob":{"hash":"abc123","format":"blob"}
-        }"#;
-
-        let event: MachineEvent =
-            serde_json::from_str(json).expect("channel_file_ready should parse");
-
-        assert_eq!(
-            event,
-            MachineEvent::ChannelFileReady {
-                channel_id: ChannelId::new("c1").expect("valid channel id"),
-                blob: BlobRef {
-                    hash: "abc123".into(),
-                    format: BlobFormat::Blob,
-                },
-            }
-        );
-        event
-            .validate()
-            .expect("channel_file_ready should validate");
     }
 
     #[test]

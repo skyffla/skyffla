@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError,
-    Route, TransferOffer, MACHINE_PROTOCOL_VERSION,
+    ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError, Route,
+    TransferOffer, MACHINE_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,6 @@ struct ChannelState {
     size: Option<u64>,
     mime: Option<String>,
     transfer: Option<TransferOffer>,
-    blob: Option<BlobRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +54,6 @@ pub struct RoomChannel {
     pub size: Option<u64>,
     pub mime: Option<String>,
     pub transfer: Option<TransferOffer>,
-    pub blob: Option<BlobRef>,
 }
 
 impl RoomEngine {
@@ -108,7 +106,6 @@ impl RoomEngine {
             size: channel.size,
             mime: channel.mime.clone(),
             transfer: channel.transfer.clone(),
-            blob: channel.blob.clone(),
         })
     }
 
@@ -226,7 +223,6 @@ impl RoomEngine {
         size: Option<u64>,
         mime: Option<String>,
         transfer: Option<TransferOffer>,
-        blob: Option<BlobRef>,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(from)?;
         if self.channels.contains_key(&channel_id) {
@@ -245,7 +241,6 @@ impl RoomEngine {
             size,
             mime,
             transfer,
-            blob,
         };
         event.validate()?;
         self.channels.insert(
@@ -258,7 +253,6 @@ impl RoomEngine {
                 size: event_size(&event),
                 mime: event_mime(&event),
                 transfer: event_transfer(&event),
-                blob: event_blob(&event),
             },
         );
 
@@ -509,13 +503,6 @@ fn event_mime(event: &MachineEvent) -> Option<String> {
     }
 }
 
-fn event_blob(event: &MachineEvent) -> Option<BlobRef> {
-    match event {
-        MachineEvent::ChannelOpened { blob, .. } => blob.clone(),
-        _ => None,
-    }
-}
-
 fn event_transfer(event: &MachineEvent) -> Option<TransferOffer> {
     match event {
         MachineEvent::ChannelOpened { transfer, .. } => transfer.clone(),
@@ -594,7 +581,7 @@ impl From<RoomProtocolError> for RoomEngineError {
 #[cfg(test)]
 mod tests {
     use skyffla_protocol::room::{
-        BlobFormat, ChannelKind, MachineEvent, TransferDigest, TransferItemKind, TransferOffer,
+        ChannelKind, MachineEvent, TransferDigest, TransferItemKind, TransferOffer,
     };
 
     use super::*;
@@ -758,7 +745,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             )
             .expect("channel opens");
 
@@ -794,10 +780,6 @@ mod tests {
             Some(5),
             Some("text/plain".into()),
             Some(file_transfer_offer()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
         )
         .expect("file channel opens");
 
@@ -831,7 +813,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .expect("channel opens");
 
@@ -857,7 +838,6 @@ mod tests {
             Route::Member {
                 member_id: beta.member.member_id.clone(),
             },
-            None,
             None,
             None,
             None,
@@ -906,7 +886,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .expect("channel opens");
 
@@ -938,7 +917,6 @@ mod tests {
                 channel_id("c1"),
                 ChannelKind::Machine,
                 Route::All,
-                None,
                 None,
                 None,
                 None,
@@ -982,10 +960,6 @@ mod tests {
             Some(12),
             Some("text/plain".into()),
             Some(file_transfer_offer()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
         )
         .expect("channel opens");
 
@@ -1025,7 +999,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .expect("channel opens");
 
@@ -1050,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn file_channels_require_blob_metadata_and_reject_inline_data() {
+    fn file_channels_require_transfer_metadata_and_reject_inline_data() {
         let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
         let beta = room.join("beta", None).expect("beta joins");
         let host_member = room.host_member().clone();
@@ -1066,10 +1039,6 @@ mod tests {
             Some(1024),
             Some("application/pdf".into()),
             Some(file_transfer_offer()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
         )
         .expect("file channel opens");
 

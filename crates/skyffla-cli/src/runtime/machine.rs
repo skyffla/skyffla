@@ -29,12 +29,11 @@ use crate::net::framing::write_framed;
 use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
-    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_receive,
-    spawn_host_direct_directory_receive, spawn_host_direct_receive, spawn_host_peer_link,
-    spawn_host_transfer_accept_loop, spawn_join_accept_loop, spawn_join_blob_receive,
-    spawn_join_direct_directory_receive, spawn_join_direct_receive, spawn_join_host_peer_accept,
-    spawn_join_transfer_accept_loop, spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer,
-    HostInput, JoinPeerInput, PeerHandle,
+    spawn_accept_loop, spawn_host_authority_reader, spawn_host_direct_directory_receive,
+    spawn_host_direct_receive, spawn_host_peer_link, spawn_host_transfer_accept_loop,
+    spawn_join_accept_loop, spawn_join_direct_directory_receive, spawn_join_direct_receive,
+    spawn_join_host_peer_accept, spawn_join_transfer_accept_loop, spawn_link_writer,
+    spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput, PeerHandle,
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
@@ -61,8 +60,6 @@ struct ProgressGate {
 #[derive(Debug, Clone)]
 struct FileTransferTarget {
     transfer: TransferOffer,
-    blob: Option<skyffla_protocol::room::BlobRef>,
-    item_kind: TransferItemKind,
     name: String,
     size: Option<u64>,
 }
@@ -910,7 +907,6 @@ async fn handle_join_command(
             size,
             mime,
             transfer,
-            blob,
         } => {
             let local_event = MachineEvent::ChannelOpened {
                 channel_id: channel_id.clone(),
@@ -922,7 +918,6 @@ async fn handle_join_command(
                 size,
                 mime: mime.clone(),
                 transfer: transfer.clone(),
-                blob: blob.clone(),
             };
             send_peer_command(
                 authority_send,
@@ -934,7 +929,6 @@ async fn handle_join_command(
                     size,
                     mime,
                     transfer,
-                    blob,
                 },
             )
             .await?;
@@ -952,15 +946,14 @@ async fn handle_join_command(
             if let Some(PendingFileTransfer {
                 provider_ticket,
                 transfer,
-                blob,
-                item_kind,
                 name,
                 size,
+                ..
             }) = join_pending_file_transfer(state, &self_member, &channel_id)?
             {
                 let target_path = receive_target_path(download_dir, &name)?;
-                match (transfer.item_kind.clone(), transfer.integrity.clone(), blob) {
-                    (TransferItemKind::File, Some(integrity), None) => {
+                match (transfer.item_kind.clone(), transfer.integrity.clone()) {
+                    (TransferItemKind::File, Some(integrity)) => {
                         spawn_join_direct_receive(
                             transport.clone(),
                             peer_tx,
@@ -974,7 +967,7 @@ async fn handle_join_command(
                             target_path,
                         );
                     }
-                    (TransferItemKind::Folder, None, None) => {
+                    (TransferItemKind::Folder, None) => {
                         spawn_join_direct_directory_receive(
                             transport.clone(),
                             peer_tx,
@@ -982,21 +975,6 @@ async fn handle_join_command(
                                 encoded: provider_ticket,
                             },
                             channel_id,
-                            name,
-                            size,
-                            target_path,
-                        );
-                    }
-                    (_, _, Some(blob)) => {
-                        spawn_join_blob_receive(
-                            transport.clone(),
-                            peer_tx,
-                            PeerTicket {
-                                encoded: provider_ticket,
-                            },
-                            channel_id,
-                            blob,
-                            item_kind,
                             name,
                             size,
                             target_path,
@@ -1078,7 +1056,7 @@ async fn send_path_from_join(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let (display_name, size, transfer, blob) = if expanded_path.is_file() {
+    let (display_name, size, transfer) = if expanded_path.is_file() {
         let display_name = expanded_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
@@ -1112,7 +1090,6 @@ async fn send_path_from_join(
             display_name,
             prepared.size,
             file_transfer_offer(prepared.content_hash),
-            None,
         )
     } else if expanded_path.is_dir() {
         let prepared = transport
@@ -1151,7 +1128,6 @@ async fn send_path_from_join(
             prepared.display_name,
             prepared.total_size,
             folder_transfer_offer(),
-            None,
         )
     } else {
         return Err(CliError::usage(format!(
@@ -1170,7 +1146,6 @@ async fn send_path_from_join(
         size: Some(size),
         mime: mime.clone(),
         transfer: Some(transfer.clone()),
-        blob: blob.clone(),
     };
     send_peer_command(
         authority_send,
@@ -1182,7 +1157,6 @@ async fn send_path_from_join(
             size: Some(size),
             mime,
             transfer: Some(transfer),
-            blob,
         },
     )
     .await?;
@@ -1338,7 +1312,7 @@ async fn send_path_from_host(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let (size, transfer, blob, open_name) = if expanded_path.is_file() {
+    let (size, transfer, open_name) = if expanded_path.is_file() {
         let display_name = expanded_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
@@ -1366,7 +1340,6 @@ async fn send_path_from_host(
         (
             prepared.size,
             file_transfer_offer(prepared.content_hash),
-            None,
             name.or(Some(display_name)),
         )
     } else if expanded_path.is_dir() {
@@ -1401,7 +1374,6 @@ async fn send_path_from_host(
         (
             prepared.total_size,
             folder_transfer_offer(),
-            None,
             name.or(Some(prepared.display_name)),
         )
     } else {
@@ -1420,7 +1392,6 @@ async fn send_path_from_host(
             Some(size),
             mime,
             Some(transfer),
-            blob,
         )
         .map_err(room_error)?;
     deliver_routed_events(room.host_member(), routed, stdout, peers).await
@@ -1497,13 +1468,10 @@ fn host_pending_file_download(
                 channel.opener.as_str()
             ))
         })?;
-    let item_kind = transfer.item_kind.clone();
     Ok(Some((
         PeerTicket { encoded: ticket },
         FileTransferTarget {
             transfer,
-            blob: channel.blob,
-            item_kind,
             name: channel
                 .name
                 .unwrap_or_else(|| channel_id.as_str().to_string()),
@@ -1552,10 +1520,9 @@ async fn handle_host_command(
             size,
             mime,
             transfer,
-            blob,
         } => {
             let routed = room
-                .open_channel(sender, channel_id, kind, to, name, size, mime, transfer, blob)
+                .open_channel(sender, channel_id, kind, to, name, size, mime, transfer)
                 .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
@@ -1639,12 +1606,8 @@ async fn handle_host_command(
                     host_pending_file_download(room, peers, sender, &channel_id)?
                 {
                     let target_path = receive_target_path(download_dir, &file.name)?;
-                    match (
-                        file.transfer.item_kind.clone(),
-                        file.transfer.integrity.clone(),
-                        file.blob,
-                    ) {
-                        (TransferItemKind::File, Some(integrity), None) => {
+                    match (file.transfer.item_kind.clone(), file.transfer.integrity.clone()) {
+                        (TransferItemKind::File, Some(integrity)) => {
                             spawn_host_direct_receive(
                                 transport.clone(),
                                 host_tx.clone(),
@@ -1656,25 +1619,12 @@ async fn handle_host_command(
                                 target_path,
                             );
                         }
-                        (TransferItemKind::Folder, None, None) => {
+                        (TransferItemKind::Folder, None) => {
                             spawn_host_direct_directory_receive(
                                 transport.clone(),
                                 host_tx.clone(),
                                 provider,
                                 channel_id.clone(),
-                                file.name,
-                                file.size,
-                                target_path,
-                            );
-                        }
-                        (_, _, Some(blob)) => {
-                            spawn_host_blob_receive(
-                                transport.clone(),
-                                host_tx.clone(),
-                                provider,
-                                channel_id.clone(),
-                                blob,
-                                file.item_kind,
                                 file.name,
                                 file.size,
                                 target_path,

@@ -4,8 +4,7 @@ use std::path::PathBuf;
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind,
-    TransferPhase,
+    ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind, TransferPhase,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_session::SessionPeer;
@@ -439,164 +438,6 @@ pub(crate) fn spawn_outbound_peer_link(
     });
 }
 
-pub(crate) fn spawn_join_blob_receive(
-    transport: IrohTransport,
-    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
-    provider: PeerTicket,
-    channel_id: ChannelId,
-    blob: BlobRef,
-    item_kind: TransferItemKind,
-    name: String,
-    size: Option<u64>,
-    target_path: PathBuf,
-) {
-    tokio::spawn(async move {
-        let mut last_step = None;
-        match transport
-            .fetch_blob_with_progress(&provider, &blob, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
-                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                        event: MachineEvent::TransferProgress {
-                            channel_id: channel_id.clone(),
-                            item_kind: item_kind.clone(),
-                            name: name.clone(),
-                            phase: TransferPhase::Downloading,
-                            bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
-                        },
-                    });
-                }
-            })
-            .await
-        {
-            Ok(()) => match transport
-                .export_path_with_progress(&blob, &target_path, |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: item_kind.clone(),
-                                name: name.clone(),
-                                phase: TransferPhase::Exporting,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
-                })
-                .await
-            {
-                Ok(size) => {
-                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                        event: MachineEvent::ChannelPathReceived {
-                            channel_id,
-                            path: target_path.display().to_string(),
-                            size,
-                        },
-                    });
-                }
-                Err(error) => {
-                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                        event: MachineEvent::Error {
-                            code: "blob_export_failed".into(),
-                            message: error.to_string(),
-                            channel_id: Some(channel_id),
-                        },
-                    });
-                }
-            },
-            Err(error) => {
-                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                    event: MachineEvent::Error {
-                        code: "blob_fetch_failed".into(),
-                        message: error.to_string(),
-                        channel_id: Some(channel_id),
-                    },
-                });
-            }
-        }
-    });
-}
-
-pub(crate) fn spawn_host_blob_receive(
-    transport: IrohTransport,
-    host_tx: mpsc::UnboundedSender<HostInput>,
-    provider: PeerTicket,
-    channel_id: ChannelId,
-    blob: BlobRef,
-    item_kind: TransferItemKind,
-    name: String,
-    size: Option<u64>,
-    target_path: PathBuf,
-) {
-    tokio::spawn(async move {
-        let mut last_step = None;
-        match transport
-            .fetch_blob_with_progress(&provider, &blob, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: MachineEvent::TransferProgress {
-                            channel_id: channel_id.clone(),
-                            item_kind: item_kind.clone(),
-                            name: name.clone(),
-                            phase: TransferPhase::Downloading,
-                            bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
-                        },
-                    });
-                }
-            })
-            .await
-        {
-            Ok(()) => match transport
-                .export_path_with_progress(&blob, &target_path, |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = host_tx.send(HostInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: item_kind.clone(),
-                                name: name.clone(),
-                                phase: TransferPhase::Exporting,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
-                })
-                .await
-            {
-                Ok(size) => {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: MachineEvent::ChannelPathReceived {
-                            channel_id,
-                            path: target_path.display().to_string(),
-                            size,
-                        },
-                    });
-                }
-                Err(error) => {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: MachineEvent::Error {
-                            code: "blob_export_failed".into(),
-                            message: error.to_string(),
-                            channel_id: Some(channel_id),
-                        },
-                    });
-                }
-            },
-            Err(error) => {
-                let _ = host_tx.send(HostInput::LocalEvent {
-                    event: MachineEvent::Error {
-                        code: "blob_fetch_failed".into(),
-                        message: error.to_string(),
-                        channel_id: Some(channel_id),
-                    },
-                });
-            }
-        }
-    });
-}
-
 pub(crate) fn spawn_join_direct_receive(
     transport: IrohTransport,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
@@ -914,8 +755,6 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberJoined { .. }
         | MachineEvent::MemberLeft { .. }
         | MachineEvent::RoomClosed { .. }
-        | MachineEvent::ChannelFileReady { .. }
-        | MachineEvent::ChannelFileExported { .. }
         | MachineEvent::ChannelPathReceived { .. }
         | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,
