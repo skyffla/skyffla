@@ -47,9 +47,11 @@ Implemented so far:
 - direct peer chat over peer links
 - direct `machine` channel traffic over peer links
 - in-band machine errors instead of process-level failures
-- blob-backed file and folder channels in `machine` mode via `iroh-blobs`
+- native file and folder transfer channels in `machine` mode over the dedicated
+  Skyffla transfer ALPN
 - broadcast file acceptance / rejection now preserves per-recipient outcomes
-- in-band `machine` stdin commands for file send / accept / reject / export without raw JSON
+- in-band `machine` stdin commands for file send / accept / reject without raw
+  JSON
 - rendezvous uses minimal exact room-id host lookup via `/v1/rooms/{room_id}`
 - default TUI now fronts the room engine by spawning the internal `machine` backend and rendering room events / commands as a human UI
 - standalone wrapper-facing `machine` protocol docs now live in `docs/machine-protocol.md`
@@ -142,9 +144,10 @@ V1 channel kinds:
 Important distinction:
 
 - `machine` channels are a Skyffla-native data path
-- `file` payloads should reuse `iroh-blobs` for the data plane
-- folders should be represented as blob collections rather than custom streamed archives
-- `clipboard` can stay Skyffla-native unless it later benefits from the same blob path
+- `file` payloads use Skyffla's native transfer protocol over iroh / QUIC
+- folders use manifest-driven native transfer rather than custom archives
+- `clipboard` can stay Skyffla-native unless it later benefits from a distinct
+  optimized payload path
 
 The key rule is:
 
@@ -243,13 +246,12 @@ The pragmatic split is:
 
 - Skyffla owns the room/control plane
 - Skyffla-native peer links carry chat and `machine` channel traffic
-- `iroh-blobs` should carry file and folder bytes
+- the dedicated Skyffla transfer ALPN should carry file and folder bytes
 
-This is important because Skyffla already has an older 1:1 custom file/folder
-path, and that is not the right foundation for mesh. The room protocol should
-authorize and coordinate file/folder exchange, but the actual content transfer
-should delegate to `iroh-blobs` rather than reinventing verified,
-content-addressed transfer again.
+The room protocol should authorize and coordinate file/folder exchange, while
+the actual content transfer moves directly over the native transfer path with
+bounded buffering, per-file verification, and whole-transfer verification for
+folders.
 
 This means:
 
@@ -261,15 +263,16 @@ This means:
 
 For `machine` channels, that means Skyffla peer links.
 
-For `file` or folder channels, that means a blob transfer keyed by blob or
-collection metadata, not a custom raw byte stream invented in the room runtime.
+For `file` or folder channels, that means the native transfer protocol on a
+dedicated transfer connection, not inline `channel_data`.
 
 Current implementation status:
 
-- blob-backed file and folder / collection channels are implemented in `machine` mode
+- native file and folder channels are implemented in `machine` mode
 - multi-recipient file accept / reject behavior now has direct coverage
 - raw inline `channel_data` is intentionally invalid for file channels
-- `machine` mode accepts structured in-band commands for file send/export and channel accept/reject/close, while keeping JSON as the canonical protocol format
+- `machine` mode accepts structured in-band commands for file send and channel
+  accept/reject/close, while keeping JSON as the canonical protocol format
 
 For `route = all`, the sender fans out to one direct peer channel per accepted recipient.
 
@@ -533,7 +536,7 @@ That keeps a clean split:
 For files and folders, there should also be a clean split:
 
 - Skyffla `send`/`pipe` UX and room targeting stay in Skyffla
-- the file/folder data plane should use `iroh-blobs`
+- the file/folder data plane should use the native Skyffla transfer protocol
 
 This is cleaner than overloading one top-level mode for both jobs.
 
@@ -805,7 +808,8 @@ Goals:
 Output:
 
 - peer-to-peer `machine` payload path under room control
-- room-coordinated channel lifecycle that can later back blob transfers cleanly
+- room-coordinated channel lifecycle that also backs native file and folder
+  transfer
 
 Tests:
 
@@ -820,41 +824,45 @@ Non-goals for this phase:
 - do not build a new custom mesh file/folder byte-stream implementation
 - do not port the old 1:1 file/folder transfer path into rooms
 
-### Phase 5: Blob-backed files and folders
+### Phase 5: Native files and folders
 
-Status: in progress
+Status: done for the core redesign
 
 Goals:
 
-- integrate `iroh-blobs` for file and folder payload transfer
-- keep Skyffla room UX/control semantics around offer, accept, reject, and targeting
-- represent file/folder payloads as room-authorized channels that resolve to blob metadata
-- support folders via blob collections rather than custom tar-stream logic in the mesh runtime
+- keep Skyffla room UX/control semantics around offer, accept, reject, and
+  targeting
+- represent file/folder payloads as room-authorized channels that resolve to
+  native transfer metadata
+- stream directly between peers without blob-store staging
 
 Output:
 
-- Skyffla-controlled file/folder UX with `iroh-blobs` as the data plane
-- clear separation between room authorization and blob transfer
+- Skyffla-controlled file/folder UX with the native transfer protocol as the
+  data plane
+- clear separation between room authorization and native payload transfer
 
 Implemented so far:
 
-- single-file and folder / collection blob-backed channels in `machine` mode
-- local file import, remote fetch, and local export on top of the shared transport endpoint
-- local directory import, remote fetch, and local directory export via blob collections
+- native single-file transfer in `machine` mode
+- native folder transfer with manifest exchange and bounded parallel receive
+- provisional file offers so receivers can accept before sender preparation
+  completes
 - file-channel validation that rejects inline `channel_data`
 - per-recipient reject / accept coverage for broadcast file channels
 
 Remaining work:
 
 - file UX outside `machine`
+- measurement and optional optimization work such as striping or resume if
+  justified later
 
 Tests:
 
-- offer file to one member, accept, transfer by blob metadata
+- offer file to one member, accept, transfer natively
 - offer file to all, per-recipient acceptance and independent success/failure
-- offer folder/collection and verify collection metadata round-trips
+- offer folder and verify manifest and whole-transfer digest behavior
 - rejecting one recipient does not affect the others
-- resuming or reusing already-present content works when supported by `iroh-blobs`
 
 ### Phase 6: TUI adapter on top of room engine
 
@@ -883,7 +891,8 @@ Goals:
 
 - restore Unix-style raw stdin payload support as a separate surface
 - map raw stdin to a room channel
-- keep this focused on `machine`/raw payloads, not as a replacement for blob-backed file transfer
+- keep this focused on `machine`/raw payloads, not as a replacement for native
+  file transfer
 
 Output:
 

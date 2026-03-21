@@ -65,6 +65,14 @@ struct FileTransferTarget {
     size: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedSendPath {
+    expanded_path: PathBuf,
+    item_kind: TransferItemKind,
+    display_name: String,
+    provisional_size: Option<u64>,
+}
+
 impl ProgressGate {
     fn should_emit(&mut self, progress: &LocalTransferProgress) -> bool {
         match progress.bytes_total {
@@ -695,7 +703,10 @@ async fn handle_host_input(
                     )?;
                     deliver_routed_events(room.host_member(), routed, stdout, peers).await?;
                 }
-                Err(RoomEngineError::UnknownChannel { .. } | RoomEngineError::NotChannelOpener { .. }) => {}
+                Err(
+                    RoomEngineError::UnknownChannel { .. }
+                    | RoomEngineError::NotChannelOpener { .. },
+                ) => {}
                 Err(error) => return Err(room_error(error)),
             }
             Ok(LoopControl::Continue)
@@ -712,7 +723,10 @@ async fn handle_host_input(
                 Ok(routed) => {
                     deliver_routed_events(room.host_member(), routed, stdout, peers).await?;
                 }
-                Err(RoomEngineError::UnknownChannel { .. } | RoomEngineError::NotChannelOpener { .. }) => {}
+                Err(
+                    RoomEngineError::UnknownChannel { .. }
+                    | RoomEngineError::NotChannelOpener { .. },
+                ) => {}
                 Err(error) => return Err(room_error(error)),
             }
             emit_event(stdout, &local_error("transfer_prepare_failed", &message)).await?;
@@ -1408,38 +1422,9 @@ async fn send_path_from_join(
     name: Option<String>,
     mime: Option<String>,
 ) -> Result<(), CliError> {
-    let expanded_path = expand_user_path(&path);
-    let (item_kind, display_name, provisional_size) = if expanded_path.is_file() {
-        let display_name = expanded_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| expanded_path.display().to_string());
-        let file_size = std::fs::metadata(&expanded_path)
-            .map_err(|error| {
-                CliError::local_io(format!(
-                    "failed to read metadata for {}: {error}",
-                    expanded_path.display()
-                ))
-            })?
-            .len();
-        (TransferItemKind::File, display_name, Some(file_size))
-    } else if expanded_path.is_dir() {
-        let display_name = expanded_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| expanded_path.display().to_string());
-        (TransferItemKind::Folder, display_name, None)
-    } else {
-        return Err(CliError::usage(format!(
-            "path {} is not a file or directory",
-            expanded_path.display()
-        )));
-    };
-    let name = name.or(Some(display_name.clone()));
-    let provisional_transfer = TransferOffer {
-        item_kind: item_kind.clone(),
-        integrity: None,
-    };
+    let resolved = resolve_send_path(&path)?;
+    let name = name.or(Some(resolved.display_name.clone()));
+    let provisional_transfer = provisional_transfer_offer(resolved.item_kind.clone());
     let local_event = MachineEvent::ChannelOpened {
         channel_id: channel_id.clone(),
         kind: ChannelKind::File,
@@ -1447,7 +1432,7 @@ async fn send_path_from_join(
         from_name: state.local_name.clone(),
         to: to.clone(),
         name: name.clone(),
-        size: provisional_size,
+        size: resolved.provisional_size,
         mime: mime.clone(),
         transfer: Some(provisional_transfer.clone()),
     };
@@ -1458,7 +1443,7 @@ async fn send_path_from_join(
             kind: ChannelKind::File,
             to,
             name,
-            size: provisional_size,
+            size: resolved.provisional_size,
             mime,
             transfer: Some(provisional_transfer),
         },
@@ -1469,9 +1454,9 @@ async fn send_path_from_join(
         transport.clone(),
         peer_tx,
         channel_id,
-        expanded_path,
-        item_kind,
-        display_name,
+        resolved.expanded_path,
+        resolved.item_kind,
+        resolved.display_name,
     );
     Ok(())
 }
@@ -1624,38 +1609,9 @@ async fn send_path_from_host(
     name: Option<String>,
     mime: Option<String>,
 ) -> Result<(), CliError> {
-    let expanded_path = expand_user_path(&path);
-    let (item_kind, display_name, provisional_size) = if expanded_path.is_file() {
-        let display_name = expanded_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| expanded_path.display().to_string());
-        let file_size = std::fs::metadata(&expanded_path)
-            .map_err(|error| {
-                CliError::local_io(format!(
-                    "failed to read metadata for {}: {error}",
-                    expanded_path.display()
-                ))
-            })?
-            .len();
-        (TransferItemKind::File, display_name, Some(file_size))
-    } else if expanded_path.is_dir() {
-        let display_name = expanded_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| expanded_path.display().to_string());
-        (TransferItemKind::Folder, display_name, None)
-    } else {
-        return Err(CliError::usage(format!(
-            "path {} is not a file or directory",
-            expanded_path.display()
-        )));
-    };
-    let open_name = name.or(Some(display_name.clone()));
-    let provisional_transfer = TransferOffer {
-        item_kind: item_kind.clone(),
-        integrity: None,
-    };
+    let resolved = resolve_send_path(&path)?;
+    let open_name = name.or(Some(resolved.display_name.clone()));
+    let provisional_transfer = provisional_transfer_offer(resolved.item_kind.clone());
     let routed = room
         .open_channel(
             sender,
@@ -1663,7 +1619,7 @@ async fn send_path_from_host(
             ChannelKind::File,
             to,
             open_name,
-            provisional_size,
+            resolved.provisional_size,
             mime,
             Some(provisional_transfer),
         )
@@ -1673,9 +1629,9 @@ async fn send_path_from_host(
         transport.clone(),
         host_tx.clone(),
         channel_id,
-        expanded_path,
-        item_kind,
-        display_name,
+        resolved.expanded_path,
+        resolved.item_kind,
+        resolved.display_name,
     );
     Ok(())
 }
@@ -1704,6 +1660,49 @@ fn file_transfer_offer(content_hash: String) -> TransferOffer {
             algorithm: "blake3".into(),
             value: content_hash,
         }),
+    }
+}
+
+fn provisional_transfer_offer(item_kind: TransferItemKind) -> TransferOffer {
+    TransferOffer {
+        item_kind,
+        integrity: None,
+    }
+}
+
+fn resolve_send_path(path: &str) -> Result<ResolvedSendPath, CliError> {
+    let expanded_path = expand_user_path(path);
+    let display_name = expanded_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| expanded_path.display().to_string());
+    if expanded_path.is_file() {
+        let file_size = std::fs::metadata(&expanded_path)
+            .map_err(|error| {
+                CliError::local_io(format!(
+                    "failed to read metadata for {}: {error}",
+                    expanded_path.display()
+                ))
+            })?
+            .len();
+        Ok(ResolvedSendPath {
+            expanded_path,
+            item_kind: TransferItemKind::File,
+            display_name,
+            provisional_size: Some(file_size),
+        })
+    } else if expanded_path.is_dir() {
+        Ok(ResolvedSendPath {
+            expanded_path,
+            item_kind: TransferItemKind::Folder,
+            display_name,
+            provisional_size: None,
+        })
+    } else {
+        Err(CliError::usage(format!(
+            "path {} is not a file or directory",
+            expanded_path.display()
+        )))
     }
 }
 
@@ -1852,7 +1851,10 @@ fn maybe_start_host_pending_receive(
     else {
         return Ok(());
     };
-    match (file.transfer.item_kind.clone(), file.transfer.integrity.clone()) {
+    match (
+        file.transfer.item_kind.clone(),
+        file.transfer.integrity.clone(),
+    ) {
         (TransferItemKind::File, Some(integrity)) => {
             let target_path = receive_target_path(download_dir, &file.name)?;
             host_state.pending_accepted_files.remove(channel_id);
