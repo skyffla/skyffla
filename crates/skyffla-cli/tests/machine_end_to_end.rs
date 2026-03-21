@@ -1001,6 +1001,148 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual folder performance baseline; run with --ignored --nocapture and optionally SKYFFLA_PERF_TREE_MIB=2048 SKYFFLA_PERF_TREE_FILES=128"]
+async fn machine_native_folder_transfer_reports_baseline() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        println!(
+            "skipping folder perf baseline test: local rendezvous/transport test harness unavailable"
+        );
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-machine-perf-tree-host");
+    let beta_home = fresh_test_dir("skyffla-cli-machine-perf-tree-beta");
+    for home in [&host_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let total_mib = perf_tree_size_mib();
+    let file_count = perf_tree_file_count();
+    let source_dir = ensure_perf_source_tree(total_mib, file_count)?;
+    let source_name = source_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("perf source tree should have a valid UTF-8 directory name")?
+        .to_string();
+    let (source_size, actual_file_count) = directory_size_and_file_count(&source_dir)?;
+    let saved_dir = beta_home.join(&source_name);
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
+
+    host.expect_stderr_contains("\"member_name\":\"beta\"")
+        .await?;
+    beta.expect_stderr_contains("\"member_name\":\"host\"")
+        .await?;
+
+    let command = serde_json::json!({
+        "type": "send_path",
+        "channel_id": "perftree1",
+        "to": { "type": "member", "member_id": "m2" },
+        "path": source_dir.display().to_string(),
+    });
+
+    let send_started_at = Instant::now();
+    host.send(&command.to_string()).await?;
+
+    host.expect_event_with_timeout("sender folder prepare progress", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+            && event.get("phase") == Some(&Value::String("preparing".into()))
+            && event.get("item_kind") == Some(&Value::String("folder".into()))
+    })
+    .await?;
+    beta.expect_event_with_timeout("folder opened from host", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_opened".into()))
+            && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+            && event.get("name") == Some(&Value::String(source_name.clone()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
+            && event.pointer("/transfer/integrity") == Some(&Value::Null)
+    })
+    .await?;
+
+    beta.send("/channel accept perftree1").await?;
+
+    beta.expect_event_with_timeout("folder transfer ready", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
+            && event.pointer("/transfer/integrity/algorithm")
+                == Some(&Value::String("blake3".into()))
+    })
+    .await?;
+
+    beta.expect_event_with_timeout("folder download progress", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
+            && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+            && event.get("phase") == Some(&Value::String("downloading".into()))
+            && event.get("item_kind") == Some(&Value::String("folder".into()))
+    })
+    .await?;
+
+    beta.expect_event_with_timeout("folder received", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_path_received".into()))
+            && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+            && event.get("path") == Some(&Value::String(saved_dir.display().to_string()))
+    })
+    .await?;
+
+    let ready_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+                && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+        })
+        .await
+        .context("folder ready event timestamp missing")?;
+    let first_download_progress_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("transfer_progress".into()))
+                && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+                && event.get("phase") == Some(&Value::String("downloading".into()))
+        })
+        .await
+        .context("folder download progress timestamp missing")?;
+    let received_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("channel_path_received".into()))
+                && event.get("channel_id") == Some(&Value::String("perftree1".into()))
+                && event.get("path") == Some(&Value::String(saved_dir.display().to_string()))
+        })
+        .await
+        .context("folder received event timestamp missing")?;
+
+    let (saved_size, saved_file_count) = directory_size_and_file_count(&saved_dir)?;
+    assert_eq!(saved_size, source_size);
+    assert_eq!(saved_file_count, actual_file_count);
+
+    let total_elapsed = received_at.duration_since(send_started_at);
+    let prepare_elapsed = ready_at.duration_since(send_started_at);
+    let transfer_elapsed = received_at.duration_since(first_download_progress_at);
+    let accept_to_receive_elapsed = received_at.duration_since(ready_at);
+
+    println!(
+        "skyffla folder perf baseline: source={} files={} size={}MiB prep={} transfer={} accept_to_receive={} total={} transfer_rate={} end_to_end_rate={}",
+        source_dir.display(),
+        actual_file_count,
+        bytes_to_mib(source_size),
+        format_duration_short(prepare_elapsed),
+        format_duration_short(transfer_elapsed),
+        format_duration_short(accept_to_receive_elapsed),
+        format_duration_short(total_elapsed),
+        format_mib_per_sec(source_size, transfer_elapsed),
+        format_mib_per_sec(source_size, total_elapsed),
+    );
+
+    host.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
 struct MachineProc {
     label: String,
     child: Child,
@@ -1338,6 +1480,22 @@ fn perf_file_size_mib() -> u64 {
         .unwrap_or(512)
 }
 
+fn perf_tree_size_mib() -> u64 {
+    std::env::var("SKYFFLA_PERF_TREE_MIB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(512)
+}
+
+fn perf_tree_file_count() -> usize {
+    std::env::var("SKYFFLA_PERF_TREE_FILES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(128)
+}
+
 fn perf_timeout() -> Duration {
     std::env::var("SKYFFLA_PERF_TIMEOUT_SECS")
         .ok()
@@ -1378,6 +1536,93 @@ fn ensure_perf_source_file(size_mib: u64) -> Result<PathBuf> {
         .flush()
         .with_context(|| format!("failed flushing perf source file {}", path.display()))?;
     Ok(path)
+}
+
+fn ensure_perf_source_tree(total_mib: u64, file_count: usize) -> Result<PathBuf> {
+    let cache_root = std::env::temp_dir().join("skyffla-transfer-perf");
+    std::fs::create_dir_all(&cache_root)
+        .with_context(|| format!("failed to create {}", cache_root.display()))?;
+    let root = cache_root.join(format!("perf-tree-{total_mib}m-{file_count}f"));
+    let expected_len = total_mib * 1024 * 1024;
+    if let Ok((actual_len, actual_files)) = directory_size_and_file_count(&root) {
+        if actual_len == expected_len && actual_files == file_count {
+            return Ok(root);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create perf source tree {}", root.display()))?;
+    let mut state = 0xD1B5_4A32_C19F_8E77u64;
+    let mut remaining = expected_len;
+    for index in 0..file_count {
+        let files_left = (file_count - index) as u64;
+        let target_len = if files_left == 1 {
+            remaining
+        } else {
+            remaining / files_left
+        };
+        let dir = root
+            .join(format!("branch-{:02}", index % 8))
+            .join(format!("set-{:02}", (index / 8) % 8));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+        let path = dir.join(format!("part-{index:04}.bin"));
+        write_pseudorandom_file(&path, target_len, &mut state)?;
+        remaining = remaining.saturating_sub(target_len);
+    }
+    Ok(root)
+}
+
+fn write_pseudorandom_file(path: &Path, len: u64, state: &mut u64) -> Result<()> {
+    let file = File::create(path)
+        .with_context(|| format!("failed to create perf file {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(buffer.len() as u64) as usize;
+        fill_pseudorandom_bytes(&mut buffer[..chunk_len], state);
+        writer
+            .write_all(&buffer[..chunk_len])
+            .with_context(|| format!("failed writing perf file {}", path.display()))?;
+        remaining -= chunk_len as u64;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("failed flushing perf file {}", path.display()))?;
+    Ok(())
+}
+
+fn directory_size_and_file_count(root: &Path) -> Result<(u64, usize)> {
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
+    let mut total_size = 0_u64;
+    let mut total_files = 0_usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current)
+            .with_context(|| format!("failed to read {}", current.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to iterate {}", current.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to stat {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                total_files += 1;
+                total_size += entry
+                    .metadata()
+                    .with_context(|| format!("failed to read metadata for {}", path.display()))?
+                    .len();
+            }
+        }
+    }
+    Ok((total_size, total_files))
 }
 
 fn fill_pseudorandom_bytes(buf: &mut [u8], state: &mut u64) {

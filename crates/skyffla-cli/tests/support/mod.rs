@@ -51,6 +51,7 @@ pub struct LocalDiscoveryTestGuard {
 pub struct TestServer {
     pub url: String,
     task: tokio::task::JoinHandle<()>,
+    _guard: LocalDiscoveryTestGuard,
 }
 
 pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
@@ -112,6 +113,7 @@ fn local_discovery_process_guard() -> &'static Mutex<()> {
 
 impl TestServer {
     pub async fn spawn() -> Result<Option<Self>> {
+        let guard = acquire_local_discovery_test_guard()?;
         let listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(listener) => listener,
             Err(error) if is_socket_permission_error(&error) => return Ok(None),
@@ -139,7 +141,11 @@ impl TestServer {
         });
         let url = format!("http://{addr}");
         wait_for_server_ready(&url).await?;
-        Ok(Some(Self { url, task }))
+        Ok(Some(Self {
+            url,
+            task,
+            _guard: guard,
+        }))
     }
 
     pub fn abort(self) {

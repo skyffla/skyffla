@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `2.1`
+- `2.2`
 
 The version is emitted in the initial `room_welcome` event.
 
