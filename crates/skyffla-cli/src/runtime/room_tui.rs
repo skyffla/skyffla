@@ -128,6 +128,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
+    let include_transfer_progress_lines = scripted_progress_lines_enabled();
 
     loop {
         tokio::select! {
@@ -166,7 +167,11 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                 match maybe_event {
                     Some(event) => {
                         let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
-                        let (lines, follow_up) = summarize_room_event(&mut state, event);
+                        let (lines, follow_up) = summarize_room_event(
+                            &mut state,
+                            event,
+                            include_transfer_progress_lines,
+                        );
                         for line in lines {
                             emit_scripted_line(&line).await?;
                         }
@@ -1442,12 +1447,62 @@ fn scripted_mode() -> bool {
     std::env::var_os("SKYFFLA_TUI_SCRIPTED").is_some()
 }
 
+fn scripted_progress_lines_enabled() -> bool {
+    std::env::var_os("SKYFFLA_TUI_SCRIPTED_QUIET_PROGRESS").is_none()
+}
+
 fn summarize_room_event(
     state: &mut RoomTuiState,
     event: MachineEvent,
+    include_transfer_progress_lines: bool,
 ) -> (Vec<String>, Option<MachineCommand>) {
-    let (lines, follow_up) = format_room_event_lines(state, event, true);
-    (stringify_room_lines(lines), follow_up)
+    let mut summary_lines = summarize_scripted_transfer_event(state, &event);
+    let (mut lines, follow_up) =
+        format_room_event_lines(state, event, include_transfer_progress_lines);
+    summary_lines.append(&mut lines);
+    (stringify_room_lines(summary_lines), follow_up)
+}
+
+fn summarize_scripted_transfer_event(
+    state: &mut RoomTuiState,
+    event: &MachineEvent,
+) -> Vec<RoomLine> {
+    match event {
+        MachineEvent::TransferProgress {
+            channel_id,
+            phase,
+            item_kind,
+            name,
+            bytes_complete,
+            bytes_total,
+            ..
+        } => {
+            let elapsed = {
+                let metrics =
+                    state.record_transfer_progress(channel_id, phase, *bytes_complete, *bytes_total);
+                metrics.started_at.elapsed()
+            };
+            if matches!(phase, TransferPhase::Downloading)
+                && bytes_total.is_some_and(|total| *bytes_complete >= total)
+                && state
+                    .file_channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.is_outgoing)
+            {
+                let summary = transfer_completion_summary(
+                    "sent",
+                    item_kind.clone(),
+                    name,
+                    *bytes_complete,
+                    elapsed,
+                );
+                state.clear_transfer_tracking(channel_id);
+                return vec![RoomLine::System(summary)];
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn room_help_lines() -> &'static [&'static str] {
@@ -1992,6 +2047,51 @@ mod tests {
                 Duration::from_secs(32),
             ),
             "sent file transfer-test-2g-random.bin (2048.0MiB in 32s at 64.0MiB/s)"
+        );
+    }
+
+    #[test]
+    fn scripted_tui_emits_sender_completion_without_progress_lines() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let channel_id = ChannelId::new("f1").unwrap();
+        state.file_channels.insert(
+            channel_id.clone(),
+            FileChannelUiState {
+                item_kind: TransferItemKind::File,
+                name: "transfer-test-2g-random.bin".into(),
+                size: Some(2_147_483_648),
+                is_outgoing: true,
+                transfer_ready: true,
+                accepted: true,
+                accepted_by: Some("beta".into()),
+            },
+        );
+        state.transfer_metrics.insert(
+            channel_id.clone(),
+            TransferUiMetrics {
+                phase: TransferPhase::Downloading,
+                started_at: Instant::now() - Duration::from_secs(32),
+                bytes_complete: 2_080_374_784,
+                bytes_total: Some(2_147_483_648),
+            },
+        );
+
+        let (lines, _) = summarize_room_event(
+            &mut state,
+            MachineEvent::TransferProgress {
+                channel_id,
+                item_kind: TransferItemKind::File,
+                phase: TransferPhase::Downloading,
+                name: "transfer-test-2g-random.bin".into(),
+                bytes_complete: 2_147_483_648,
+                bytes_total: Some(2_147_483_648),
+            },
+            false,
+        );
+
+        assert_eq!(
+            lines,
+            vec!["sent file transfer-test-2g-random.bin (2048.0MiB in 32s at 64.0MiB/s)"]
         );
     }
 
