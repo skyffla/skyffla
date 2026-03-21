@@ -223,7 +223,7 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
     join.send_line(r#"/send m1 ~/artpack"#).await?;
     join.expect_line_contains("preparing folder artpack to send to alpha")
         .await?;
-    host.expect_line_contains("beta wants to send folder artpack (9B) - /accept or /reject")
+    host.expect_line_contains("beta wants to send folder artpack - /accept or /reject")
         .await?;
 
     host.send_line("/accept").await?;
@@ -428,7 +428,9 @@ async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
 #[ignore = "manual TUI performance baseline; run with --ignored --nocapture and optionally SKYFFLA_PERF_FILE_MIB=2048"]
 async fn room_tui_native_file_transfer_reports_baseline() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
-        println!("skipping TUI perf baseline test: local rendezvous/transport test harness unavailable");
+        println!(
+            "skipping TUI perf baseline test: local rendezvous/transport test harness unavailable"
+        );
         return Ok(());
     };
 
@@ -451,12 +453,10 @@ async fn room_tui_native_file_transfer_reports_baseline() -> Result<()> {
 
     let room = unique_room_name();
     let mut host =
-        TuiProc::spawn_with_options("host", &room, &server.url, "alpha", &host_home, true)
-            .await?;
+        TuiProc::spawn_with_options("host", &room, &server.url, "alpha", &host_home, true).await?;
     wait_for_room_ready(&server.url, &room).await?;
     let mut join =
-        TuiProc::spawn_with_options("join", &room, &server.url, "beta", &join_home, true)
-            .await?;
+        TuiProc::spawn_with_options("join", &room, &server.url, "beta", &join_home, true).await?;
 
     host.expect_line_contains("member joined: beta").await?;
     join.expect_line_contains("joined room").await?;
@@ -465,7 +465,8 @@ async fn room_tui_native_file_transfer_reports_baseline() -> Result<()> {
         .await?;
 
     let send_started_at = Instant::now();
-    host.send_line(&format!("/send m2 {}", source_path.display())).await?;
+    host.send_line(&format!("/send m2 {}", source_path.display()))
+        .await?;
     host.expect_line_contains_with_timeout(
         &format!("preparing file {} to send to beta", source_name),
         perf_timeout(),
@@ -492,10 +493,7 @@ async fn room_tui_native_file_transfer_reports_baseline() -> Result<()> {
         .expect_line_contains_with_timeout(&format!("sent file {}", source_name), perf_timeout())
         .await?;
     let receiver_summary = join
-        .expect_line_contains_with_timeout(
-            &format!("saved to {}", source_name),
-            perf_timeout(),
-        )
+        .expect_line_contains_with_timeout(&format!("saved to {}", source_name), perf_timeout())
         .await?;
     let received_at = Instant::now();
 

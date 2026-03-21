@@ -11,7 +11,7 @@ pub use framing::{
 };
 
 pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
-pub const FILE_TRANSFER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(4, 0);
+pub const FILE_TRANSFER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(5, 0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolVersion {

@@ -291,12 +291,12 @@ impl RoomEngine {
         transfer: TransferOffer,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(member_id)?;
-        let channel = self
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| RoomEngineError::UnknownChannel {
-                channel_id: channel_id.clone(),
-            })?;
+        let channel =
+            self.channels
+                .get_mut(channel_id)
+                .ok_or_else(|| RoomEngineError::UnknownChannel {
+                    channel_id: channel_id.clone(),
+                })?;
         if channel.opener != *member_id {
             return Err(RoomEngineError::NotChannelOpener {
                 member_id: member_id.clone(),
@@ -310,10 +310,21 @@ impl RoomEngine {
             });
         }
 
-        let event = MachineEvent::ChannelTransferReady {
-            channel_id: channel_id.clone(),
-            size,
-            transfer,
+        let event = match transfer.item_kind {
+            skyffla_protocol::room::TransferItemKind::File => {
+                MachineEvent::ChannelTransferFinalized {
+                    channel_id: channel_id.clone(),
+                    size,
+                    transfer,
+                }
+            }
+            skyffla_protocol::room::TransferItemKind::Folder => {
+                MachineEvent::ChannelTransferReady {
+                    channel_id: channel_id.clone(),
+                    size,
+                    transfer,
+                }
+            }
         };
         event.validate()?;
         channel.size = event_size(&event);
@@ -540,9 +551,9 @@ fn event_name(event: &MachineEvent) -> Option<String> {
 
 fn event_size(event: &MachineEvent) -> Option<u64> {
     match event {
-        MachineEvent::ChannelOpened { size, .. } | MachineEvent::ChannelTransferReady { size, .. } => {
-            *size
-        }
+        MachineEvent::ChannelOpened { size, .. }
+        | MachineEvent::ChannelTransferReady { size, .. }
+        | MachineEvent::ChannelTransferFinalized { size, .. } => *size,
         _ => None,
     }
 }
@@ -557,7 +568,8 @@ fn event_mime(event: &MachineEvent) -> Option<String> {
 fn event_transfer(event: &MachineEvent) -> Option<TransferOffer> {
     match event {
         MachineEvent::ChannelOpened { transfer, .. } => transfer.clone(),
-        MachineEvent::ChannelTransferReady { transfer, .. } => Some(transfer.clone()),
+        MachineEvent::ChannelTransferReady { transfer, .. }
+        | MachineEvent::ChannelTransferFinalized { transfer, .. } => Some(transfer.clone()),
         _ => None,
     }
 }
@@ -916,7 +928,7 @@ mod tests {
         assert_eq!(routed[0].recipient, beta.member.member_id);
         assert!(matches!(
             routed[0].event,
-            MachineEvent::ChannelTransferReady { .. }
+            MachineEvent::ChannelTransferFinalized { .. }
         ));
         assert_eq!(
             room.channel(&channel_id("file1"))

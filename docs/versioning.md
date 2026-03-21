@@ -44,10 +44,12 @@ Compatibility is checked during the peer handshake. Peers must share the same wi
 File-transfer compatibility is negotiated separately inside the hello payload
 via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
 major version while refusing `send_path` when the advertised file-transfer
-major version is missing or incompatible. The current `4.x` file-transfer
+major version is missing or incompatible. The current `5.x` file-transfer
 major covers the native streamed path with explicit receiver credit messages,
-windowed sending, and manifest-first directory transfer with per-entry fetches;
-`3.x` peers should be treated as incompatible for `send_path`.
+manifest-first directory transfer with per-entry fetches, and single-file
+overlap where receivers may download before the sender publishes the final
+whole-file digest. `4.x` peers should be treated as incompatible for
+`send_path`.
 
 ### Machine protocol
 
@@ -69,8 +71,10 @@ Wrappers should fail on machine major mismatch and tolerate additive minor chang
 The current machine major reflects the file-channel contract change from
 blob-required metadata to explicit transfer metadata. Wrappers speaking the
 older `1.x` file-channel shape should be treated as incompatible with `2.x`.
-The current `2.1` minor adds provisional file-channel opens followed by a
-later `channel_transfer_ready` event once transfer integrity metadata is ready.
+The current `2.2` minor keeps provisional transfer opens and adds a distinct
+`channel_transfer_finalized` event for single-file transfers, while
+`channel_transfer_ready` continues to carry prepared transfer metadata for
+folder transfers.
 
 ### Rendezvous HTTP API
 

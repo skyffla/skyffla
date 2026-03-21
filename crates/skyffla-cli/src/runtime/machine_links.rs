@@ -9,7 +9,9 @@ use skyffla_protocol::room::{
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_protocol::ProtocolVersion;
 use skyffla_session::SessionPeer;
-use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
+use skyffla_transport::{
+    ConnectionStatus, IrohConnection, IrohTransport, PeerTicket, ReceivedFile,
+};
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
@@ -71,6 +73,10 @@ pub(crate) enum HostInput {
         channel_id: ChannelId,
         message: String,
     },
+    ReceivedFileReadyToFinalize {
+        channel_id: ChannelId,
+        received: ReceivedFile,
+    },
 }
 
 #[derive(Debug)]
@@ -101,6 +107,10 @@ pub(crate) enum JoinPeerInput {
     PreparedTransferFailed {
         channel_id: ChannelId,
         message: String,
+    },
+    ReceivedFileReadyToFinalize {
+        channel_id: ChannelId,
+        received: ReceivedFile,
     },
 }
 
@@ -461,24 +471,23 @@ pub(crate) fn spawn_join_direct_receive(
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    expected_hash: String,
     name: String,
-    size: Option<u64>,
+    expected_size: u64,
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
         let mut gate = ProgressEmissionGate::default();
         match transport
-            .receive_file_with_progress(
+            .receive_file_to_temp_with_progress(
                 &provider,
                 channel_id.as_str(),
-                &expected_hash,
+                Some(expected_size),
                 &target_path,
                 |progress| {
                     if !gate.should_emit(
                         &TransferPhase::Downloading,
                         progress.bytes_complete,
-                        size.or(progress.bytes_total),
+                        Some(expected_size),
                     ) {
                         return;
                     }
@@ -489,20 +498,17 @@ pub(crate) fn spawn_join_direct_receive(
                             name: name.clone(),
                             phase: TransferPhase::Downloading,
                             bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
+                            bytes_total: Some(expected_size),
                         },
                     });
                 },
             )
             .await
         {
-            Ok(size) => {
-                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                    event: MachineEvent::ChannelPathReceived {
-                        channel_id,
-                        path: target_path.display().to_string(),
-                        size,
-                    },
+            Ok(received) => {
+                let _ = peer_tx.send(JoinPeerInput::ReceivedFileReadyToFinalize {
+                    channel_id,
+                    received,
                 });
             }
             Err(error) => {
@@ -523,24 +529,23 @@ pub(crate) fn spawn_host_direct_receive(
     host_tx: mpsc::UnboundedSender<HostInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    expected_hash: String,
     name: String,
-    size: Option<u64>,
+    expected_size: u64,
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
         let mut gate = ProgressEmissionGate::default();
         match transport
-            .receive_file_with_progress(
+            .receive_file_to_temp_with_progress(
                 &provider,
                 channel_id.as_str(),
-                &expected_hash,
+                Some(expected_size),
                 &target_path,
                 |progress| {
                     if !gate.should_emit(
                         &TransferPhase::Downloading,
                         progress.bytes_complete,
-                        size.or(progress.bytes_total),
+                        Some(expected_size),
                     ) {
                         return;
                     }
@@ -551,20 +556,17 @@ pub(crate) fn spawn_host_direct_receive(
                             name: name.clone(),
                             phase: TransferPhase::Downloading,
                             bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
+                            bytes_total: Some(expected_size),
                         },
                     });
                 },
             )
             .await
         {
-            Ok(size) => {
-                let _ = host_tx.send(HostInput::LocalEvent {
-                    event: MachineEvent::ChannelPathReceived {
-                        channel_id,
-                        path: target_path.display().to_string(),
-                        size,
-                    },
+            Ok(received) => {
+                let _ = host_tx.send(HostInput::ReceivedFileReadyToFinalize {
+                    channel_id,
+                    received,
                 });
             }
             Err(error) => {
@@ -793,6 +795,7 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberLeft { .. }
         | MachineEvent::RoomClosed { .. }
         | MachineEvent::ChannelTransferReady { .. }
+        | MachineEvent::ChannelTransferFinalized { .. }
         | MachineEvent::ChannelPathReceived { .. }
         | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,

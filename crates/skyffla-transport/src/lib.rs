@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +21,8 @@ const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 const TRANSFER_WINDOW_BYTES: u64 = 1024 * 1024;
 const TRANSFER_CREDIT_GRANT_BYTES: u64 = 256 * 1024;
 const DIRECTORY_TRANSFER_CONCURRENCY: usize = 4;
+const PREP_HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const PREP_HASH_PROGRESS_GRANULARITY_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportMode {
@@ -95,10 +98,20 @@ pub struct PreparedFile {
     pub content_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedFile {
+    pub size: u64,
+    pub content_hash: String,
+    pub temp_path: PathBuf,
+    pub final_path: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 struct RegisteredFile {
     path: PathBuf,
-    prepared: PreparedFile,
+    size: u64,
+    display_name: String,
+    content_hash: Option<String>,
     progress_tx: Option<mpsc::UnboundedSender<TransferRuntimeProgress>>,
 }
 
@@ -175,7 +188,8 @@ impl TransferRequest {
 enum TransferResponse {
     ReadyFile {
         size: u64,
-        content_hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_hash: Option<String>,
     },
     ReadyDirectory {
         total_size: u64,
@@ -310,37 +324,23 @@ impl IrohTransport {
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let mut file = File::open(path)
-            .await
-            .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
-        let mut hasher = blake3::Hasher::new();
-        let mut bytes_complete = 0_u64;
-        let mut buffer = vec![0_u8; 1024 * 1024];
         on_progress(LocalTransferProgress {
             phase: TransferPhase::Preparing,
             bytes_complete: 0,
             bytes_total: Some(size),
         });
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .await
-                .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            bytes_complete = bytes_complete.saturating_add(read as u64);
+        let content_hash = hash_file_with_progress(path, size, |bytes_complete| {
             on_progress(LocalTransferProgress {
                 phase: TransferPhase::Preparing,
                 bytes_complete,
                 bytes_total: Some(size),
             });
-        }
+        })
+        .await?;
         Ok(PreparedFile {
             size,
             display_name,
-            content_hash: hasher.finalize().to_hex().to_string(),
+            content_hash,
         })
     }
 
@@ -405,17 +405,43 @@ impl IrohTransport {
         &self,
         channel_id: impl Into<String>,
         path: impl AsRef<Path>,
-        prepared: PreparedFile,
+        size: u64,
+        display_name: impl Into<String>,
+        content_hash: Option<String>,
         progress_tx: Option<mpsc::UnboundedSender<TransferRuntimeProgress>>,
     ) {
         self.inner.outgoing_transfers.lock().await.insert(
             channel_id.into(),
             RegisteredTransfer::File(RegisteredFile {
                 path: path.as_ref().to_path_buf(),
-                prepared,
+                size,
+                display_name: display_name.into(),
+                content_hash,
                 progress_tx,
             }),
         );
+    }
+
+    pub async fn update_outgoing_file_hash(
+        &self,
+        channel_id: &str,
+        content_hash: String,
+    ) -> Result<(), TransportError> {
+        let mut transfers = self.inner.outgoing_transfers.lock().await;
+        let Some(registered) = transfers.get_mut(channel_id) else {
+            return Err(TransportError::DirectFileSend(format!(
+                "unknown transfer channel {channel_id}"
+            )));
+        };
+        match registered {
+            RegisteredTransfer::File(file) => {
+                file.content_hash = Some(content_hash);
+                Ok(())
+            }
+            RegisteredTransfer::Directory(_) => Err(TransportError::DirectFileSend(format!(
+                "transfer channel {channel_id} is a directory, not a file"
+            ))),
+        }
     }
 
     pub async fn register_outgoing_directory(
@@ -451,12 +477,38 @@ impl IrohTransport {
         target: impl AsRef<Path>,
         mut on_progress: impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
+        let received = self
+            .receive_file_to_temp_with_progress(provider, channel_id, None, target, |progress| {
+                on_progress(progress);
+            })
+            .await?;
+        if received.content_hash != expected_hash {
+            let _ = tokio::fs::remove_file(&received.temp_path).await;
+            return Err(TransportError::DirectFileReceive(format!(
+                "transfer hash mismatch: expected {expected_hash}, received {}",
+                received.content_hash
+            )));
+        }
+        tokio::fs::rename(&received.temp_path, &received.final_path)
+            .await
+            .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        Ok(received.size)
+    }
+
+    pub async fn receive_file_to_temp_with_progress(
+        &self,
+        provider: &PeerTicket,
+        channel_id: &str,
+        expected_size: Option<u64>,
+        target: impl AsRef<Path>,
+        mut on_progress: impl FnMut(LocalTransferProgress),
+    ) -> Result<ReceivedFile, TransportError> {
         let (connection, mut send, mut recv) =
             request_transfer_connection(self, provider, TransferRequest::manifest(channel_id))
                 .await?;
         let size = expect_ready_file_response(
             read_transfer_response_required(&mut recv).await?,
-            expected_hash,
+            expected_size,
             channel_id,
         )?;
 
@@ -476,11 +528,10 @@ impl IrohTransport {
             bytes_complete: 0,
             bytes_total: Some(size),
         });
-        let receive_result = receive_verified_file(
+        let receive_result = receive_file_to_temp(
             &mut credit_send,
             &mut recv,
             size,
-            expected_hash,
             &temp_target,
             |bytes_complete| {
                 on_progress(LocalTransferProgress {
@@ -491,16 +542,21 @@ impl IrohTransport {
             },
         )
         .await;
-        if let Err(error) = receive_result {
-            let _ = tokio::fs::remove_file(&temp_target).await;
-            return Err(error);
-        }
+        let content_hash = match receive_result {
+            Ok(content_hash) => content_hash,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_target).await;
+                return Err(error);
+            }
+        };
         let _ = credit_send.finish();
         let _ = send.finish();
-        tokio::fs::rename(&temp_target, target)
-            .await
-            .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
-        Ok(size)
+        Ok(ReceivedFile {
+            size,
+            content_hash,
+            temp_path: temp_target,
+            final_path: target.to_path_buf(),
+        })
     }
 
     pub async fn receive_directory_with_progress(
@@ -604,8 +660,8 @@ impl IrohTransport {
                 write_transfer_message(
                     &mut send,
                     &TransferResponse::ReadyFile {
-                        size: registered.prepared.size,
-                        content_hash: registered.prepared.content_hash.clone(),
+                        size: registered.size,
+                        content_hash: registered.content_hash.clone(),
                     },
                     "transfer response",
                 )
@@ -619,10 +675,10 @@ impl IrohTransport {
                     let _ = progress_tx.send(TransferRuntimeProgress {
                         channel_id: request.channel_id.clone(),
                         item_kind: TransferItemKind::File,
-                        name: registered.prepared.display_name.clone(),
+                        name: registered.display_name.clone(),
                         phase: TransferPhase::Downloading,
                         bytes_complete: 0,
-                        bytes_total: Some(registered.prepared.size),
+                        bytes_total: Some(registered.size),
                     });
                 }
                 serve_file_with_credit(&mut send, &mut credit_recv, &mut file, |bytes_complete| {
@@ -630,10 +686,10 @@ impl IrohTransport {
                         let _ = progress_tx.send(TransferRuntimeProgress {
                             channel_id: request.channel_id.clone(),
                             item_kind: TransferItemKind::File,
-                            name: registered.prepared.display_name.clone(),
+                            name: registered.display_name.clone(),
                             phase: TransferPhase::Downloading,
                             bytes_complete,
-                            bytes_total: Some(registered.prepared.size),
+                            bytes_total: Some(registered.size),
                         });
                     }
                 })
@@ -655,7 +711,7 @@ impl IrohTransport {
                         &mut send,
                         &TransferResponse::ReadyFile {
                             size: entry.size,
-                            content_hash: entry.content_hash.clone(),
+                            content_hash: Some(entry.content_hash.clone()),
                         },
                         "transfer response",
                     )
@@ -891,15 +947,17 @@ async fn read_transfer_response_required(
 
 fn expect_ready_file_response(
     response: TransferResponse,
-    expected_hash: &str,
+    expected_size: Option<u64>,
     channel_id: &str,
 ) -> Result<u64, TransportError> {
     match response {
-        TransferResponse::ReadyFile { size, content_hash } => {
-            if content_hash != expected_hash {
-                return Err(TransportError::DirectFileReceive(format!(
-                    "transfer hash mismatch for {channel_id}: expected {expected_hash}, provider advertised {content_hash}"
-                )));
+        TransferResponse::ReadyFile { size, .. } => {
+            if let Some(expected_size) = expected_size {
+                if size != expected_size {
+                    return Err(TransportError::DirectFileReceive(format!(
+                        "transfer size mismatch for {channel_id}: expected {expected_size}, provider advertised {size}"
+                    )));
+                }
             }
             Ok(size)
         }
@@ -926,14 +984,13 @@ fn expect_ready_directory_response(
     }
 }
 
-async fn receive_verified_file(
+async fn receive_file_to_temp(
     credit_send: &mut SendStream,
     recv: &mut RecvStream,
     expected_size: u64,
-    expected_hash: &str,
     target: &Path,
     mut on_bytes_complete: impl FnMut(u64),
-) -> Result<(), TransportError> {
+) -> Result<String, TransportError> {
     let mut file = File::create(target)
         .await
         .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
@@ -984,13 +1041,7 @@ async fn receive_verified_file(
             "transfer size mismatch: expected {expected_size} bytes, received {bytes_complete}"
         )));
     }
-    let actual_hash = hasher.finalize().to_hex().to_string();
-    if actual_hash != expected_hash {
-        return Err(TransportError::DirectFileReceive(format!(
-            "transfer hash mismatch: expected {expected_hash}, received {actual_hash}"
-        )));
-    }
-    Ok(())
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 async fn receive_directory_entries(
@@ -1138,7 +1189,7 @@ async fn receive_directory_entry(
 
     let size = expect_ready_file_response(
         read_transfer_response_required(&mut recv).await?,
-        &entry.content_hash,
+        Some(entry.size),
         &entry.relative_path,
     )?;
     if size != entry.size {
@@ -1337,7 +1388,7 @@ async fn serve_directory_entry_stream(
         &mut send,
         &TransferResponse::ReadyFile {
             size: entry.size,
-            content_hash: entry.content_hash.clone(),
+            content_hash: Some(entry.content_hash.clone()),
         },
         "transfer response",
     )
@@ -1350,7 +1401,8 @@ async fn serve_directory_entry_stream(
         let delta = entry_bytes_complete.saturating_sub(last_entry_bytes);
         last_entry_bytes = entry_bytes_complete;
         if let Some(progress_tx) = &registered.progress_tx {
-            let bytes_complete = aggregate_progress.fetch_add(delta, std::sync::atomic::Ordering::Relaxed)
+            let bytes_complete = aggregate_progress
+                .fetch_add(delta, std::sync::atomic::Ordering::Relaxed)
                 .saturating_add(delta);
             let _ = progress_tx.send(TransferRuntimeProgress {
                 channel_id: request.channel_id.clone(),
@@ -1413,24 +1465,63 @@ async fn hash_file_with_progress(
     size: u64,
     mut on_progress: impl FnMut(u64),
 ) -> Result<String, TransportError> {
-    let mut file = File::open(path)
-        .await
+    let path = path.to_path_buf();
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<u64>();
+    let task = tokio::task::spawn_blocking(move || hash_file_blocking(path, progress_tx));
+    tokio::pin!(task);
+
+    let result = loop {
+        tokio::select! {
+            maybe_progress = progress_rx.recv() => {
+                match maybe_progress {
+                    Some(bytes_complete) => on_progress(bytes_complete.min(size)),
+                    None => {
+                        let result = (&mut task).await;
+                        break result;
+                    }
+                }
+            }
+            result = &mut task => break result,
+        }
+    };
+
+    while let Ok(bytes_complete) = progress_rx.try_recv() {
+        on_progress(bytes_complete.min(size));
+    }
+
+    result.map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?
+}
+
+fn hash_file_blocking(
+    path: PathBuf,
+    progress_tx: mpsc::UnboundedSender<u64>,
+) -> Result<String, TransportError> {
+    let mut file = std::fs::File::open(&path)
         .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
     let mut hasher = blake3::Hasher::new();
     let mut bytes_complete = 0_u64;
-    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut last_reported = 0_u64;
+    let mut buffer = vec![0_u8; PREP_HASH_BUFFER_BYTES];
+
     loop {
         let read = file
             .read(&mut buffer)
-            .await
             .map_err(|error| TransportError::DirectFilePrepare(error.to_string()))?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
         bytes_complete = bytes_complete.saturating_add(read as u64);
-        on_progress(bytes_complete.min(size));
+        if bytes_complete.saturating_sub(last_reported) >= PREP_HASH_PROGRESS_GRANULARITY_BYTES {
+            let _ = progress_tx.send(bytes_complete);
+            last_reported = bytes_complete;
+        }
     }
+
+    if bytes_complete != last_reported {
+        let _ = progress_tx.send(bytes_complete);
+    }
+
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -1860,8 +1951,15 @@ mod tests {
             .prepare_file_path_with_progress(&source, |_| {})
             .await
             .expect("host should prepare direct file");
-        host.register_outgoing_file("c1", &source, prepared.clone(), None)
-            .await;
+        host.register_outgoing_file(
+            "c1",
+            &source,
+            prepared.size,
+            prepared.display_name.clone(),
+            Some(prepared.content_hash.clone()),
+            None,
+        )
+        .await;
         let host_ticket = host.local_ticket().expect("host ticket should encode");
 
         let server = host.clone();

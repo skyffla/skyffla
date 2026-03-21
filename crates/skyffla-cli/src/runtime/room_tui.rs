@@ -571,7 +571,10 @@ fn local_command_feedback_lines(
         }
         MachineCommand::AcceptChannel { channel_id } => {
             let Some(file) = state.file_channels.get(channel_id) else {
-                return vec![RoomLine::System(format!("accepting {}", channel_id.as_str()))];
+                return vec![RoomLine::System(format!(
+                    "accepting {}",
+                    channel_id.as_str()
+                ))];
             };
             let label = state
                 .channel_summary(channel_id)
@@ -908,14 +911,29 @@ fn update_transfer_status_line(
             bytes_total,
             ..
         } => {
+            if matches!(phase, TransferPhase::Preparing)
+                && state
+                    .file_channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.is_outgoing && channel.accepted)
+                && state
+                    .transfer_metrics(channel_id)
+                    .is_some_and(|metrics| matches!(metrics.phase, TransferPhase::Downloading))
+            {
+                return Vec::new();
+            }
             let elapsed = {
-                let metrics =
-                    state.record_transfer_progress(channel_id, phase, *bytes_complete, *bytes_total);
+                let metrics = state.record_transfer_progress(
+                    channel_id,
+                    phase,
+                    *bytes_complete,
+                    *bytes_total,
+                );
                 metrics.started_at.elapsed()
             };
             state.set_active_progress_channel(channel_id.clone());
-            let progress =
-                format_progress_with_speed(*bytes_complete, *bytes_total, elapsed).unwrap_or_default();
+            let progress = format_progress_with_speed(*bytes_complete, *bytes_total, elapsed)
+                .unwrap_or_default();
             if matches!(phase, TransferPhase::Preparing)
                 && bytes_total.is_some_and(|total| *bytes_complete >= total)
                 && state
@@ -942,7 +960,11 @@ fn update_transfer_status_line(
                                 name
                             )
                         }),
-                    _ => format!("waiting for accept {} ({})", item_kind_label(item_kind.clone()), name),
+                    _ => format!(
+                        "waiting for accept {} ({})",
+                        item_kind_label(item_kind.clone()),
+                        name
+                    ),
                 };
                 ui.set_status(status);
                 return Vec::new();
@@ -1001,7 +1023,11 @@ fn update_transfer_status_line(
             member_name,
             ..
         } => {
-            if let Some(channel) = state.file_channels.get(channel_id).filter(|channel| channel.is_outgoing) {
+            if let Some(channel) = state
+                .file_channels
+                .get(channel_id)
+                .filter(|channel| channel.is_outgoing)
+            {
                 let accepter = state.display_member_name_with_fallback(member_name, member_id);
                 let status = if state
                     .transfer_metrics(channel_id)
@@ -1234,6 +1260,11 @@ fn format_room_event_lines(
             )
         }
         MachineEvent::ChannelTransferReady {
+            channel_id,
+            size,
+            transfer,
+        }
+        | MachineEvent::ChannelTransferFinalized {
             channel_id,
             size,
             transfer,
@@ -1478,8 +1509,12 @@ fn summarize_scripted_transfer_event(
             ..
         } => {
             let elapsed = {
-                let metrics =
-                    state.record_transfer_progress(channel_id, phase, *bytes_complete, *bytes_total);
+                let metrics = state.record_transfer_progress(
+                    channel_id,
+                    phase,
+                    *bytes_complete,
+                    *bytes_total,
+                );
                 metrics.started_at.elapsed()
             };
             if matches!(phase, TransferPhase::Downloading)
@@ -1760,10 +1795,8 @@ mod tests {
             },
         );
 
-        let lines = local_command_feedback_lines(
-            &mut state,
-            &MachineCommand::AcceptChannel { channel_id },
-        );
+        let lines =
+            local_command_feedback_lines(&mut state, &MachineCommand::AcceptChannel { channel_id });
 
         assert_eq!(
             stringify_room_lines(lines),
@@ -1961,7 +1994,9 @@ mod tests {
     fn interactive_tui_updates_sender_status_immediately_on_accept_during_prepare() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
-        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        state
+            .members
+            .insert(MemberId::new("m2").unwrap(), "beta".into());
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
             channel_id.clone(),
@@ -2148,7 +2183,11 @@ fn item_kind_label(kind: TransferItemKind) -> &'static str {
     }
 }
 
-fn progress_label(state: &RoomTuiState, channel_id: &ChannelId, phase: &TransferPhase) -> &'static str {
+fn progress_label(
+    state: &RoomTuiState,
+    channel_id: &ChannelId,
+    phase: &TransferPhase,
+) -> &'static str {
     match phase {
         TransferPhase::Preparing => "preparing",
         TransferPhase::Downloading => {
@@ -2246,7 +2285,10 @@ fn format_rate(bytes: u64, elapsed: Duration) -> Option<String> {
     if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
         return None;
     }
-    Some(format!("{}/s", format_bytes(bytes_per_second.round() as u64)))
+    Some(format!(
+        "{}/s",
+        format_bytes(bytes_per_second.round() as u64)
+    ))
 }
 
 fn format_duration(elapsed: Duration) -> String {

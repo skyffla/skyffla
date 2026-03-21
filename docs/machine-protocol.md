@@ -200,8 +200,9 @@ channel once the sender has finished preparing the transfer metadata.
 ```
 
 For provisional file channels, `accept_channel` may arrive before the sender
-has finished preparing the final integrity metadata. In that case the transfer
-stays accepted but waiting until a matching `channel_transfer_ready` arrives.
+has finished preparing the final integrity metadata. Single-file transfers may
+start downloading immediately after accept, while folder transfers stay
+accepted but waiting until a matching `channel_transfer_ready` arrives.
 
 ### `reject_channel`
 
@@ -236,7 +237,7 @@ directory.
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":2,"minor":0},
+  "protocol_version":{"major":2,"minor":2},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
@@ -298,8 +299,9 @@ directory.
 }
 ```
 
-For file channels, `transfer.integrity` may be absent in the initial
-`channel_opened` event while the sender is still preparing the transfer.
+For file and folder channels, `transfer.integrity` may be absent in the
+initial `channel_opened` event while the sender is still preparing or
+finalizing the transfer metadata.
 
 ### `channel_accepted`
 
@@ -322,8 +324,27 @@ For file channels, `transfer.integrity` may be absent in the initial
 ```
 
 This event updates a previously opened provisional file channel with the final
-transfer metadata. A receiver that already accepted the file should begin the
-native receive path once this event arrives.
+transfer metadata for a prepared folder transfer. A receiver that already
+accepted the folder should begin the native receive path once this event
+arrives.
+
+### `channel_transfer_finalized`
+
+```json
+{
+  "type":"channel_transfer_finalized",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
+}
+```
+
+This event publishes the final whole-file digest for a single-file transfer.
+Receivers save into a temporary path first and only emit `channel_path_received`
+after the finalized digest matches the locally downloaded bytes.
 
 ### `channel_rejected`
 

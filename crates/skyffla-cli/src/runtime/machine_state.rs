@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use skyffla_protocol::room::{
     ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferOffer,
@@ -18,6 +19,7 @@ pub(super) struct JoinState {
     pub(super) channels: BTreeMap<ChannelId, JoinChannelState>,
     pub(super) peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
     pub(super) pending_accepted_files: BTreeSet<ChannelId>,
+    pub(super) pending_received_files: BTreeMap<ChannelId, PendingReceivedFile>,
     pub(super) local_name: String,
     pub(super) local_fingerprint: Option<String>,
     pub(super) local_ticket: String,
@@ -47,6 +49,15 @@ pub(super) struct PendingFileTransfer {
 #[derive(Debug, Default)]
 pub(super) struct HostState {
     pub(super) pending_accepted_files: BTreeSet<ChannelId>,
+    pub(super) pending_received_files: BTreeMap<ChannelId, PendingReceivedFile>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingReceivedFile {
+    pub(super) temp_path: PathBuf,
+    pub(super) final_path: PathBuf,
+    pub(super) actual_hash: String,
+    pub(super) size: u64,
 }
 
 pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
@@ -105,6 +116,11 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             channel_id,
             size,
             transfer,
+        }
+        | MachineEvent::ChannelTransferFinalized {
+            channel_id,
+            size,
+            transfer,
         } => {
             if let Some(channel) = state.channels.get_mut(channel_id) {
                 channel.size = *size;
@@ -116,6 +132,7 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                 channel.local_file_ready = true;
             }
             state.pending_accepted_files.remove(channel_id);
+            state.pending_received_files.remove(channel_id);
         }
         MachineEvent::ChannelClosed { channel_id, .. }
         | MachineEvent::ChannelRejected { channel_id, .. } => {
@@ -133,6 +150,7 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             if !keep_pending {
                 state.pending_accepted_files.remove(channel_id);
             }
+            state.pending_received_files.remove(channel_id);
         }
         _ => {}
     }
@@ -275,6 +293,7 @@ pub(super) fn apply_host_event(state: &mut HostState, event: &MachineEvent) {
     match event {
         MachineEvent::ChannelPathReceived { channel_id, .. } => {
             state.pending_accepted_files.remove(channel_id);
+            state.pending_received_files.remove(channel_id);
         }
         _ => {}
     }

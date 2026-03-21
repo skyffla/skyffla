@@ -418,8 +418,8 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
     })
     .await?;
     beta.send("/channel accept f1").await?;
-    beta.expect_event("file transfer ready", |event| {
-        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+    beta.expect_event("file transfer finalized", |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_finalized".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
             && event.pointer("/transfer/integrity/algorithm")
@@ -492,6 +492,13 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.get("name") == Some(&Value::String("artpack".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
+            && event.pointer("/transfer/integrity") == Some(&Value::Null)
+    })
+    .await?;
+    beta.expect_event("folder transfer ready", |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
             && event.pointer("/transfer/integrity/algorithm")
                 == Some(&Value::String("blake3".into()))
@@ -589,16 +596,16 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
                 && event.get("channel_id") == Some(&Value::String("f-all".into()))
         })
         .await?;
-    beta.expect_event("broadcast file ready", |event| {
-        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+    beta.expect_event("broadcast file finalized", |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_finalized".into()))
             && event.get("channel_id") == Some(&Value::String("f-all".into()))
             && event.pointer("/transfer/integrity/algorithm")
                 == Some(&Value::String("blake3".into()))
     })
     .await?;
     gamma
-        .expect_event("broadcast file ready", |event| {
-            event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+        .expect_event("broadcast file finalized", |event| {
+            event.get("type") == Some(&Value::String("channel_transfer_finalized".into()))
                 && event.get("channel_id") == Some(&Value::String("f-all".into()))
                 && event.pointer("/transfer/integrity/algorithm")
                     == Some(&Value::String("blake3".into()))
@@ -864,7 +871,9 @@ async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
 #[ignore = "manual performance baseline; run with --ignored --nocapture and optionally SKYFFLA_PERF_FILE_MIB=2048"]
 async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
-        println!("skipping perf baseline test: local rendezvous/transport test harness unavailable");
+        println!(
+            "skipping perf baseline test: local rendezvous/transport test harness unavailable"
+        );
         return Ok(());
     };
 
@@ -921,15 +930,14 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
 
     beta.send("/channel accept perf1").await?;
 
-    beta.expect_event_with_timeout("file transfer ready", perf_timeout(), |event| {
-        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+    beta.expect_event_with_timeout("file transfer finalized", perf_timeout(), |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_finalized".into()))
             && event.get("channel_id") == Some(&Value::String("perf1".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
             && event.pointer("/transfer/integrity/algorithm")
                 == Some(&Value::String("blake3".into()))
     })
     .await?;
-    let ready_at = Instant::now();
 
     beta.expect_event_with_timeout("download progress", perf_timeout(), |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
@@ -937,7 +945,6 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
             && event.get("phase") == Some(&Value::String("downloading".into()))
     })
     .await?;
-    let first_download_progress_at = Instant::now();
 
     beta.expect_event_with_timeout("file received", perf_timeout(), |event| {
         event.get("type") == Some(&Value::String("channel_path_received".into()))
@@ -945,14 +952,36 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
             && event.get("path") == Some(&Value::String(saved_path.display().to_string()))
     })
     .await?;
-    let received_at = Instant::now();
+    let finalized_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("channel_transfer_finalized".into()))
+                && event.get("channel_id") == Some(&Value::String("perf1".into()))
+        })
+        .await
+        .context("finalized event timestamp missing")?;
+    let first_download_progress_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("transfer_progress".into()))
+                && event.get("channel_id") == Some(&Value::String("perf1".into()))
+                && event.get("phase") == Some(&Value::String("downloading".into()))
+        })
+        .await
+        .context("download progress timestamp missing")?;
+    let received_at = beta
+        .event_seen_at(|event| {
+            event.get("type") == Some(&Value::String("channel_path_received".into()))
+                && event.get("channel_id") == Some(&Value::String("perf1".into()))
+                && event.get("path") == Some(&Value::String(saved_path.display().to_string()))
+        })
+        .await
+        .context("received event timestamp missing")?;
 
     assert_eq!(std::fs::metadata(&saved_path)?.len(), source_size);
 
     let total_elapsed = received_at.duration_since(send_started_at);
-    let prepare_elapsed = ready_at.duration_since(send_started_at);
+    let prepare_elapsed = finalized_at.duration_since(send_started_at);
     let transfer_elapsed = received_at.duration_since(first_download_progress_at);
-    let accept_to_receive_elapsed = received_at.duration_since(ready_at);
+    let accept_to_receive_elapsed = received_at.duration_since(finalized_at);
 
     println!(
         "skyffla perf baseline: source={} size={}MiB prep={} transfer={} accept_to_receive={} total={} transfer_rate={} end_to_end_rate={}",
@@ -978,8 +1007,14 @@ struct MachineProc {
     stdin: Option<tokio::process::ChildStdin>,
     stdout_rx: mpsc::UnboundedReceiver<Value>,
     stderr_rx: mpsc::UnboundedReceiver<String>,
-    stdout_seen: Arc<Mutex<Vec<Value>>>,
+    stdout_seen: Arc<Mutex<Vec<SeenEvent>>>,
     stderr_seen: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone)]
+struct SeenEvent {
+    seen_at: Instant,
+    value: Value,
 }
 
 impl MachineProc {
@@ -1077,8 +1112,8 @@ impl MachineProc {
                 .lock()
                 .await
                 .iter()
-                .find(|event| predicate(event))
-                .cloned()
+                .find(|event| predicate(&event.value))
+                .map(|event| event.value.clone())
             {
                 return Ok(found);
             }
@@ -1155,7 +1190,24 @@ impl MachineProc {
     }
 
     async fn events(&self) -> Vec<Value> {
-        self.stdout_seen.lock().await.clone()
+        self.stdout_seen
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.value.clone())
+            .collect()
+    }
+
+    async fn event_seen_at<F>(&self, predicate: F) -> Option<Instant>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        self.stdout_seen
+            .lock()
+            .await
+            .iter()
+            .find(|event| predicate(&event.value))
+            .map(|event| event.seen_at)
     }
 
     async fn stderr_lines(&self) -> Vec<String> {
@@ -1168,7 +1220,7 @@ impl MachineProc {
             .lock()
             .await
             .iter()
-            .map(|value| value.to_string())
+            .map(|event| event.value.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         let stderr = self.stderr_seen.lock().await.join("\n");
@@ -1200,7 +1252,7 @@ impl Drop for MachineProc {
 fn spawn_stdout_reader(
     stdout: ChildStdout,
     tx: mpsc::UnboundedSender<Value>,
-    seen: Arc<Mutex<Vec<Value>>>,
+    seen: Arc<Mutex<Vec<SeenEvent>>>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -1210,7 +1262,10 @@ fn spawn_stdout_reader(
                 continue;
             }
             if let Ok(value) = serde_json::from_str::<Value>(line) {
-                seen.lock().await.push(value.clone());
+                seen.lock().await.push(SeenEvent {
+                    seen_at: Instant::now(),
+                    value: value.clone(),
+                });
                 if tx.send(value).is_err() {
                     break;
                 }

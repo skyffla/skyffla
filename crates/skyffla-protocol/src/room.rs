@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -398,6 +398,11 @@ pub enum MachineEvent {
         size: Option<u64>,
         transfer: TransferOffer,
     },
+    ChannelTransferFinalized {
+        channel_id: ChannelId,
+        size: Option<u64>,
+        transfer: TransferOffer,
+    },
     ChannelRejected {
         channel_id: ChannelId,
         member_id: MemberId,
@@ -557,6 +562,11 @@ impl MachineEvent {
                 Ok(())
             }
             Self::ChannelTransferReady {
+                channel_id,
+                transfer,
+                ..
+            }
+            | Self::ChannelTransferFinalized {
                 channel_id,
                 transfer,
                 ..
@@ -974,6 +984,34 @@ mod tests {
         event
             .validate()
             .expect("channel_transfer_ready should validate");
+    }
+
+    #[test]
+    fn documented_channel_transfer_finalized_event_shape_round_trips() {
+        let json = r#"{
+            "type":"channel_transfer_finalized",
+            "channel_id":"c7",
+            "size":1234,
+            "transfer":{
+                "item_kind":"file",
+                "integrity":{"algorithm":"blake3","value":"feedbeef"}
+            }
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("channel_transfer_finalized event should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::ChannelTransferFinalized {
+                channel_id: ChannelId::new("c7").expect("valid channel id"),
+                size: Some(1234),
+                transfer: file_transfer_offer(),
+            }
+        );
+        event
+            .validate()
+            .expect("channel_transfer_finalized should validate");
     }
 
     #[test]
