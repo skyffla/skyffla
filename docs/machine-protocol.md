@@ -146,7 +146,7 @@ Open a file channel:
 Rules:
 
 - `file` channels require `transfer`
-- `file` channels may optionally include `blob` during the folder-transfer migration path
+- `file` channels may optionally include `blob` only for older compatibility/migration paths
 - `machine` and `clipboard` channels must not include `transfer` or `blob`
 
 ### `send_path`
@@ -157,8 +157,9 @@ Current lowering behavior:
 
 - regular files: prepare direct-transfer metadata, open a `file` channel with
   `transfer`, then stream bytes over the native transfer path
-- directories: currently lower to a blob-backed collection transfer while the
-  manifest/scheduler redesign is still in progress
+- directories: prepare a directory manifest, open a `file` channel with
+  `transfer.item_kind = "folder"`, then stream files in manifest order over the
+  native transfer path
 
 ```json
 {

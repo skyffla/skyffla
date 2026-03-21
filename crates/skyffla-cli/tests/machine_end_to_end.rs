@@ -441,7 +441,7 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()> {
+async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
     };
@@ -484,7 +484,7 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
         event.get("type") == Some(&Value::String("channel_opened".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.get("name") == Some(&Value::String("artpack".into()))
-            && event.pointer("/blob/format") == Some(&Value::String("collection".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
     })
     .await?;
 
@@ -497,7 +497,7 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
             && event.get("phase") == Some(&Value::String("downloading".into()))
     })
     .await?;
-    beta.expect_event("folder export progress", |event| {
+    beta.expect_event("folder save progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.get("name") == Some(&Value::String("artpack".into()))

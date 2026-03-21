@@ -960,6 +960,7 @@ fn format_room_event_lines(
             to,
             name,
             size,
+            transfer,
             blob,
             ..
         } => {
@@ -968,10 +969,13 @@ fn format_room_event_lines(
                 Route::Member { member_id } => state.display_member(member_id),
             };
             if matches!(kind, ChannelKind::File) {
-                let item_kind = match blob.as_ref().map(|blob| &blob.format) {
-                    Some(BlobFormat::Collection) => TransferItemKind::Folder,
-                    _ => TransferItemKind::File,
-                };
+                let item_kind = transfer
+                    .as_ref()
+                    .map(|transfer| transfer.item_kind.clone())
+                    .unwrap_or_else(|| match blob.as_ref().map(|blob| &blob.format) {
+                        Some(BlobFormat::Collection) => TransferItemKind::Folder,
+                        _ => TransferItemKind::File,
+                    });
                 let display_name = name
                     .clone()
                     .unwrap_or_else(|| channel_id.as_str().to_string());

@@ -14,8 +14,7 @@ use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
 };
 use skyffla_transport::{
-    ConnectionStatus, ImportedPath, IrohConnection, IrohTransport, LocalTransferProgress,
-    PeerTicket,
+    ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -31,10 +30,11 @@ use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
     spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_receive,
-    spawn_host_direct_receive, spawn_host_peer_link, spawn_host_transfer_accept_loop,
-    spawn_join_accept_loop, spawn_join_blob_receive, spawn_join_direct_receive,
-    spawn_join_host_peer_accept, spawn_join_transfer_accept_loop, spawn_link_writer,
-    spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput, PeerHandle,
+    spawn_host_direct_directory_receive, spawn_host_direct_receive, spawn_host_peer_link,
+    spawn_host_transfer_accept_loop, spawn_join_accept_loop, spawn_join_blob_receive,
+    spawn_join_direct_directory_receive, spawn_join_direct_receive, spawn_join_host_peer_accept,
+    spawn_join_transfer_accept_loop, spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer,
+    HostInput, JoinPeerInput, PeerHandle,
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
@@ -974,6 +974,19 @@ async fn handle_join_command(
                             target_path,
                         );
                     }
+                    (TransferItemKind::Folder, None, None) => {
+                        spawn_join_direct_directory_receive(
+                            transport.clone(),
+                            peer_tx,
+                            PeerTicket {
+                                encoded: provider_ticket,
+                            },
+                            channel_id,
+                            name,
+                            size,
+                            target_path,
+                        );
+                    }
                     (_, _, Some(blob)) => {
                         spawn_join_blob_receive(
                             transport.clone(),
@@ -1102,15 +1115,14 @@ async fn send_path_from_join(
             None,
         )
     } else if expanded_path.is_dir() {
-        let display_name = expanded_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| expanded_path.display().to_string());
-        let ImportedPath { blob, size, .. } = transport
-            .import_path_with_progress(&expanded_path, {
+        let prepared = transport
+            .prepare_directory_path_with_progress(&expanded_path, {
                 let channel_id = channel_id.clone();
                 let peer_tx = peer_tx.clone();
-                let display_name = display_name.clone();
+                let display_name = expanded_path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| expanded_path.display().to_string());
                 let mut gate = ProgressGate::default();
                 move |progress| {
                     if gate.should_emit(&progress) {
@@ -1128,11 +1140,18 @@ async fn send_path_from_join(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        transport
+            .register_outgoing_directory(
+                channel_id.as_str().to_string(),
+                &expanded_path,
+                prepared.clone(),
+            )
+            .await;
         (
-            display_name,
-            size,
+            prepared.display_name,
+            prepared.total_size,
             folder_transfer_offer(),
-            Some(blob),
+            None,
         )
     } else {
         return Err(CliError::usage(format!(
@@ -1356,8 +1375,8 @@ async fn send_path_from_host(
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| expanded_path.display().to_string());
         let mut gate = ProgressGate::default();
-        let ImportedPath { blob, size, .. } = transport
-            .import_path_with_progress(&expanded_path, |progress| {
+        let prepared = transport
+            .prepare_directory_path_with_progress(&expanded_path, |progress| {
                 if gate.should_emit(&progress) {
                     let _ = host_tx.send(HostInput::LocalEvent {
                         event: transfer_progress_event(
@@ -1372,11 +1391,18 @@ async fn send_path_from_host(
             })
             .await
             .map_err(|error| CliError::transport(error.to_string()))?;
+        transport
+            .register_outgoing_directory(
+                channel_id.as_str().to_string(),
+                &expanded_path,
+                prepared.clone(),
+            )
+            .await;
         (
-            size,
+            prepared.total_size,
             folder_transfer_offer(),
-            Some(blob),
-            name.or(Some(display_name)),
+            None,
+            name.or(Some(prepared.display_name)),
         )
     } else {
         return Err(CliError::usage(format!(
@@ -1625,6 +1651,17 @@ async fn handle_host_command(
                                 provider,
                                 channel_id.clone(),
                                 integrity.value,
+                                file.name,
+                                file.size,
+                                target_path,
+                            );
+                        }
+                        (TransferItemKind::Folder, None, None) => {
+                            spawn_host_direct_directory_receive(
+                                transport.clone(),
+                                host_tx.clone(),
+                                provider,
+                                channel_id.clone(),
                                 file.name,
                                 file.size,
                                 target_path,
