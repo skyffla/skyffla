@@ -16,6 +16,9 @@ use tokio::{
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
 pub const SKYFFLA_TRANSFER_ALPN: &[u8] = b"skyffla/transfer/1";
+const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
+const TRANSFER_WINDOW_BYTES: u64 = 1024 * 1024;
+const TRANSFER_CREDIT_GRANT_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportMode {
@@ -148,6 +151,14 @@ enum TransferResponse {
     },
     Error {
         message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TransferReceiverMessage {
+    Credit {
+        bytes: u64,
     },
 }
 
@@ -452,12 +463,15 @@ impl IrohTransport {
             .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
         let mut hasher = blake3::Hasher::new();
         let mut bytes_complete = 0_u64;
-        let mut buffer = vec![0_u8; 1024 * 1024];
+        let mut credit_pending = 0_u64;
+        let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
+        let (mut credit_send, _) = connection.open_data_stream().await?;
         on_progress(LocalTransferProgress {
             phase: TransferPhase::Downloading,
             bytes_complete: 0,
             bytes_total: Some(size),
         });
+        write_transfer_credit(&mut credit_send, TRANSFER_WINDOW_BYTES, "receiver credit").await?;
         loop {
             let read = match tokio::io::AsyncReadExt::read(&mut recv, &mut buffer).await {
                 Ok(read) => read,
@@ -474,6 +488,11 @@ impl IrohTransport {
                 .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
             hasher.update(&buffer[..read]);
             bytes_complete = bytes_complete.saturating_add(read as u64);
+            credit_pending = credit_pending.saturating_add(read as u64);
+            if credit_pending >= TRANSFER_CREDIT_GRANT_BYTES {
+                write_transfer_credit(&mut credit_send, credit_pending, "receiver credit").await?;
+                credit_pending = 0;
+            }
             on_progress(LocalTransferProgress {
                 phase: TransferPhase::Downloading,
                 bytes_complete,
@@ -498,6 +517,8 @@ impl IrohTransport {
                 "transfer hash mismatch for {channel_id}: expected {expected_hash}, received {actual_hash}"
             )));
         }
+        let _ = credit_send.finish();
+        let _ = send.finish();
         tokio::fs::rename(&temp_target, target)
             .await
             .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
@@ -553,11 +574,14 @@ impl IrohTransport {
             .await
             .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
         let mut total_complete = 0_u64;
+        let mut credit_pending = 0_u64;
+        let (mut credit_send, _) = connection.open_data_stream().await?;
         on_progress(LocalTransferProgress {
             phase: TransferPhase::Downloading,
             bytes_complete: 0,
             bytes_total: Some(total_size),
         });
+        write_transfer_credit(&mut credit_send, TRANSFER_WINDOW_BYTES, "receiver credit").await?;
 
         for entry in &entries {
             let relative_path = validated_collection_relative_path(&entry.relative_path)
@@ -573,7 +597,7 @@ impl IrohTransport {
                 .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
             let mut hasher = blake3::Hasher::new();
             let mut remaining = entry.size;
-            let mut buffer = vec![0_u8; 1024 * 1024];
+            let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
             while remaining > 0 {
                 let chunk_len = remaining.min(buffer.len() as u64) as usize;
                 let read = match tokio::io::AsyncReadExt::read(&mut recv, &mut buffer[..chunk_len]).await {
@@ -596,6 +620,12 @@ impl IrohTransport {
                 hasher.update(&buffer[..read]);
                 remaining = remaining.saturating_sub(read as u64);
                 total_complete = total_complete.saturating_add(read as u64);
+                credit_pending = credit_pending.saturating_add(read as u64);
+                if credit_pending >= TRANSFER_CREDIT_GRANT_BYTES {
+                    write_transfer_credit(&mut credit_send, credit_pending, "receiver credit")
+                        .await?;
+                    credit_pending = 0;
+                }
                 on_progress(LocalTransferProgress {
                     phase: TransferPhase::Downloading,
                     bytes_complete: total_complete,
@@ -615,6 +645,8 @@ impl IrohTransport {
             }
         }
 
+        let _ = credit_send.finish();
+        let _ = send.finish();
         tokio::fs::rename(&temp_root, target)
             .await
             .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
@@ -662,13 +694,26 @@ impl IrohTransport {
                 )
                 .await?;
 
+                let (_, mut credit_recv) = connection.accept_data_stream().await?;
+                let mut available_credit =
+                    read_transfer_credit(&mut credit_recv, "receiver credit").await?;
                 let mut file = File::open(&registered.path)
                     .await
                     .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-                let mut buffer = vec![0_u8; 1024 * 1024];
+                let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
                 loop {
+                    if available_credit == 0 {
+                            available_credit =
+                                available_credit.saturating_add(read_transfer_credit(
+                                &mut credit_recv,
+                                    "receiver credit",
+                                )
+                                .await?);
+                        continue;
+                    }
+                    let chunk_len = available_credit.min(buffer.len() as u64) as usize;
                     let read = file
-                        .read(&mut buffer)
+                        .read(&mut buffer[..chunk_len])
                         .await
                         .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
                     if read == 0 {
@@ -677,6 +722,7 @@ impl IrohTransport {
                     send.write_all(&buffer[..read])
                         .await
                         .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+                    available_credit = available_credit.saturating_sub(read as u64);
                 }
             }
             RegisteredTransfer::Directory(registered) => {
@@ -689,7 +735,10 @@ impl IrohTransport {
                     "transfer response",
                 )
                 .await?;
-                let mut buffer = vec![0_u8; 1024 * 1024];
+                let (_, mut credit_recv) = connection.accept_data_stream().await?;
+                let mut available_credit =
+                    read_transfer_credit(&mut credit_recv, "receiver credit").await?;
+                let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
                 for entry in &registered.prepared.entries {
                     let relative_path = validated_collection_relative_path(&entry.relative_path)
                         .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
@@ -698,8 +747,18 @@ impl IrohTransport {
                         .await
                         .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
                     loop {
+                        if available_credit == 0 {
+                            available_credit =
+                                available_credit.saturating_add(read_transfer_credit(
+                                    &mut credit_recv,
+                                    "receiver credit",
+                                )
+                                .await?);
+                            continue;
+                        }
+                        let chunk_len = available_credit.min(buffer.len() as u64) as usize;
                         let read = file
-                            .read(&mut buffer)
+                            .read(&mut buffer[..chunk_len])
                             .await
                             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
                         if read == 0 {
@@ -708,6 +767,7 @@ impl IrohTransport {
                         send.write_all(&buffer[..read])
                             .await
                             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+                        available_credit = available_credit.saturating_sub(read as u64);
                     }
                 }
             }
@@ -967,6 +1027,33 @@ where
     skyffla_protocol::decode_frame(&frame)
         .map(Some)
         .map_err(|error| TransportError::TransferProtocol(error.to_string()))
+}
+
+async fn write_transfer_credit(
+    send: &mut SendStream,
+    bytes: u64,
+    label: &str,
+) -> Result<(), TransportError> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    write_transfer_message(send, &TransferReceiverMessage::Credit { bytes }, label).await
+}
+
+async fn read_transfer_credit(
+    recv: &mut RecvStream,
+    label: &str,
+) -> Result<u64, TransportError> {
+    let message: Option<TransferReceiverMessage> = read_transfer_message(recv, label).await?;
+    let message = message.ok_or_else(|| {
+        TransportError::TransferProtocol(format!("peer closed {label} stream before granting credit"))
+    })?;
+    match message {
+        TransferReceiverMessage::Credit { bytes } if bytes > 0 => Ok(bytes),
+        TransferReceiverMessage::Credit { .. } => Err(TransportError::TransferProtocol(format!(
+            "peer sent zero-byte {label}"
+        ))),
+    }
 }
 
 async fn run_accept_loop(
