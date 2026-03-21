@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
     ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferOffer,
 };
 use skyffla_protocol::room_link::PeerLinkMessage;
+use skyffla_protocol::ProtocolVersion;
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
@@ -248,8 +248,7 @@ pub(super) fn join_pending_file_transfer(
     }))
 }
 
-pub(super) fn apply_host_event(_state: &mut HostState, _event: &MachineEvent) {
-}
+pub(super) fn apply_host_event(_state: &mut HostState, _event: &MachineEvent) {}
 
 fn track_join_state(state: &mut JoinState, event: &MachineEvent) {
     match event {

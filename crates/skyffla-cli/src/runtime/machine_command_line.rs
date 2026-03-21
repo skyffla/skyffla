@@ -41,10 +41,8 @@ fn parse_send_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
         }
     }
     let command = MachineCommand::SendPath {
-        channel_id: ChannelId::new(
-            channel_id.ok_or_else(|| CliError::usage("missing --channel"))?,
-        )
-        .map_err(|error| CliError::usage(error.to_string()))?,
+        channel_id: ChannelId::new(channel_id.ok_or_else(|| CliError::usage("missing --channel"))?)
+            .map_err(|error| CliError::usage(error.to_string()))?,
         to: to.ok_or_else(|| CliError::usage("missing --to"))?,
         path: path.ok_or_else(|| CliError::usage("missing --path"))?,
         name,

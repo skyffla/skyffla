@@ -150,15 +150,18 @@ Rules:
 
 ### `send_path`
 
-`send_path` is the local convenience command for sending a file or folder.
+`send_path` is the primary machine command for sending a file or folder.
 
-Current lowering behavior:
+Current behavior:
 
 - regular files: prepare direct-transfer metadata, open a `file` channel with
   `transfer`, then stream bytes over the native transfer path
 - directories: prepare a directory manifest, open a `file` channel with
-  `transfer.item_kind = "folder"`, then stream files in manifest order over the
-  native transfer path
+  `transfer.item_kind = "folder"` and a whole-transfer digest, then stream
+  files over the native transfer path
+
+Accepted transfers are saved automatically into the receiver's resolved
+download directory. There is no separate export step in the normal flow.
 
 ```json
 {
@@ -315,6 +318,8 @@ directory.
 
 For folders, `path` is the saved directory root.
 
+This event is the normal receive completion signal for accepted transfers.
+
 ### `error`
 
 ```json
@@ -329,6 +334,8 @@ For folders, `path` is the saved directory root.
 - `file` channels require transfer metadata
 - non-file channels must not include transfer metadata
 - `send_path` is a local machine command, not a peer-forwarded room command
+- accepted file and folder transfers save automatically; wrappers do not need a
+  follow-up export command in the normal flow
 
 ## Wrapper Guidance
 
