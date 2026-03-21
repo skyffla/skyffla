@@ -967,7 +967,7 @@ async fn handle_join_command(
                             target_path,
                         );
                     }
-                    (TransferItemKind::Folder, None) => {
+                    (TransferItemKind::Folder, Some(integrity)) => {
                         spawn_join_direct_directory_receive(
                             transport.clone(),
                             peer_tx,
@@ -975,6 +975,7 @@ async fn handle_join_command(
                                 encoded: provider_ticket,
                             },
                             channel_id,
+                            integrity.value,
                             name,
                             size,
                             target_path,
@@ -1127,7 +1128,7 @@ async fn send_path_from_join(
         (
             prepared.display_name,
             prepared.total_size,
-            folder_transfer_offer(),
+            folder_transfer_offer(prepared.transfer_digest),
         )
     } else {
         return Err(CliError::usage(format!(
@@ -1373,7 +1374,7 @@ async fn send_path_from_host(
             .await;
         (
             prepared.total_size,
-            folder_transfer_offer(),
+            folder_transfer_offer(prepared.transfer_digest),
             name.or(Some(prepared.display_name)),
         )
     } else {
@@ -1424,10 +1425,13 @@ fn file_transfer_offer(content_hash: String) -> TransferOffer {
     }
 }
 
-fn folder_transfer_offer() -> TransferOffer {
+fn folder_transfer_offer(transfer_digest: String) -> TransferOffer {
     TransferOffer {
         item_kind: TransferItemKind::Folder,
-        integrity: None,
+        integrity: Some(TransferDigest {
+            algorithm: "blake3".into(),
+            value: transfer_digest,
+        }),
     }
 }
 
@@ -1619,12 +1623,13 @@ async fn handle_host_command(
                                 target_path,
                             );
                         }
-                        (TransferItemKind::Folder, None) => {
+                        (TransferItemKind::Folder, Some(integrity)) => {
                             spawn_host_direct_directory_receive(
                                 transport.clone(),
                                 host_tx.clone(),
                                 provider,
                                 channel_id.clone(),
+                                integrity.value,
                                 file.name,
                                 file.size,
                                 target_path,

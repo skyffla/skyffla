@@ -485,6 +485,8 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
             && event.get("name") == Some(&Value::String("artpack".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("folder".into()))
+            && event.pointer("/transfer/integrity/algorithm")
+                == Some(&Value::String("blake3".into()))
     })
     .await?;
 

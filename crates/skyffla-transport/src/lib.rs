@@ -111,6 +111,7 @@ pub struct PreparedDirectoryEntry {
 pub struct PreparedDirectory {
     pub total_size: u64,
     pub display_name: String,
+    pub transfer_digest: String,
     pub entries: Vec<PreparedDirectoryEntry>,
 }
 
@@ -367,6 +368,7 @@ impl IrohTransport {
         Ok(PreparedDirectory {
             total_size,
             display_name,
+            transfer_digest: directory_transfer_digest(&prepared_entries),
             entries: prepared_entries,
         })
     }
@@ -529,6 +531,7 @@ impl IrohTransport {
         &self,
         provider: &PeerTicket,
         channel_id: &str,
+        expected_digest: &str,
         target: impl AsRef<Path>,
         mut on_progress: impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
@@ -576,6 +579,7 @@ impl IrohTransport {
         let mut total_complete = 0_u64;
         let mut credit_pending = 0_u64;
         let (mut credit_send, _) = connection.open_data_stream().await?;
+        let mut completed_entries = Vec::with_capacity(entries.len());
         on_progress(LocalTransferProgress {
             phase: TransferPhase::Downloading,
             bytes_complete: 0,
@@ -643,6 +647,19 @@ impl IrohTransport {
                     entry.relative_path, entry.content_hash, actual_hash
                 )));
             }
+            completed_entries.push(PreparedDirectoryEntry {
+                relative_path: entry.relative_path.clone(),
+                size: entry.size,
+                content_hash: actual_hash,
+            });
+        }
+
+        let actual_digest = directory_transfer_digest(&completed_entries);
+        if actual_digest != expected_digest {
+            let _ = tokio::fs::remove_dir_all(&temp_root).await;
+            return Err(TransportError::DirectFileReceive(format!(
+                "transfer digest mismatch for {channel_id}: expected {expected_digest}, received {actual_digest}"
+            )));
         }
 
         let _ = credit_send.finish();
@@ -904,6 +921,20 @@ fn collect_collection_entries_recursive(
 fn collection_entry_name(relative_path: &Path) -> Result<String, TransportError> {
     let relative_path = validated_collection_relative_path(relative_path)?;
     Ok(relative_path.to_string_lossy().replace('\\', "/"))
+}
+
+fn directory_transfer_digest(entries: &[PreparedDirectoryEntry]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for entry in entries {
+        hasher.update(b"file\0");
+        hasher.update(entry.relative_path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(entry.size.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(entry.content_hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn validated_collection_relative_path(path: impl AsRef<Path>) -> Result<PathBuf, TransportError> {
@@ -1471,7 +1502,13 @@ mod tests {
         });
 
         let size = joiner
-            .receive_directory_with_progress(&host_ticket, "c2", &target_dir, |_| {})
+            .receive_directory_with_progress(
+                &host_ticket,
+                "c2",
+                &prepared.transfer_digest,
+                &target_dir,
+                |_| {},
+            )
             .await
             .expect("joiner should receive direct directory");
         serve_task.await.expect("serve task should complete");

@@ -557,6 +557,7 @@ pub(crate) fn spawn_join_direct_directory_receive(
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
+    transfer_digest: String,
     name: String,
     size: Option<u64>,
     target_path: PathBuf,
@@ -564,7 +565,7 @@ pub(crate) fn spawn_join_direct_directory_receive(
     tokio::spawn(async move {
         let mut last_step = None;
         match transport
-            .receive_directory_with_progress(&provider, channel_id.as_str(), &target_path, |progress| {
+            .receive_directory_with_progress(&provider, channel_id.as_str(), &transfer_digest, &target_path, |progress| {
                 if should_emit_progress(&mut last_step, &progress, size) {
                     let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
@@ -617,6 +618,7 @@ pub(crate) fn spawn_host_direct_directory_receive(
     host_tx: mpsc::UnboundedSender<HostInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
+    transfer_digest: String,
     name: String,
     size: Option<u64>,
     target_path: PathBuf,
@@ -624,7 +626,7 @@ pub(crate) fn spawn_host_direct_directory_receive(
     tokio::spawn(async move {
         let mut last_step = None;
         match transport
-            .receive_directory_with_progress(&provider, channel_id.as_str(), &target_path, |progress| {
+            .receive_directory_with_progress(&provider, channel_id.as_str(), &transfer_digest, &target_path, |progress| {
                 if should_emit_progress(&mut last_step, &progress, size) {
                     let _ = host_tx.send(HostInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
