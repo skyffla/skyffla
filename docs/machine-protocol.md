@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `1.0`
+- `1.1`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -145,13 +145,14 @@ Rules:
 - `file` channels require `blob`
 - `machine` and `clipboard` channels must not include `blob`
 
-### `send_file`
+### `send_path`
 
-`send_file` is a local convenience command for the sender. It imports a local file or directory into the blob store, then lowers to `open_channel(kind=file, blob=...)`.
+`send_path` is the local convenience command for sending a file or folder. It
+imports the local path, then lowers to `open_channel(kind=file, blob=...)`.
 
 ```json
 {
-  "type":"send_file",
+  "type":"send_path",
   "channel_id":"f1",
   "to":{"type":"member","member_id":"m2"},
   "path":"./report.txt",
@@ -188,13 +189,9 @@ For `machine` and `clipboard` channels:
 {"type":"close_channel","channel_id":"c7","reason":"done"}
 ```
 
-### `export_channel_file`
-
-`export_channel_file` is a local convenience command for recipients after a file channel becomes ready.
-
-```json
-{"type":"export_channel_file","channel_id":"f1","path":"./downloads/report.txt"}
-```
+Recipients do not need a separate export command in the normal flow. Accepted
+file and folder transfers are saved automatically into the local download
+directory.
 
 ## Events
 
@@ -203,7 +200,7 @@ For `machine` and `clipboard` channels:
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":1,"minor":0},
+  "protocol_version":{"major":1,"minor":1},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
@@ -296,23 +293,18 @@ For `machine` and `clipboard` channels:
 {"type":"channel_closed","channel_id":"c7","member_id":"m1","member_name":"alpha","reason":"done"}
 ```
 
-### `channel_file_ready`
+### `channel_path_received`
 
 ```json
 {
-  "type":"channel_file_ready",
+  "type":"channel_path_received",
   "channel_id":"f1",
-  "blob":{"hash":"abc123","format":"blob"}
+  "path":"./downloads/report.txt",
+  "size":1234
 }
 ```
 
-For folders, `format` is `collection`.
-
-### `channel_file_exported`
-
-```json
-{"type":"channel_file_exported","channel_id":"f1","path":"./downloads/report.txt","size":1234}
-```
+For folders, `path` is the saved directory root.
 
 ### `error`
 
@@ -327,7 +319,7 @@ For folders, `format` is `collection`.
 - `member_snapshot.members` must not be empty
 - `file` channels require blob metadata
 - non-file channels must not include blob metadata
-- `send_file` and `export_channel_file` are local machine commands, not peer-forwarded room commands
+- `send_path` is a local machine command, not a peer-forwarded room command
 
 ## Wrapper Guidance
 

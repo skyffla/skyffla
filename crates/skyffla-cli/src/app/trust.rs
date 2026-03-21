@@ -95,6 +95,7 @@ mod tests {
             peer_name: "alice".into(),
             peer_fingerprint: Some("fingerprint".into()),
             peer_ticket: None,
+            file_transfer_version: None,
         };
 
         let status = apply_peer_trust(&mut state, &peer, 123).expect("status");
@@ -112,12 +113,14 @@ mod tests {
             peer_name: "alice".into(),
             peer_fingerprint: Some("fingerprint".into()),
             peer_ticket: None,
+            file_transfer_version: None,
         };
         let renamed = SessionPeer {
             session_id: "room".into(),
             peer_name: "alice-laptop".into(),
             peer_fingerprint: Some("fingerprint".into()),
             peer_ticket: None,
+            file_transfer_version: None,
         };
         let _ = apply_peer_trust(&mut state, &original, 100);
 
@@ -137,6 +140,7 @@ mod tests {
             peer_name: "anon".into(),
             peer_fingerprint: None,
             peer_ticket: None,
+            file_transfer_version: None,
         };
 
         let status = apply_peer_trust(&mut state, &peer, 123).expect("status");

@@ -372,7 +372,7 @@ async fn machine_file_channel_requires_blob_metadata_and_rejects_inline_data() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
+async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
     };
@@ -385,7 +385,7 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
     }
 
     let source_path = host_home.join("report.txt");
-    let export_path = beta_home.join("report-copy.txt");
+    let saved_path = beta_home.join("report.txt");
     std::fs::write(&source_path, b"mesh file payload")?;
 
     let room = unique_room_name();
@@ -398,7 +398,7 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
     beta.expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
 
-    host.send(r#"/file send --channel f1 --to m2 --path "~/report.txt""#)
+    host.send(r#"/send --channel f1 --to m2 --path "~/report.txt""#)
         .await?;
     host.expect_event("sender progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
@@ -423,14 +423,6 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
             && event.get("phase") == Some(&Value::String("downloading".into()))
     })
     .await?;
-    beta.expect_event("file ready", |event| {
-        event.get("type") == Some(&Value::String("channel_file_ready".into()))
-            && event.get("channel_id") == Some(&Value::String("f1".into()))
-    })
-    .await?;
-
-    beta.send(r#"/file export --channel f1 --path "~/report-copy.txt""#)
-        .await?;
     beta.expect_event("export progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
@@ -438,14 +430,14 @@ async fn machine_send_file_downloads_and_exports_on_accept() -> Result<()> {
             && event.get("phase") == Some(&Value::String("exporting".into()))
     })
     .await?;
-    beta.expect_event("file exported", |event| {
-        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+    beta.expect_event("file received", |event| {
+        event.get("type") == Some(&Value::String("channel_path_received".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
-            && event.get("path") == Some(&Value::String(export_path.display().to_string()))
+            && event.get("path") == Some(&Value::String(saved_path.display().to_string()))
     })
     .await?;
 
-    assert_eq!(std::fs::read(&export_path)?, b"mesh file payload");
+    assert_eq!(std::fs::read(&saved_path)?, b"mesh file payload");
 
     host.shutdown().await?;
     beta.shutdown().await?;
@@ -468,9 +460,8 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
 
     let source_dir = host_home.join("artpack");
     let nested_dir = source_dir.join("nested");
-    let export_dir = beta_home.join("saved-artpack");
+    let saved_dir = beta_home.join("artpack");
     std::fs::create_dir_all(&nested_dir)?;
-    std::fs::create_dir_all(&export_dir)?;
     std::fs::write(source_dir.join("a.txt"), b"alpha")?;
     std::fs::write(nested_dir.join("b.txt"), b"beta")?;
 
@@ -484,7 +475,7 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
     beta.expect_stderr_contains("\"member_name\":\"host\"")
         .await?;
 
-    host.send(r#"/file send --channel folder1 --to m2 --path "~/artpack""#)
+    host.send(r#"/send --channel folder1 --to m2 --path "~/artpack""#)
         .await?;
     host.expect_event("folder prepare progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
@@ -511,15 +502,6 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
             && event.get("phase") == Some(&Value::String("downloading".into()))
     })
     .await?;
-    beta.expect_event("folder ready", |event| {
-        event.get("type") == Some(&Value::String("channel_file_ready".into()))
-            && event.get("channel_id") == Some(&Value::String("folder1".into()))
-            && event.pointer("/blob/format") == Some(&Value::String("collection".into()))
-    })
-    .await?;
-
-    beta.send(r#"/file export --channel folder1 --path "~/saved-artpack""#)
-        .await?;
     beta.expect_event("folder export progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
@@ -528,16 +510,16 @@ async fn machine_send_file_accepts_directory_paths_as_collections() -> Result<()
             && event.get("phase") == Some(&Value::String("exporting".into()))
     })
     .await?;
-    beta.expect_event("folder exported", |event| {
-        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+    beta.expect_event("folder received", |event| {
+        event.get("type") == Some(&Value::String("channel_path_received".into()))
             && event.get("channel_id") == Some(&Value::String("folder1".into()))
-            && event.get("path") == Some(&Value::String(export_dir.display().to_string()))
+            && event.get("path") == Some(&Value::String(saved_dir.display().to_string()))
     })
     .await?;
 
-    assert_eq!(std::fs::read(export_dir.join("a.txt"))?, b"alpha");
+    assert_eq!(std::fs::read(saved_dir.join("a.txt"))?, b"alpha");
     assert_eq!(
-        std::fs::read(export_dir.join("nested").join("b.txt"))?,
+        std::fs::read(saved_dir.join("nested").join("b.txt"))?,
         b"beta"
     );
 
@@ -562,16 +544,11 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     }
 
     let source_path = fresh_test_dir("skyffla-cli-machine-fanout-source").join("report.txt");
-    let export_path = fresh_test_dir("skyffla-cli-machine-fanout-export").join("report.txt");
+    let saved_path = beta_home.join("report.txt");
     std::fs::create_dir_all(
         source_path
             .parent()
             .context("source path should have a parent")?,
-    )?;
-    std::fs::create_dir_all(
-        export_path
-            .parent()
-            .context("export path should have a parent")?,
     )?;
     std::fs::write(&source_path, b"fanout payload")?;
 
@@ -592,7 +569,7 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
         .await?;
 
     host.send(&format!(
-        r#"/file send --channel f-all --to all --path "{}""#,
+        r#"/send --channel f-all --to all --path "{}""#,
         source_path.display()
     ))
     .await?;
@@ -611,9 +588,10 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     beta.send("/channel accept f-all").await?;
     gamma.send("/channel reject f-all busy").await?;
 
-    beta.expect_event("broadcast file ready", |event| {
-        event.get("type") == Some(&Value::String("channel_file_ready".into()))
+    beta.expect_event("broadcast export progress", |event| {
+        event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("f-all".into()))
+            && event.get("phase") == Some(&Value::String("exporting".into()))
     })
     .await?;
     host.expect_event("gamma rejected", |event| {
@@ -623,25 +601,21 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     })
     .await?;
 
-    beta.send(&format!(
-        r#"/file export --channel f-all --path "{}""#,
-        export_path.display()
-    ))
-    .await?;
-    beta.expect_event("broadcast file exported", |event| {
-        event.get("type") == Some(&Value::String("channel_file_exported".into()))
+    beta.expect_event("broadcast file received", |event| {
+        event.get("type") == Some(&Value::String("channel_path_received".into()))
             && event.get("channel_id") == Some(&Value::String("f-all".into()))
+            && event.get("path") == Some(&Value::String(saved_path.display().to_string()))
     })
     .await?;
-    assert_eq!(std::fs::read(&export_path)?, b"fanout payload");
+    assert_eq!(std::fs::read(&saved_path)?, b"fanout payload");
 
     let gamma_events = gamma.events().await;
     assert!(
         !gamma_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_file_ready".into()))
+            event.get("type") == Some(&Value::String("channel_path_received".into()))
                 && event.get("channel_id") == Some(&Value::String("f-all".into()))
         }),
-        "gamma unexpectedly marked rejected file ready:\n{}",
+        "gamma unexpectedly received rejected file:\n{}",
         gamma.debug_dump().await
     );
 
@@ -892,6 +866,8 @@ impl MachineProc {
             .arg("machine")
             .arg("--server")
             .arg(server_url)
+            .arg("--download-dir")
+            .arg(home)
             .arg("--name")
             .arg(name)
             .arg("--json")

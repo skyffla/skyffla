@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::{
     Capabilities, ControlMessage, Envelope, Hello, HelloAck, TransportCapability,
-    WIRE_PROTOCOL_VERSION,
+    FILE_TRANSFER_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION,
 };
 use skyffla_session::SessionPeer;
 
@@ -21,6 +21,7 @@ pub(crate) async fn exchange_hello(
         next_message_id(),
         ControlMessage::Hello(Hello {
             protocol_version: WIRE_PROTOCOL_VERSION,
+            file_transfer_version: Some(FILE_TRANSFER_PROTOCOL_VERSION),
             session_id: session_id.to_string(),
             peer_name: config.peer_name.clone(),
             peer_fingerprint: local_fingerprint.map(ToOwned::to_owned),
@@ -50,6 +51,7 @@ pub(crate) async fn exchange_hello(
                 peer_name: hello.peer_name,
                 peer_fingerprint: hello.peer_fingerprint,
                 peer_ticket: hello.peer_ticket,
+                file_transfer_version: hello.file_transfer_version,
             }
         }
         other => bail!("expected hello from peer, got {:?}", other),

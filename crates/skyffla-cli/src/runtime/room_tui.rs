@@ -413,7 +413,7 @@ fn parse_room_tui_input(line: &str, state: &mut RoomTuiState) -> Result<RoomTuiI
         } else {
             (parse_route(&tokens[0], state)?, tokens[1..].join(" "))
         };
-        let command = MachineCommand::SendFile {
+        let command = MachineCommand::SendPath {
             channel_id: state.next_local_file_channel(),
             to,
             path,
@@ -535,6 +535,12 @@ fn local_command_feedback_lines(
             }
         },
         MachineCommand::SendFile {
+            channel_id,
+            to,
+            path,
+            ..
+        }
+        | MachineCommand::SendPath {
             channel_id,
             to,
             path,
@@ -1108,19 +1114,7 @@ fn format_room_event_lines(
         }
         MachineEvent::ChannelFileReady { channel_id, .. } => {
             state.pending_incoming_files.retain(|id| id != &channel_id);
-            if !state.ready_files.iter().any(|id| id == &channel_id) {
-                state.ready_files.push(channel_id.clone());
-            }
-            let save_path = state
-                .default_save_path(&channel_id)
-                .unwrap_or_else(|_| ".".to_string());
-            (
-                Vec::new(),
-                Some(MachineCommand::ExportChannelFile {
-                    channel_id,
-                    path: save_path,
-                }),
-            )
+            (Vec::new(), None)
         }
         MachineEvent::ChannelFileExported {
             channel_id,
@@ -1140,7 +1134,27 @@ fn format_room_event_lines(
                 None,
             )
         }
+        MachineEvent::ChannelPathReceived {
+            channel_id,
+            path,
+            size,
+        } => {
+            let label = state
+                .channel_summary(&channel_id)
+                .unwrap_or_else(|| channel_id.as_str().to_string());
+            state.pending_incoming_files.retain(|id| id != &channel_id);
+            state.ready_files.retain(|id| id != &channel_id);
+            (
+                vec![RoomLine::System(format!(
+                    "{label} saved to {} ({})",
+                    display_path(&path),
+                    format_bytes(size)
+                ))],
+                None,
+            )
+        }
         MachineEvent::TransferProgress {
+            channel_id,
             phase,
             item_kind,
             name,
@@ -1148,7 +1162,23 @@ fn format_room_event_lines(
             bytes_total,
             ..
         } => {
-            if matches!(phase, TransferPhase::Preparing | TransferPhase::Exporting) {
+            if matches!(phase, TransferPhase::Preparing) {
+                return (Vec::new(), None);
+            }
+            if matches!(phase, TransferPhase::Exporting) {
+                if bytes_complete == 0 {
+                    let label = state
+                        .channel_summary(&channel_id)
+                        .unwrap_or_else(|| format!("{} {}", item_kind_label(item_kind.clone()), name));
+                    let path = unique_path_in_dir(&state.download_dir, &name);
+                    return (
+                        vec![RoomLine::System(format!(
+                            "saving {label} to {}",
+                            display_path(&path.display().to_string())
+                        ))],
+                        None,
+                    );
+                }
                 return (Vec::new(), None);
             }
             (
@@ -1345,7 +1375,7 @@ mod tests {
     fn parses_room_file_commands() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         match parse_room_tui_input(r#"/send all "./folder name""#, &mut state).unwrap() {
-            RoomTuiInput::Send(MachineCommand::SendFile {
+            RoomTuiInput::Send(MachineCommand::SendPath {
                 channel_id,
                 to,
                 path,
@@ -1363,7 +1393,7 @@ mod tests {
             .insert(MemberId::new("m2").unwrap(), "beta".into());
         state.self_member = Some(MemberId::new("m1").unwrap());
         match parse_room_tui_input(r#"/send "./solo.txt""#, &mut state).unwrap() {
-            RoomTuiInput::Send(MachineCommand::SendFile { to, path, .. }) => {
+            RoomTuiInput::Send(MachineCommand::SendPath { to, path, .. }) => {
                 assert_eq!(
                     to,
                     Route::Member {

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use iroh::endpoint::{RecvStream, SendStream};
+use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
     BlobRef, ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind,
     TransferPhase,
@@ -32,6 +34,7 @@ pub(crate) struct PeerHandle {
     pub(crate) peer_sender: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     pub(crate) member: Member,
     pub(crate) ticket: Option<String>,
+    pub(crate) file_transfer_version: Option<ProtocolVersion>,
     pub(crate) pending_events: Vec<MachineEvent>,
 }
 
@@ -388,7 +391,7 @@ pub(crate) fn spawn_outbound_peer_link(
     });
 }
 
-pub(crate) fn spawn_join_blob_download(
+pub(crate) fn spawn_join_blob_receive(
     transport: IrohTransport,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     provider: PeerTicket,
@@ -397,6 +400,7 @@ pub(crate) fn spawn_join_blob_download(
     item_kind: TransferItemKind,
     name: String,
     size: Option<u64>,
+    target_path: PathBuf,
 ) {
     tokio::spawn(async move {
         let mut last_step = None;
@@ -417,11 +421,42 @@ pub(crate) fn spawn_join_blob_download(
             })
             .await
         {
-            Ok(()) => {
-                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                    event: MachineEvent::ChannelFileReady { channel_id, blob },
-                });
-            }
+            Ok(()) => match transport
+                .export_path_with_progress(&blob, &target_path, |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: item_kind.clone(),
+                                name: name.clone(),
+                                phase: TransferPhase::Exporting,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                })
+                .await
+            {
+                Ok(size) => {
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::ChannelPathReceived {
+                            channel_id,
+                            path: target_path.display().to_string(),
+                            size,
+                        },
+                    });
+                }
+                Err(error) => {
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::Error {
+                            code: "blob_export_failed".into(),
+                            message: error.to_string(),
+                            channel_id: Some(channel_id),
+                        },
+                    });
+                }
+            },
             Err(error) => {
                 let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                     event: MachineEvent::Error {
@@ -435,7 +470,7 @@ pub(crate) fn spawn_join_blob_download(
     });
 }
 
-pub(crate) fn spawn_host_blob_download(
+pub(crate) fn spawn_host_blob_receive(
     transport: IrohTransport,
     host_tx: mpsc::UnboundedSender<HostInput>,
     provider: PeerTicket,
@@ -444,6 +479,7 @@ pub(crate) fn spawn_host_blob_download(
     item_kind: TransferItemKind,
     name: String,
     size: Option<u64>,
+    target_path: PathBuf,
 ) {
     tokio::spawn(async move {
         let mut last_step = None;
@@ -464,11 +500,42 @@ pub(crate) fn spawn_host_blob_download(
             })
             .await
         {
-            Ok(()) => {
-                let _ = host_tx.send(HostInput::LocalEvent {
-                    event: MachineEvent::ChannelFileReady { channel_id, blob },
-                });
-            }
+            Ok(()) => match transport
+                .export_path_with_progress(&blob, &target_path, |progress| {
+                    if should_emit_progress(&mut last_step, &progress, size) {
+                        let _ = host_tx.send(HostInput::LocalEvent {
+                            event: MachineEvent::TransferProgress {
+                                channel_id: channel_id.clone(),
+                                item_kind: item_kind.clone(),
+                                name: name.clone(),
+                                phase: TransferPhase::Exporting,
+                                bytes_complete: progress.bytes_complete,
+                                bytes_total: size.or(progress.bytes_total),
+                            },
+                        });
+                    }
+                })
+                .await
+            {
+                Ok(size) => {
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::ChannelPathReceived {
+                            channel_id,
+                            path: target_path.display().to_string(),
+                            size,
+                        },
+                    });
+                }
+                Err(error) => {
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::Error {
+                            code: "blob_export_failed".into(),
+                            message: error.to_string(),
+                            channel_id: Some(channel_id),
+                        },
+                    });
+                }
+            },
             Err(error) => {
                 let _ = host_tx.send(HostInput::LocalEvent {
                     event: MachineEvent::Error {
@@ -567,6 +634,7 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::RoomClosed { .. }
         | MachineEvent::ChannelFileReady { .. }
         | MachineEvent::ChannelFileExported { .. }
+        | MachineEvent::ChannelPathReceived { .. }
         | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,
     }

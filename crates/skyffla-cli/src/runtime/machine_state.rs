@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use skyffla_protocol::ProtocolVersion;
 use skyffla_protocol::room::{
     BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferItemKind,
 };
@@ -20,6 +21,7 @@ pub(super) struct JoinState {
     pub(super) local_fingerprint: Option<String>,
     pub(super) local_ticket: String,
     pub(super) pending_host_ticket: Option<String>,
+    pub(super) host_file_transfer_version: Option<ProtocolVersion>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,18 +45,8 @@ pub(super) struct PendingFileTransfer {
     pub(super) size: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ExportableFileTransfer {
-    pub(super) blob: BlobRef,
-    pub(super) item_kind: TransferItemKind,
-    pub(super) name: String,
-    pub(super) size: Option<u64>,
-}
-
 #[derive(Debug, Default)]
-pub(super) struct HostState {
-    pub(super) ready_file_channels: BTreeSet<ChannelId>,
-}
+pub(super) struct HostState;
 
 pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
     track_join_state(state, event);
@@ -114,7 +106,8 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                 );
             }
         }
-        MachineEvent::ChannelFileReady { channel_id, .. } => {
+        MachineEvent::ChannelFileReady { channel_id, .. }
+        | MachineEvent::ChannelPathReceived { channel_id, .. } => {
             if let Some(channel) = state.channels.get_mut(channel_id) {
                 channel.local_file_ready = true;
             }
@@ -265,62 +258,7 @@ pub(super) fn join_pending_file_transfer(
     }))
 }
 
-pub(super) fn join_exportable_file(
-    state: &JoinState,
-    self_member: &MemberId,
-    channel_id: &ChannelId,
-) -> Result<ExportableFileTransfer, CliError> {
-    let channel = state
-        .channels
-        .get(channel_id)
-        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
-    if channel.kind != ChannelKind::File {
-        return Err(CliError::runtime(format!(
-            "channel {} is not a file channel",
-            channel_id.as_str()
-        )));
-    }
-    if !channel.participants.contains(self_member) {
-        return Err(CliError::runtime(format!(
-            "member {} is not part of channel {}",
-            self_member.as_str(),
-            channel_id.as_str()
-        )));
-    }
-    if !channel.local_file_ready {
-        return Err(CliError::runtime(format!(
-            "file channel {} is not ready yet",
-            channel_id.as_str()
-        )));
-    }
-    let blob = channel.blob.clone().ok_or_else(|| {
-        CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
-            channel_id.as_str()
-        ))
-    })?;
-    Ok(ExportableFileTransfer {
-        blob,
-        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
-        name: channel
-            .name
-            .clone()
-            .unwrap_or_else(|| channel_id.as_str().to_string()),
-        size: channel.size,
-    })
-}
-
-pub(super) fn apply_host_event(state: &mut HostState, event: &MachineEvent) {
-    match event {
-        MachineEvent::ChannelFileReady { channel_id, .. } => {
-            state.ready_file_channels.insert(channel_id.clone());
-        }
-        MachineEvent::ChannelRejected { channel_id, .. }
-        | MachineEvent::ChannelClosed { channel_id, .. } => {
-            state.ready_file_channels.remove(channel_id);
-        }
-        _ => {}
-    }
+pub(super) fn apply_host_event(_state: &mut HostState, _event: &MachineEvent) {
 }
 
 fn track_join_state(state: &mut JoinState, event: &MachineEvent) {

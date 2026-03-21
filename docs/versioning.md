@@ -33,12 +33,18 @@ Defined in:
 Used in:
 
 - peer hello / hello-ack handshake
+- file-transfer capability/version advertisement in `hello`
 
 Current constant:
 
 - `WIRE_PROTOCOL_VERSION`
 
 Compatibility is checked during the peer handshake. Peers must share the same wire major version.
+
+File-transfer compatibility is negotiated separately inside the hello payload
+via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
+major version while refusing `send_path` when the advertised file-transfer
+major version is missing or incompatible.
 
 ### Machine protocol
 

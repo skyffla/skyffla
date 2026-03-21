@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -204,6 +204,13 @@ pub enum MachineCommand {
         name: Option<String>,
         mime: Option<String>,
     },
+    SendPath {
+        channel_id: ChannelId,
+        to: Route,
+        path: String,
+        name: Option<String>,
+        mime: Option<String>,
+    },
     OpenChannel {
         channel_id: ChannelId,
         kind: ChannelKind,
@@ -246,6 +253,12 @@ impl MachineCommand {
                 Ok(())
             }
             Self::SendFile {
+                channel_id,
+                to,
+                path,
+                ..
+            }
+            | Self::SendPath {
                 channel_id,
                 to,
                 path,
@@ -370,6 +383,11 @@ pub enum MachineEvent {
         blob: BlobRef,
     },
     ChannelFileExported {
+        channel_id: ChannelId,
+        path: String,
+        size: u64,
+    },
+    ChannelPathReceived {
         channel_id: ChannelId,
         path: String,
         size: u64,
@@ -538,6 +556,9 @@ impl MachineEvent {
                 blob.validate()
             }
             Self::ChannelFileExported {
+                channel_id, path, ..
+            }
+            | Self::ChannelPathReceived {
                 channel_id, path, ..
             } => {
                 if channel_id.as_str().trim().is_empty() {
@@ -750,6 +771,35 @@ mod tests {
     }
 
     #[test]
+    fn documented_send_path_command_shape_round_trips() {
+        let json = r#"{
+            "type":"send_path",
+            "channel_id":"c9",
+            "to":{"type":"member","member_id":"m2"},
+            "path":"./report.txt",
+            "name":"report.txt",
+            "mime":"text/plain"
+        }"#;
+
+        let command: MachineCommand =
+            serde_json::from_str(json).expect("send_path command should parse");
+
+        assert_eq!(
+            command,
+            MachineCommand::SendPath {
+                channel_id: ChannelId::new("c9").expect("valid channel id"),
+                to: Route::Member {
+                    member_id: MemberId::new("m2").expect("valid member id"),
+                },
+                path: "./report.txt".into(),
+                name: Some("report.txt".into()),
+                mime: Some("text/plain".into()),
+            }
+        );
+        command.validate().expect("send_path should validate");
+    }
+
+    #[test]
     fn documented_accept_channel_command_shape_round_trips() {
         let json = r#"{
             "type":"accept_channel",
@@ -866,6 +916,31 @@ mod tests {
         event
             .validate()
             .expect("channel_file_ready should validate");
+    }
+
+    #[test]
+    fn path_received_event_round_trips() {
+        let json = r#"{
+            "type":"channel_path_received",
+            "channel_id":"c1",
+            "path":"./downloads/report.txt",
+            "size":1234
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("channel_path_received should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::ChannelPathReceived {
+                channel_id: ChannelId::new("c1").expect("valid channel id"),
+                path: "./downloads/report.txt".into(),
+                size: 1234,
+            }
+        );
+        event
+            .validate()
+            .expect("channel_path_received should validate");
     }
 
     #[test]

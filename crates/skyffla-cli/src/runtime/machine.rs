@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use iroh::endpoint::{RecvStream, SendStream};
@@ -8,6 +8,7 @@ use skyffla_protocol::room::{
     TransferItemKind, MACHINE_PROTOCOL_VERSION,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
+use skyffla_protocol::{ProtocolVersion, FILE_TRANSFER_PROTOCOL_VERSION};
 use skyffla_session::room::{RoomEngine, RoutedEvent};
 use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
@@ -29,15 +30,14 @@ use crate::net::framing::write_framed;
 use crate::runtime::machine_command_line::parse_machine_command_line;
 use crate::runtime::machine_links::{
     introduce_member_to_existing_peers, peer_event_matches_sender, read_authority_link_message,
-    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_download, spawn_host_peer_link,
-    spawn_join_accept_loop, spawn_join_blob_download, spawn_join_host_peer_accept,
+    spawn_accept_loop, spawn_host_authority_reader, spawn_host_blob_receive, spawn_host_peer_link,
+    spawn_join_accept_loop, spawn_join_blob_receive, spawn_join_host_peer_accept,
     spawn_link_writer, spawn_outbound_peer_link, ConnectedPeer, HostInput, JoinPeerInput,
     PeerHandle,
 };
 use crate::runtime::machine_state::{
     apply_host_event, apply_machine_event, join_channel_recipients, join_chat_recipients,
-    join_exportable_file, join_pending_file_transfer, ExportableFileTransfer, HostState, JoinState,
-    PendingFileTransfer,
+    join_pending_file_transfer, HostState, JoinState, PendingFileTransfer,
 };
 
 #[derive(Debug)]
@@ -55,6 +55,14 @@ enum LoopControl {
 #[derive(Debug, Clone, Default)]
 struct ProgressGate {
     last_step: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct FileTransferTarget {
+    blob: skyffla_protocol::room::BlobRef,
+    item_kind: TransferItemKind,
+    name: String,
+    size: Option<u64>,
 }
 
 impl ProgressGate {
@@ -157,6 +165,7 @@ pub(crate) async fn run_machine_join_session(
     connection: &IrohConnection,
     send: &mut SendStream,
     recv: &mut RecvStream,
+    host_peer: &SessionPeer,
     local_fingerprint: Option<String>,
     local_ticket: String,
     host_ticket: Option<String>,
@@ -177,6 +186,7 @@ pub(crate) async fn run_machine_join_session(
         local_fingerprint,
         local_ticket,
         pending_host_ticket: host_ticket,
+        host_file_transfer_version: host_peer.file_transfer_version,
     };
 
     let accept_handle = spawn_join_accept_loop(
@@ -193,6 +203,7 @@ pub(crate) async fn run_machine_join_session(
         tokio::select! {
             input = stdin_rx.recv(), if !input_closed => {
                 input_closed = handle_join_stdin_input(
+                    config,
                     input,
                     &mut join_state,
                     &mut stdout,
@@ -287,6 +298,7 @@ async fn handle_host_input(
                 room,
                 host_member,
                 command.clone(),
+                &config.download_dir,
                 stdout,
                 peers,
                 host_state,
@@ -362,6 +374,7 @@ async fn handle_host_input(
                     room,
                     &member_id,
                     command.clone(),
+                    &config.download_dir,
                     stdout,
                     peers,
                     host_state,
@@ -445,6 +458,7 @@ async fn handle_host_peer_connected(
         peer_sender: None,
         member,
         ticket,
+        file_transfer_version: connected.peer.file_transfer_version.clone(),
         pending_events: Vec::new(),
     };
     introduce_member_to_existing_peers(&peer_handle, peers)?;
@@ -488,6 +502,7 @@ async fn handle_host_peer_connected(
 }
 
 async fn handle_join_stdin_input(
+    config: &SessionConfig,
     input: Option<JoinStdinInput>,
     join_state: &mut JoinState,
     stdout: &mut tokio::io::Stdout,
@@ -513,6 +528,7 @@ async fn handle_join_stdin_input(
             }
             if let Err(error) = handle_join_command(
                 join_state,
+                &config.download_dir,
                 authority_send,
                 command.clone(),
                 stdout,
@@ -785,6 +801,7 @@ fn emit_peer_runtime_events(
 
 async fn handle_join_command(
     state: &mut JoinState,
+    download_dir: &Path,
     authority_send: &mut SendStream,
     command: MachineCommand,
     stdout: &mut tokio::io::Stdout,
@@ -815,6 +832,32 @@ async fn handle_join_command(
             .await?;
             Ok(())
         }
+        MachineCommand::SendPath {
+            channel_id,
+            to,
+            path,
+            name,
+            mime,
+        } => {
+            ensure_file_transfer_supported(
+                state.host_file_transfer_version,
+                "host",
+                "remote host",
+            )?;
+            send_path_from_join(
+                state,
+                authority_send,
+                transport,
+                peer_tx,
+                self_member,
+                channel_id,
+                to,
+                path,
+                name,
+                mime,
+            )
+            .await
+        }
         MachineCommand::SendFile {
             channel_id,
             to,
@@ -822,87 +865,19 @@ async fn handle_join_command(
             name,
             mime,
         } => {
-            let expanded_path = expand_user_path(&path);
-            let item_kind = if expanded_path.is_dir() {
-                TransferItemKind::Folder
-            } else {
-                TransferItemKind::File
-            };
-            let display_name = expanded_path
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| expanded_path.display().to_string());
-            let ImportedPath { blob, size, .. } = transport
-                .import_path_with_progress(&expanded_path, {
-                    let channel_id = channel_id.clone();
-                    let peer_tx = peer_tx.clone();
-                    let item_kind = item_kind.clone();
-                    let display_name = display_name.clone();
-                    let mut gate = ProgressGate::default();
-                    move |progress| {
-                        if gate.should_emit(&progress) {
-                            let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                                event: transfer_progress_event(
-                                    &channel_id,
-                                    item_kind.clone(),
-                                    &display_name,
-                                    &progress,
-                                    None,
-                                ),
-                            });
-                        }
-                    }
-                })
-                .await
-                .map_err(|error| CliError::transport(error.to_string()))?;
-            let name = name.or(Some(display_name));
-            let open = MachineCommand::OpenChannel {
-                channel_id,
-                kind: ChannelKind::File,
-                to,
-                name,
-                size: Some(size),
-                mime,
-                blob: Some(blob),
-            };
-            let MachineCommand::OpenChannel {
-                channel_id,
-                kind,
-                to,
-                name,
-                size,
-                mime,
-                blob,
-            } = open
-            else {
-                unreachable!("send_file should always lower to open_channel");
-            };
-            let local_event = MachineEvent::ChannelOpened {
-                channel_id: channel_id.clone(),
-                kind: kind.clone(),
-                from: self_member,
-                from_name: state.local_name.clone(),
-                to: to.clone(),
-                name: name.clone(),
-                size,
-                mime: mime.clone(),
-                blob: blob.clone(),
-            };
-            send_peer_command(
+            send_path_from_join(
+                state,
                 authority_send,
-                &MachineCommand::OpenChannel {
-                    channel_id,
-                    kind,
-                    to,
-                    name,
-                    size,
-                    mime,
-                    blob,
-                },
+                transport,
+                peer_tx,
+                self_member,
+                channel_id,
+                to,
+                path,
+                name,
+                mime,
             )
-            .await?;
-            apply_machine_event(state, &local_event);
-            Ok(())
+            .await
         }
         MachineCommand::SendChannelData { channel_id, body } => {
             let event = MachineEvent::ChannelData {
@@ -972,7 +947,8 @@ async fn handle_join_command(
                 size,
             }) = join_pending_file_transfer(state, &self_member, &channel_id)?
             {
-                spawn_join_blob_download(
+                let target_path = receive_target_path(download_dir, &name)?;
+                spawn_join_blob_receive(
                     transport.clone(),
                     peer_tx,
                     PeerTicket {
@@ -983,6 +959,7 @@ async fn handle_join_command(
                     item_kind,
                     name,
                     size,
+                    target_path,
                 );
             }
             Ok(())
@@ -1005,36 +982,9 @@ async fn handle_join_command(
             state.channels.remove(&channel_id);
             Ok(())
         }
-        MachineCommand::ExportChannelFile { channel_id, path } => {
-            let file = join_exportable_file(state, &self_member, &channel_id)?;
-            let expanded_path = expand_user_path(&path);
-            let mut gate = ProgressGate::default();
-            let size = transport
-                .export_path_with_progress(&file.blob, &expanded_path, |progress| {
-                    if gate.should_emit(&progress) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: transfer_progress_event(
-                                &channel_id,
-                                file.item_kind.clone(),
-                                &file.name,
-                                &progress,
-                                file.size,
-                            ),
-                        });
-                    }
-                })
-                .await
-                .map_err(|error| CliError::transport(error.to_string()))?;
-            emit_event(
-                stdout,
-                &MachineEvent::ChannelFileExported {
-                    channel_id,
-                    path: expanded_path.display().to_string(),
-                    size,
-                },
-            )
-            .await
-        }
+        MachineCommand::ExportChannelFile { .. } => Err(CliError::usage(
+            "export_channel_file is no longer supported; accepted transfers are saved automatically",
+        )),
     }
 }
 
@@ -1066,6 +1016,81 @@ async fn send_join_direct_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn send_path_from_join(
+    state: &mut JoinState,
+    authority_send: &mut SendStream,
+    transport: &IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    self_member: MemberId,
+    channel_id: ChannelId,
+    to: skyffla_protocol::room::Route,
+    path: String,
+    name: Option<String>,
+    mime: Option<String>,
+) -> Result<(), CliError> {
+    let expanded_path = expand_user_path(&path);
+    let item_kind = if expanded_path.is_dir() {
+        TransferItemKind::Folder
+    } else {
+        TransferItemKind::File
+    };
+    let display_name = expanded_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| expanded_path.display().to_string());
+    let ImportedPath { blob, size, .. } = transport
+        .import_path_with_progress(&expanded_path, {
+            let channel_id = channel_id.clone();
+            let peer_tx = peer_tx.clone();
+            let item_kind = item_kind.clone();
+            let display_name = display_name.clone();
+            let mut gate = ProgressGate::default();
+            move |progress| {
+                if gate.should_emit(&progress) {
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: transfer_progress_event(
+                            &channel_id,
+                            item_kind.clone(),
+                            &display_name,
+                            &progress,
+                            None,
+                        ),
+                    });
+                }
+            }
+        })
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
+    let name = name.or(Some(display_name));
+    let local_event = MachineEvent::ChannelOpened {
+        channel_id: channel_id.clone(),
+        kind: ChannelKind::File,
+        from: self_member,
+        from_name: state.local_name.clone(),
+        to: to.clone(),
+        name: name.clone(),
+        size: Some(size),
+        mime: mime.clone(),
+        blob: Some(blob.clone()),
+    };
+    send_peer_command(
+        authority_send,
+        &MachineCommand::OpenChannel {
+            channel_id,
+            kind: ChannelKind::File,
+            to,
+            name,
+            size: Some(size),
+            mime,
+            blob: Some(blob),
+        },
+    )
+    .await?;
+    apply_machine_event(state, &local_event);
+    Ok(())
+}
+
 fn expand_user_path(path: &str) -> PathBuf {
     if path == "~" {
         if let Some(home) = std::env::var_os("HOME") {
@@ -1085,6 +1110,174 @@ fn expand_user_path(path: &str) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(candidate)
     }
+}
+
+fn resolve_download_dir(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn sanitized_receive_name(name: &str) -> Result<String, CliError> {
+    let path = Path::new(name);
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CliError::usage(format!("transfer item name {:?} is invalid", name)))?;
+    let file_name = file_name.to_string_lossy().trim().to_string();
+    if file_name.is_empty() || file_name == "." || file_name == ".." {
+        return Err(CliError::usage(format!(
+            "transfer item name {:?} is invalid",
+            name
+        )));
+    }
+    Ok(file_name)
+}
+
+fn receive_target_path(download_dir: &Path, name: &str) -> Result<PathBuf, CliError> {
+    let root = resolve_download_dir(download_dir);
+    std::fs::create_dir_all(&root)
+        .map_err(|error| CliError::local_io(format!("failed to create {}: {error}", root.display())))?;
+    Ok(unique_path_in_dir(&root, &sanitized_receive_name(name)?))
+}
+
+fn unique_path_in_dir(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let source = Path::new(name);
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(name);
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty());
+
+    for index in 1.. {
+        let file_name = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("unique path search should always terminate")
+}
+
+fn ensure_file_transfer_supported(
+    version: Option<ProtocolVersion>,
+    peer_name: &str,
+    side_label: &str,
+) -> Result<(), CliError> {
+    match version {
+        Some(version) if version.is_compatible_with(FILE_TRANSFER_PROTOCOL_VERSION) => Ok(()),
+        Some(version) => Err(CliError::usage(format!(
+            "cannot use send_path with {peer_name}: local file transfer protocol is {}, {side_label} is {}; update the older Skyffla peer",
+            FILE_TRANSFER_PROTOCOL_VERSION, version
+        ))),
+        None => Err(CliError::usage(format!(
+            "cannot use send_path with {peer_name}: {side_label} does not advertise file transfer protocol support; update the older Skyffla peer"
+        ))),
+    }
+}
+
+fn ensure_route_supports_file_transfer(
+    host_member: &MemberId,
+    peers: &BTreeMap<MemberId, PeerHandle>,
+    route: &skyffla_protocol::room::Route,
+) -> Result<(), CliError> {
+    match route {
+        skyffla_protocol::room::Route::All => {
+            for peer in peers.values() {
+                ensure_file_transfer_supported(
+                    peer.file_transfer_version,
+                    &peer.member.name,
+                    "remote peer",
+                )?;
+            }
+            Ok(())
+        }
+        skyffla_protocol::room::Route::Member { member_id } => {
+            if member_id == host_member {
+                return Ok(());
+            }
+            let peer = peers.get(member_id).ok_or_else(|| {
+                CliError::runtime(format!("unknown member {}", member_id.as_str()))
+            })?;
+            ensure_file_transfer_supported(
+                peer.file_transfer_version,
+                &peer.member.name,
+                "remote peer",
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_path_from_host(
+    room: &mut RoomEngine,
+    sender: &MemberId,
+    transport: &IrohTransport,
+    host_tx: &mpsc::UnboundedSender<HostInput>,
+    stdout: &mut tokio::io::Stdout,
+    peers: &mut BTreeMap<MemberId, PeerHandle>,
+    channel_id: ChannelId,
+    to: skyffla_protocol::room::Route,
+    path: String,
+    name: Option<String>,
+    mime: Option<String>,
+) -> Result<(), CliError> {
+    let expanded_path = expand_user_path(&path);
+    let item_kind = if expanded_path.is_dir() {
+        TransferItemKind::Folder
+    } else {
+        TransferItemKind::File
+    };
+    let display_name = expanded_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| expanded_path.display().to_string());
+    let mut gate = ProgressGate::default();
+    let ImportedPath { blob, size, .. } = transport
+        .import_path_with_progress(&expanded_path, |progress| {
+            if gate.should_emit(&progress) {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: transfer_progress_event(
+                        &channel_id,
+                        item_kind.clone(),
+                        &display_name,
+                        &progress,
+                        None,
+                    ),
+                });
+            }
+        })
+        .await
+        .map_err(|error| CliError::transport(error.to_string()))?;
+    let routed = room
+        .open_channel(
+            sender,
+            channel_id,
+            ChannelKind::File,
+            to,
+            name.or(Some(display_name)),
+            Some(size),
+            mime,
+            Some(blob),
+        )
+        .map_err(room_error)?;
+    deliver_routed_events(room.host_member(), routed, stdout, peers).await
 }
 
 fn transfer_progress_event(
@@ -1109,7 +1302,7 @@ fn host_pending_file_download(
     peers: &BTreeMap<MemberId, PeerHandle>,
     self_member: &MemberId,
     channel_id: &ChannelId,
-) -> Result<Option<(PeerTicket, ExportableFileTransfer)>, CliError> {
+) -> Result<Option<(PeerTicket, FileTransferTarget)>, CliError> {
     let Some(channel) = room.channel(channel_id) else {
         return Err(CliError::runtime(format!(
             "unknown channel {}",
@@ -1147,7 +1340,7 @@ fn host_pending_file_download(
     };
     Ok(Some((
         PeerTicket { encoded: ticket },
-        ExportableFileTransfer {
+        FileTransferTarget {
             blob,
             item_kind,
             name: channel
@@ -1158,60 +1351,14 @@ fn host_pending_file_download(
     )))
 }
 
-fn host_exportable_file(
-    room: &RoomEngine,
-    self_member: &MemberId,
-    channel_id: &ChannelId,
-    host_state: &HostState,
-) -> Result<ExportableFileTransfer, CliError> {
-    let channel = room
-        .channel(channel_id)
-        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
-    if channel.kind != ChannelKind::File {
-        return Err(CliError::runtime(format!(
-            "channel {} is not a file channel",
-            channel_id.as_str()
-        )));
-    }
-    if !channel.participants.contains(self_member) {
-        return Err(CliError::runtime(format!(
-            "member {} is not part of channel {}",
-            self_member.as_str(),
-            channel_id.as_str()
-        )));
-    }
-    if !host_state.ready_file_channels.contains(channel_id) {
-        return Err(CliError::runtime(format!(
-            "file channel {} is not ready yet",
-            channel_id.as_str()
-        )));
-    }
-    let blob = channel.blob.ok_or_else(|| {
-        CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
-            channel_id.as_str()
-        ))
-    })?;
-    Ok(ExportableFileTransfer {
-        blob: blob.clone(),
-        item_kind: match blob.format {
-            skyffla_protocol::room::BlobFormat::Blob => TransferItemKind::File,
-            skyffla_protocol::room::BlobFormat::Collection => TransferItemKind::Folder,
-        },
-        name: channel
-            .name
-            .unwrap_or_else(|| channel_id.as_str().to_string()),
-        size: channel.size,
-    })
-}
-
 async fn handle_host_command(
     room: &mut RoomEngine,
     sender: &MemberId,
     command: MachineCommand,
+    download_dir: &Path,
     stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
-    host_state: &mut HostState,
+    _host_state: &mut HostState,
     transport: &IrohTransport,
     host_tx: &mpsc::UnboundedSender<HostInput>,
     local_command: bool,
@@ -1268,6 +1415,29 @@ async fn handle_host_command(
                 .map_err(room_error)?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
+        MachineCommand::SendPath {
+            channel_id,
+            to,
+            path,
+            name,
+            mime,
+        } => {
+            ensure_route_supports_file_transfer(room.host_member(), peers, &to)?;
+            send_path_from_host(
+                room,
+                sender,
+                transport,
+                host_tx,
+                stdout,
+                peers,
+                channel_id,
+                to,
+                path,
+                name,
+                mime,
+            )
+            .await
+        }
         MachineCommand::SendFile {
             channel_id,
             to,
@@ -1280,84 +1450,24 @@ async fn handle_host_command(
                     "send_file is only valid as a local machine command",
                 ));
             }
-            let expanded_path = expand_user_path(&path);
-            let item_kind = if expanded_path.is_dir() {
-                TransferItemKind::Folder
-            } else {
-                TransferItemKind::File
-            };
-            let display_name = expanded_path
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| expanded_path.display().to_string());
-            let mut gate = ProgressGate::default();
-            let ImportedPath { blob, size, .. } = transport
-                .import_path_with_progress(&expanded_path, |progress| {
-                    if gate.should_emit(&progress) {
-                        let _ = host_tx.send(HostInput::LocalEvent {
-                            event: transfer_progress_event(
-                                &channel_id,
-                                item_kind.clone(),
-                                &display_name,
-                                &progress,
-                                None,
-                            ),
-                        });
-                    }
-                })
-                .await
-                .map_err(|error| CliError::transport(error.to_string()))?;
-            let name = name.or(Some(display_name));
-            let routed = room
-                .open_channel(
-                    sender,
-                    channel_id.clone(),
-                    ChannelKind::File,
-                    to,
-                    name,
-                    Some(size),
-                    mime,
-                    Some(blob),
-                )
-                .map_err(room_error)?;
-            host_state.ready_file_channels.insert(channel_id.clone());
-            deliver_routed_events(room.host_member(), routed, stdout, peers).await
-        }
-        MachineCommand::ExportChannelFile { channel_id, path } => {
-            if !local_command {
-                return Err(CliError::usage(
-                    "export_channel_file is only valid as a local machine command",
-                ));
-            }
-            let file = host_exportable_file(room, sender, &channel_id, host_state)?;
-            let expanded_path = expand_user_path(&path);
-            let mut gate = ProgressGate::default();
-            let size = transport
-                .export_path_with_progress(&file.blob, &expanded_path, |progress| {
-                    if gate.should_emit(&progress) {
-                        let _ = host_tx.send(HostInput::LocalEvent {
-                            event: transfer_progress_event(
-                                &channel_id,
-                                file.item_kind.clone(),
-                                &file.name,
-                                &progress,
-                                file.size,
-                            ),
-                        });
-                    }
-                })
-                .await
-                .map_err(|error| CliError::transport(error.to_string()))?;
-            emit_event(
+            send_path_from_host(
+                room,
+                sender,
+                transport,
+                host_tx,
                 stdout,
-                &MachineEvent::ChannelFileExported {
-                    channel_id,
-                    path: expanded_path.display().to_string(),
-                    size,
-                },
+                peers,
+                channel_id,
+                to,
+                path,
+                name,
+                mime,
             )
             .await
         }
+        MachineCommand::ExportChannelFile { .. } => Err(CliError::usage(
+            "export_channel_file is no longer supported; accepted transfers are saved automatically",
+        )),
         MachineCommand::AcceptChannel { channel_id } => {
             let routed = room
                 .accept_channel(sender, &channel_id)
@@ -1366,7 +1476,8 @@ async fn handle_host_command(
                 if let Some((provider, file)) =
                     host_pending_file_download(room, peers, sender, &channel_id)?
                 {
-                    spawn_host_blob_download(
+                    let target_path = receive_target_path(download_dir, &file.name)?;
+                    spawn_host_blob_receive(
                         transport.clone(),
                         host_tx.clone(),
                         provider,
@@ -1375,6 +1486,7 @@ async fn handle_host_command(
                         file.item_kind,
                         file.name,
                         file.size,
+                        target_path,
                     );
                 }
             }
@@ -1444,6 +1556,7 @@ fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
         MachineCommand::LeaveRoom => None,
         MachineCommand::SendChat { .. } => None,
         MachineCommand::SendFile { channel_id, .. }
+        | MachineCommand::SendPath { channel_id, .. }
         | MachineCommand::OpenChannel { channel_id, .. }
         | MachineCommand::AcceptChannel { channel_id }
         | MachineCommand::RejectChannel { channel_id, .. }
