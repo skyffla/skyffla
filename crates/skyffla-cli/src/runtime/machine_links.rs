@@ -3,14 +3,13 @@ use std::path::PathBuf;
 
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind, TransferPhase,
+    ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind, TransferOffer,
+    TransferPhase,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_protocol::ProtocolVersion;
 use skyffla_session::SessionPeer;
-use skyffla_transport::{
-    ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
-};
+use skyffla_transport::{ConnectionStatus, IrohConnection, IrohTransport, PeerTicket};
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
@@ -62,6 +61,15 @@ pub(crate) enum HostInput {
     LocalEvent {
         event: MachineEvent,
     },
+    PreparedTransferReady {
+        channel_id: ChannelId,
+        size: u64,
+        transfer: TransferOffer,
+    },
+    PreparedTransferFailed {
+        channel_id: ChannelId,
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -83,6 +91,15 @@ pub(crate) enum JoinPeerInput {
     },
     LocalEvent {
         event: MachineEvent,
+    },
+    PreparedTransferReady {
+        channel_id: ChannelId,
+        size: u64,
+        transfer: TransferOffer,
+    },
+    PreparedTransferFailed {
+        channel_id: ChannelId,
+        message: String,
     },
 }
 
@@ -449,7 +466,6 @@ pub(crate) fn spawn_join_direct_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
         match transport
             .receive_file_with_progress(
                 &provider,
@@ -457,18 +473,16 @@ pub(crate) fn spawn_join_direct_receive(
                 &expected_hash,
                 &target_path,
                 |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: TransferItemKind::File,
-                                name: name.clone(),
-                                phase: TransferPhase::Downloading,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::File,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
                 },
             )
             .await
@@ -506,7 +520,6 @@ pub(crate) fn spawn_host_direct_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
         match transport
             .receive_file_with_progress(
                 &provider,
@@ -514,18 +527,16 @@ pub(crate) fn spawn_host_direct_receive(
                 &expected_hash,
                 &target_path,
                 |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = host_tx.send(HostInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: TransferItemKind::File,
-                                name: name.clone(),
-                                phase: TransferPhase::Downloading,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::File,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
                 },
             )
             .await
@@ -563,7 +574,6 @@ pub(crate) fn spawn_join_direct_directory_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
         match transport
             .receive_directory_with_progress(
                 &provider,
@@ -571,18 +581,16 @@ pub(crate) fn spawn_join_direct_directory_receive(
                 &transfer_digest,
                 &target_path,
                 |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: TransferItemKind::Folder,
-                                name: name.clone(),
-                                phase: TransferPhase::Downloading,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::Folder,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
                 },
             )
             .await
@@ -630,7 +638,6 @@ pub(crate) fn spawn_host_direct_directory_receive(
     target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
         match transport
             .receive_directory_with_progress(
                 &provider,
@@ -638,18 +645,16 @@ pub(crate) fn spawn_host_direct_directory_receive(
                 &transfer_digest,
                 &target_path,
                 |progress| {
-                    if should_emit_progress(&mut last_step, &progress, size) {
-                        let _ = host_tx.send(HostInput::LocalEvent {
-                            event: MachineEvent::TransferProgress {
-                                channel_id: channel_id.clone(),
-                                item_kind: TransferItemKind::Folder,
-                                name: name.clone(),
-                                phase: TransferPhase::Downloading,
-                                bytes_complete: progress.bytes_complete,
-                                bytes_total: size.or(progress.bytes_total),
-                            },
-                        });
-                    }
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::Folder,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
                 },
             )
             .await
@@ -684,21 +689,6 @@ pub(crate) fn spawn_host_direct_directory_receive(
             }
         }
     });
-}
-
-fn should_emit_progress(
-    last_step: &mut Option<u64>,
-    progress: &LocalTransferProgress,
-    total_override: Option<u64>,
-) -> bool {
-    let total = total_override.or(progress.bytes_total);
-    let step = match total {
-        Some(total) if total > 0 => (progress.bytes_complete.saturating_mul(100) / total) / 10,
-        _ => progress.bytes_complete / (256 * 1024),
-    };
-    let emit = *last_step != Some(step);
-    *last_step = Some(step);
-    emit
 }
 
 pub(crate) fn introduce_member_to_existing_peers(
@@ -769,6 +759,7 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberJoined { .. }
         | MachineEvent::MemberLeft { .. }
         | MachineEvent::RoomClosed { .. }
+        | MachineEvent::ChannelTransferReady { .. }
         | MachineEvent::ChannelPathReceived { .. }
         | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,

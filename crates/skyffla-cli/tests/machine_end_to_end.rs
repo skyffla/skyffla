@@ -412,12 +412,18 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
             && event.get("channel_id") == Some(&Value::String("f1".into()))
             && event.get("name") == Some(&Value::String("report.txt".into()))
             && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
+            && event.pointer("/transfer/integrity") == Some(&Value::Null)
+    })
+    .await?;
+    beta.send("/channel accept f1").await?;
+    beta.expect_event("file transfer ready", |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("f1".into()))
+            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
             && event.pointer("/transfer/integrity/algorithm")
                 == Some(&Value::String("blake3".into()))
     })
     .await?;
-
-    beta.send("/channel accept f1").await?;
     beta.expect_event("download progress", |event| {
         event.get("type") == Some(&Value::String("transfer_progress".into()))
             && event.get("channel_id") == Some(&Value::String("f1".into()))
@@ -579,6 +585,21 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
         .expect_event("broadcast file opened", |event| {
             event.get("type") == Some(&Value::String("channel_opened".into()))
                 && event.get("channel_id") == Some(&Value::String("f-all".into()))
+        })
+        .await?;
+    beta.expect_event("broadcast file ready", |event| {
+        event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+            && event.get("channel_id") == Some(&Value::String("f-all".into()))
+            && event.pointer("/transfer/integrity/algorithm")
+                == Some(&Value::String("blake3".into()))
+    })
+    .await?;
+    gamma
+        .expect_event("broadcast file ready", |event| {
+            event.get("type") == Some(&Value::String("channel_transfer_ready".into()))
+                && event.get("channel_id") == Some(&Value::String("f-all".into()))
+                && event.pointer("/transfer/integrity/algorithm")
+                    == Some(&Value::String("blake3".into()))
         })
         .await?;
 

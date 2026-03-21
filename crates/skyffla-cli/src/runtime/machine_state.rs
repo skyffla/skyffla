@@ -17,6 +17,7 @@ pub(super) struct JoinState {
     pub(super) member_tickets: BTreeMap<MemberId, String>,
     pub(super) channels: BTreeMap<ChannelId, JoinChannelState>,
     pub(super) peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
+    pub(super) pending_accepted_files: BTreeSet<ChannelId>,
     pub(super) local_name: String,
     pub(super) local_fingerprint: Option<String>,
     pub(super) local_ticket: String,
@@ -44,7 +45,9 @@ pub(super) struct PendingFileTransfer {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct HostState;
+pub(super) struct HostState {
+    pub(super) pending_accepted_files: BTreeSet<ChannelId>,
+}
 
 pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
     track_join_state(state, event);
@@ -98,10 +101,21 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                 );
             }
         }
+        MachineEvent::ChannelTransferReady {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            if let Some(channel) = state.channels.get_mut(channel_id) {
+                channel.size = *size;
+                channel.transfer = Some(transfer.clone());
+            }
+        }
         MachineEvent::ChannelPathReceived { channel_id, .. } => {
             if let Some(channel) = state.channels.get_mut(channel_id) {
                 channel.local_file_ready = true;
             }
+            state.pending_accepted_files.remove(channel_id);
         }
         MachineEvent::ChannelClosed { channel_id, .. }
         | MachineEvent::ChannelRejected { channel_id, .. } => {
@@ -109,6 +123,15 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                 remove_join_channel_participant(state, channel_id, &member_id);
             } else {
                 state.channels.remove(channel_id);
+            }
+            let keep_pending = state.self_member.as_ref().is_some_and(|self_member| {
+                state
+                    .channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.participants.contains(self_member))
+            });
+            if !keep_pending {
+                state.pending_accepted_files.remove(channel_id);
             }
         }
         _ => {}
@@ -248,7 +271,14 @@ pub(super) fn join_pending_file_transfer(
     }))
 }
 
-pub(super) fn apply_host_event(_state: &mut HostState, _event: &MachineEvent) {}
+pub(super) fn apply_host_event(state: &mut HostState, event: &MachineEvent) {
+    match event {
+        MachineEvent::ChannelPathReceived { channel_id, .. } => {
+            state.pending_accepted_files.remove(channel_id);
+        }
+        _ => {}
+    }
+}
 
 fn track_join_state(state: &mut JoinState, event: &MachineEvent) {
     match event {

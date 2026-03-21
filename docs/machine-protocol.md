@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `2.0`
+- `2.1`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -154,8 +154,10 @@ Rules:
 
 Current behavior:
 
-- regular files: prepare direct-transfer metadata, open a `file` channel with
-  `transfer`, then stream bytes over the native transfer path
+- regular files: open a provisional `file` channel early with
+  `transfer.item_kind = "file"` and `transfer.integrity = null`, allow the
+  receiver to accept or reject immediately, then publish final transfer
+  metadata with `update_channel_transfer` once preparation completes
 - directories: prepare a directory manifest, open a `file` channel with
   `transfer.item_kind = "folder"` and a whole-transfer digest, then stream
   files over the native transfer path
@@ -174,11 +176,32 @@ download directory. There is no separate export step in the normal flow.
 }
 ```
 
+### `update_channel_transfer`
+
+`update_channel_transfer` finalizes a previously opened provisional file
+channel once the sender has finished preparing the transfer metadata.
+
+```json
+{
+  "type":"update_channel_transfer",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
+}
+```
+
 ### `accept_channel`
 
 ```json
 {"type":"accept_channel","channel_id":"c7"}
 ```
+
+For provisional file channels, `accept_channel` may arrive before the sender
+has finished preparing the final integrity metadata. In that case the transfer
+stays accepted but waiting until a matching `channel_transfer_ready` arrives.
 
 ### `reject_channel`
 
@@ -275,11 +298,32 @@ directory.
 }
 ```
 
+For file channels, `transfer.integrity` may be absent in the initial
+`channel_opened` event while the sender is still preparing the transfer.
+
 ### `channel_accepted`
 
 ```json
 {"type":"channel_accepted","channel_id":"c7","member_id":"m1","member_name":"alpha"}
 ```
+
+### `channel_transfer_ready`
+
+```json
+{
+  "type":"channel_transfer_ready",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
+}
+```
+
+This event updates a previously opened provisional file channel with the final
+transfer metadata. A receiver that already accepted the file should begin the
+native receive path once this event arrives.
 
 ### `channel_rejected`
 
@@ -332,6 +376,9 @@ This event is the normal receive completion signal for accepted transfers.
 - `send_channel_data.body` must not be empty
 - `member_snapshot.members` must not be empty
 - `file` channels require transfer metadata
+- provisional file channels may omit `transfer.integrity` in the initial
+  `channel_opened`, but the sender must later publish final metadata with
+  `update_channel_transfer` before bytes move
 - non-file channels must not include transfer metadata
 - `send_path` is a local machine command, not a peer-forwarded room command
 - accepted file and folder transfers save automatically; wrappers do not need a

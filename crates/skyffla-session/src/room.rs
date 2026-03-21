@@ -283,6 +283,55 @@ impl RoomEngine {
         )
     }
 
+    pub fn update_channel_transfer(
+        &mut self,
+        member_id: &MemberId,
+        channel_id: &ChannelId,
+        size: Option<u64>,
+        transfer: TransferOffer,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        self.require_member(member_id)?;
+        let channel = self
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| RoomEngineError::UnknownChannel {
+                channel_id: channel_id.clone(),
+            })?;
+        if channel.opener != *member_id {
+            return Err(RoomEngineError::NotChannelOpener {
+                member_id: member_id.clone(),
+                channel_id: channel_id.clone(),
+            });
+        }
+        if channel.kind != ChannelKind::File {
+            return Err(RoomEngineError::ChannelTransferUpdateUnsupported {
+                channel_id: channel_id.clone(),
+                kind: channel.kind.clone(),
+            });
+        }
+
+        let event = MachineEvent::ChannelTransferReady {
+            channel_id: channel_id.clone(),
+            size,
+            transfer,
+        };
+        event.validate()?;
+        channel.size = event_size(&event);
+        channel.transfer = event_transfer(&event);
+
+        Ok(channel
+            .participants
+            .iter()
+            .filter(|recipient| *recipient != member_id)
+            .filter(|recipient| self.members.contains_key(*recipient))
+            .cloned()
+            .map(|recipient| RoutedEvent {
+                recipient,
+                event: event.clone(),
+            })
+            .collect())
+    }
+
     pub fn reject_channel(
         &mut self,
         member_id: &MemberId,
@@ -491,7 +540,9 @@ fn event_name(event: &MachineEvent) -> Option<String> {
 
 fn event_size(event: &MachineEvent) -> Option<u64> {
     match event {
-        MachineEvent::ChannelOpened { size, .. } => *size,
+        MachineEvent::ChannelOpened { size, .. } | MachineEvent::ChannelTransferReady { size, .. } => {
+            *size
+        }
         _ => None,
     }
 }
@@ -506,6 +557,7 @@ fn event_mime(event: &MachineEvent) -> Option<String> {
 fn event_transfer(event: &MachineEvent) -> Option<TransferOffer> {
     match event {
         MachineEvent::ChannelOpened { transfer, .. } => transfer.clone(),
+        MachineEvent::ChannelTransferReady { transfer, .. } => Some(transfer.clone()),
         _ => None,
     }
 }
@@ -526,7 +578,15 @@ pub enum RoomEngineError {
         member_id: MemberId,
         channel_id: ChannelId,
     },
+    NotChannelOpener {
+        member_id: MemberId,
+        channel_id: ChannelId,
+    },
     ChannelDataUnsupported {
+        channel_id: ChannelId,
+        kind: ChannelKind,
+    },
+    ChannelTransferUpdateUnsupported {
         channel_id: ChannelId,
         kind: ChannelKind,
     },
@@ -557,10 +617,29 @@ impl fmt::Display for RoomEngineError {
                     channel_id.as_str()
                 )
             }
+            Self::NotChannelOpener {
+                member_id,
+                channel_id,
+            } => {
+                write!(
+                    f,
+                    "member {} did not open channel {}",
+                    member_id.as_str(),
+                    channel_id.as_str()
+                )
+            }
             Self::ChannelDataUnsupported { channel_id, kind } => {
                 write!(
                     f,
                     "channel {} of kind {:?} does not support inline channel data",
+                    channel_id.as_str(),
+                    kind
+                )
+            }
+            Self::ChannelTransferUpdateUnsupported { channel_id, kind } => {
+                write!(
+                    f,
+                    "channel {} of kind {:?} does not support transfer updates",
                     channel_id.as_str(),
                     kind
                 )
@@ -593,6 +672,13 @@ mod tests {
                 algorithm: "blake3".into(),
                 value: "feedbeef".into(),
             }),
+        }
+    }
+
+    fn provisional_file_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: None,
         }
     }
 
@@ -795,6 +881,49 @@ mod tests {
             late_data,
             Err(RoomEngineError::ChannelDataUnsupported { .. })
         ));
+    }
+
+    #[test]
+    fn file_channel_transfer_update_routes_and_updates_room_state() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("file1"),
+            ChannelKind::File,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            Some("report.txt".into()),
+            Some(5),
+            Some("text/plain".into()),
+            Some(provisional_file_transfer_offer()),
+        )
+        .expect("file channel opens");
+
+        let routed = room
+            .update_channel_transfer(
+                &host_member,
+                &channel_id("file1"),
+                Some(5),
+                file_transfer_offer(),
+            )
+            .expect("transfer update succeeds");
+
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].recipient, beta.member.member_id);
+        assert!(matches!(
+            routed[0].event,
+            MachineEvent::ChannelTransferReady { .. }
+        ));
+        assert_eq!(
+            room.channel(&channel_id("file1"))
+                .expect("channel present")
+                .transfer,
+            Some(file_transfer_offer())
+        );
     }
 
     #[test]

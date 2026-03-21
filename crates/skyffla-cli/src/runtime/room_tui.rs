@@ -549,6 +549,9 @@ fn local_command_feedback_lines(
                     name: name.clone(),
                     size: None,
                     is_outgoing: true,
+                    transfer_ready: item_kind != TransferItemKind::File,
+                    accepted: false,
+                    accepted_by: None,
                 });
             let route = match to {
                 Route::All => "all".to_string(),
@@ -562,10 +565,19 @@ fn local_command_feedback_lines(
             ))]
         }
         MachineCommand::AcceptChannel { channel_id } => {
+            let Some(file) = state.file_channels.get(channel_id) else {
+                return vec![RoomLine::System(format!("accepting {}", channel_id.as_str()))];
+            };
             let label = state
                 .channel_summary(channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
-            vec![RoomLine::System(format!("accepting {label}"))]
+            if file.transfer_ready {
+                vec![RoomLine::System(format!("accepting {label}"))]
+            } else {
+                vec![RoomLine::System(format!(
+                    "accepted {label}; waiting for sender to finish preparing"
+                ))]
+            }
         }
         MachineCommand::RejectChannel { channel_id, .. } => {
             let label = state
@@ -814,6 +826,9 @@ struct FileChannelUiState {
     name: String,
     size: Option<u64>,
     is_outgoing: bool,
+    transfer_ready: bool,
+    accepted: bool,
+    accepted_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -903,12 +918,45 @@ fn update_transfer_status_line(
                     .get(channel_id)
                     .is_some_and(|channel| channel.is_outgoing)
             {
-                ui.set_status(format!(
-                    "waiting for accept {} ({})",
-                    item_kind_label(item_kind.clone()),
-                    name
-                ));
+                let status = match state.file_channels.get(channel_id) {
+                    Some(channel) if channel.accepted => channel
+                        .accepted_by
+                        .as_ref()
+                        .map(|accepter| {
+                            format!(
+                                "accepted by {}; finishing preparation {} ({})",
+                                accepter,
+                                item_kind_label(item_kind.clone()),
+                                name
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!(
+                                "starting transfer {} ({})",
+                                item_kind_label(item_kind.clone()),
+                                name
+                            )
+                        }),
+                    _ => format!("waiting for accept {} ({})", item_kind_label(item_kind.clone()), name),
+                };
+                ui.set_status(status);
                 return Vec::new();
+            }
+            if matches!(phase, TransferPhase::Preparing) {
+                if let Some(channel) = state.file_channels.get(channel_id) {
+                    if channel.is_outgoing && channel.accepted {
+                        if let Some(accepter) = &channel.accepted_by {
+                            ui.set_status(format!(
+                                "accepted by {}; finishing preparation {} ({}) {}",
+                                accepter,
+                                item_kind_label(item_kind.clone()),
+                                name,
+                                progress
+                            ));
+                            return Vec::new();
+                        }
+                    }
+                }
             }
             ui.set_status(format!(
                 "{} {} ({}) {}",
@@ -940,6 +988,36 @@ fn update_transfer_status_line(
             if state.active_progress_channel.as_ref() == Some(channel_id) {
                 state.clear_active_progress_if_matches(channel_id);
                 ui.clear_status();
+            }
+        }
+        MachineEvent::ChannelAccepted {
+            channel_id,
+            member_id,
+            member_name,
+            ..
+        } => {
+            if let Some(channel) = state.file_channels.get(channel_id).filter(|channel| channel.is_outgoing) {
+                let accepter = state.display_member_name_with_fallback(member_name, member_id);
+                let status = if state
+                    .transfer_metrics(channel_id)
+                    .is_some_and(|metrics| matches!(metrics.phase, TransferPhase::Preparing))
+                    || !channel.transfer_ready
+                {
+                    format!(
+                        "accepted by {}; finishing preparation {} ({})",
+                        accepter,
+                        item_kind_label(channel.item_kind.clone()),
+                        channel.name
+                    )
+                } else {
+                    format!(
+                        "accepted by {}; starting transfer {} ({})",
+                        accepter,
+                        item_kind_label(channel.item_kind.clone()),
+                        channel.name
+                    )
+                };
+                ui.set_status(status);
             }
         }
         MachineEvent::ChannelRejected { channel_id, .. }
@@ -1086,6 +1164,11 @@ fn format_room_event_lines(
                         name: display_name.clone(),
                         size,
                         is_outgoing: !is_incoming,
+                        transfer_ready: transfer
+                            .as_ref()
+                            .is_some_and(|offer| offer.integrity.is_some()),
+                        accepted: false,
+                        accepted_by: None,
                     },
                 );
                 if is_incoming
@@ -1129,17 +1212,32 @@ fn format_room_event_lines(
             member_id,
             ..
         } => {
+            let accepter = state.display_member_name_with_fallback(&member_name, &member_id);
+            if let Some(channel) = state.file_channels.get_mut(&channel_id) {
+                channel.accepted = true;
+                channel.accepted_by = Some(accepter.clone());
+            }
             if state.self_member.as_ref() == Some(&member_id) {
                 state.pending_incoming_files.retain(|id| id != &channel_id);
             }
             let label = state
                 .channel_summary(&channel_id)
                 .unwrap_or_else(|| channel_id.as_str().to_string());
-            let member = state.display_member_name_with_fallback(&member_name, &member_id);
             (
-                vec![RoomLine::System(format!("{member} accepted {label}"))],
+                vec![RoomLine::System(format!("{accepter} accepted {label}"))],
                 None,
             )
+        }
+        MachineEvent::ChannelTransferReady {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            if let Some(channel) = state.file_channels.get_mut(&channel_id) {
+                channel.size = size;
+                channel.transfer_ready = transfer.integrity.is_some();
+            }
+            (Vec::new(), None)
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -1513,6 +1611,9 @@ mod tests {
                 name: "demo.txt".into(),
                 size: Some(4),
                 is_outgoing: false,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
         match parse_room_tui_input("/accept", &mut state).unwrap() {
@@ -1588,6 +1689,34 @@ mod tests {
     }
 
     #[test]
+    fn accepting_provisional_file_shows_waiting_message() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let channel_id = ChannelId::new("f1").unwrap();
+        state.file_channels.insert(
+            channel_id.clone(),
+            FileChannelUiState {
+                item_kind: TransferItemKind::File,
+                name: "big.bin".into(),
+                size: Some(32),
+                is_outgoing: false,
+                transfer_ready: false,
+                accepted: false,
+                accepted_by: None,
+            },
+        );
+
+        let lines = local_command_feedback_lines(
+            &mut state,
+            &MachineCommand::AcceptChannel { channel_id },
+        );
+
+        assert_eq!(
+            stringify_room_lines(lines),
+            vec!["accepted file big.bin 32B; waiting for sender to finish preparing"]
+        );
+    }
+
+    #[test]
     fn interactive_tui_keeps_transfer_progress_out_of_event_log() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
@@ -1638,6 +1767,9 @@ mod tests {
                 name: "report.txt".into(),
                 size: Some(16),
                 is_outgoing: true,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
 
@@ -1673,6 +1805,9 @@ mod tests {
                 name: "big.bin".into(),
                 size: Some(32),
                 is_outgoing: true,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
 
@@ -1708,6 +1843,9 @@ mod tests {
                 name: "big.bin".into(),
                 size: Some(32),
                 is_outgoing: true,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
 
@@ -1728,6 +1866,87 @@ mod tests {
     }
 
     #[test]
+    fn interactive_tui_shows_starting_transfer_if_accept_arrived_during_prepare() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
+        let channel_id = ChannelId::new("f1").unwrap();
+        state.file_channels.insert(
+            channel_id.clone(),
+            FileChannelUiState {
+                item_kind: TransferItemKind::File,
+                name: "big.bin".into(),
+                size: Some(32),
+                is_outgoing: true,
+                transfer_ready: true,
+                accepted: true,
+                accepted_by: Some("beta".into()),
+            },
+        );
+
+        apply_room_event(
+            &mut state,
+            &mut ui,
+            MachineEvent::TransferProgress {
+                channel_id,
+                item_kind: TransferItemKind::File,
+                phase: TransferPhase::Preparing,
+                name: "big.bin".into(),
+                bytes_complete: 32,
+                bytes_total: Some(32),
+            },
+        );
+
+        assert_eq!(
+            ui.status_text(),
+            Some("accepted by beta; finishing preparation file (big.bin)")
+        );
+    }
+
+    #[test]
+    fn interactive_tui_updates_sender_status_immediately_on_accept_during_prepare() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
+        state.members.insert(MemberId::new("m2").unwrap(), "beta".into());
+        let channel_id = ChannelId::new("f1").unwrap();
+        state.file_channels.insert(
+            channel_id.clone(),
+            FileChannelUiState {
+                item_kind: TransferItemKind::File,
+                name: "big.bin".into(),
+                size: Some(32),
+                is_outgoing: true,
+                transfer_ready: false,
+                accepted: false,
+                accepted_by: None,
+            },
+        );
+        state.transfer_metrics.insert(
+            channel_id.clone(),
+            TransferUiMetrics {
+                phase: TransferPhase::Preparing,
+                started_at: Instant::now(),
+                bytes_complete: 16,
+                bytes_total: Some(32),
+            },
+        );
+
+        apply_room_event(
+            &mut state,
+            &mut ui,
+            MachineEvent::ChannelAccepted {
+                channel_id,
+                member_id: MemberId::new("m2").unwrap(),
+                member_name: "beta".into(),
+            },
+        );
+
+        assert_eq!(
+            ui.status_text(),
+            Some("accepted by beta; finishing preparation file (big.bin)")
+        );
+    }
+
+    #[test]
     fn interactive_tui_logs_sender_completion_and_clears_status() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
@@ -1739,6 +1958,9 @@ mod tests {
                 name: "report.txt".into(),
                 size: Some(16),
                 is_outgoing: true,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
 
@@ -1785,6 +2007,9 @@ mod tests {
                 name: "report.txt".into(),
                 size: Some(16),
                 is_outgoing: false,
+                transfer_ready: true,
+                accepted: false,
+                accepted_by: None,
             },
         );
         state.active_progress_channel = Some(channel_id.clone());

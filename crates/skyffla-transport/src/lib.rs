@@ -940,6 +940,7 @@ async fn receive_verified_file(
     let mut hasher = blake3::Hasher::new();
     let mut bytes_complete = 0_u64;
     let mut credit_pending = 0_u64;
+    let mut credit_stream_open = true;
     let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
     write_transfer_credit(credit_send, TRANSFER_WINDOW_BYTES, "receiver credit").await?;
     loop {
@@ -959,9 +960,18 @@ async fn receive_verified_file(
         hasher.update(&buffer[..read]);
         bytes_complete = bytes_complete.saturating_add(read as u64);
         credit_pending = credit_pending.saturating_add(read as u64);
-        if credit_pending >= TRANSFER_CREDIT_GRANT_BYTES && bytes_complete < expected_size {
-            write_transfer_credit(credit_send, credit_pending, "receiver credit").await?;
-            credit_pending = 0;
+        if credit_stream_open
+            && credit_pending >= TRANSFER_CREDIT_GRANT_BYTES
+            && bytes_complete < expected_size
+        {
+            if write_transfer_credit(credit_send, credit_pending, "receiver credit")
+                .await
+                .is_ok()
+            {
+                credit_pending = 0;
+            } else {
+                credit_stream_open = false;
+            }
         }
         on_bytes_complete(bytes_complete);
     }
@@ -1154,6 +1164,7 @@ async fn receive_directory_entry(
     let mut hasher = blake3::Hasher::new();
     let mut bytes_complete = 0_u64;
     let mut credit_pending = 0_u64;
+    let mut credit_stream_open = true;
     let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
     while bytes_complete < entry.size {
         let chunk_len = (entry.size - bytes_complete).min(buffer.len() as u64) as usize;
@@ -1176,9 +1187,18 @@ async fn receive_directory_entry(
         bytes_complete = bytes_complete.saturating_add(read as u64);
         credit_pending = credit_pending.saturating_add(read as u64);
         let _ = progress_tx.send(read as u64);
-        if credit_pending >= TRANSFER_CREDIT_GRANT_BYTES && bytes_complete < entry.size {
-            write_transfer_credit(&mut send, credit_pending, "receiver credit").await?;
-            credit_pending = 0;
+        if credit_stream_open
+            && credit_pending >= TRANSFER_CREDIT_GRANT_BYTES
+            && bytes_complete < entry.size
+        {
+            if write_transfer_credit(&mut send, credit_pending, "receiver credit")
+                .await
+                .is_ok()
+            {
+                credit_pending = 0;
+            } else {
+                credit_stream_open = false;
+            }
         }
     }
     file.flush()

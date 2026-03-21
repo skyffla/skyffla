@@ -9,7 +9,7 @@ use skyffla_protocol::room::{
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
 use skyffla_protocol::{ProtocolVersion, FILE_TRANSFER_PROTOCOL_VERSION};
-use skyffla_session::room::{RoomEngine, RoutedEvent};
+use skyffla_session::room::{RoomEngine, RoomEngineError, RoutedEvent};
 use skyffla_session::{
     state_changed_event, RuntimeEvent, SessionEvent, SessionMachine, SessionPeer,
 };
@@ -134,6 +134,202 @@ fn spawn_host_transfer_progress_forwarder(
     progress_tx
 }
 
+fn spawn_host_prepare_path_task(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+    channel_id: ChannelId,
+    path: PathBuf,
+    item_kind: TransferItemKind,
+    display_name: String,
+) {
+    tokio::spawn(async move {
+        match item_kind {
+            TransferItemKind::File => {
+                let mut gate = ProgressGate::default();
+                let prepared_result = transport
+                    .prepare_file_path_with_progress(&path, |progress| {
+                        if gate.should_emit(&progress) {
+                            let _ = host_tx.send(HostInput::LocalEvent {
+                                event: transfer_progress_event(
+                                    &channel_id,
+                                    TransferItemKind::File,
+                                    &display_name,
+                                    &progress,
+                                    None,
+                                ),
+                            });
+                        }
+                    })
+                    .await;
+                match prepared_result {
+                    Ok(prepared) => {
+                        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
+                        transport
+                            .register_outgoing_file(
+                                channel_id.as_str().to_string(),
+                                &path,
+                                prepared.clone(),
+                                Some(progress_tx),
+                            )
+                            .await;
+                        let _ = host_tx.send(HostInput::PreparedTransferReady {
+                            channel_id,
+                            size: prepared.size,
+                            transfer: file_transfer_offer(prepared.content_hash),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = host_tx.send(HostInput::PreparedTransferFailed {
+                            channel_id,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+            TransferItemKind::Folder => {
+                let mut gate = ProgressGate::default();
+                let prepared_result = transport
+                    .prepare_directory_path_with_progress(&path, |progress| {
+                        if gate.should_emit(&progress) {
+                            let _ = host_tx.send(HostInput::LocalEvent {
+                                event: transfer_progress_event(
+                                    &channel_id,
+                                    TransferItemKind::Folder,
+                                    &display_name,
+                                    &progress,
+                                    None,
+                                ),
+                            });
+                        }
+                    })
+                    .await;
+                match prepared_result {
+                    Ok(prepared) => {
+                        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
+                        transport
+                            .register_outgoing_directory(
+                                channel_id.as_str().to_string(),
+                                &path,
+                                prepared.clone(),
+                                Some(progress_tx),
+                            )
+                            .await;
+                        let _ = host_tx.send(HostInput::PreparedTransferReady {
+                            channel_id,
+                            size: prepared.total_size,
+                            transfer: folder_transfer_offer(prepared.transfer_digest),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = host_tx.send(HostInput::PreparedTransferFailed {
+                            channel_id,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn spawn_join_prepare_path_task(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    channel_id: ChannelId,
+    path: PathBuf,
+    item_kind: TransferItemKind,
+    display_name: String,
+) {
+    tokio::spawn(async move {
+        match item_kind {
+            TransferItemKind::File => {
+                let mut gate = ProgressGate::default();
+                let prepared_result = transport
+                    .prepare_file_path_with_progress(&path, |progress| {
+                        if gate.should_emit(&progress) {
+                            let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                                event: transfer_progress_event(
+                                    &channel_id,
+                                    TransferItemKind::File,
+                                    &display_name,
+                                    &progress,
+                                    None,
+                                ),
+                            });
+                        }
+                    })
+                    .await;
+                match prepared_result {
+                    Ok(prepared) => {
+                        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
+                        transport
+                            .register_outgoing_file(
+                                channel_id.as_str().to_string(),
+                                &path,
+                                prepared.clone(),
+                                Some(progress_tx),
+                            )
+                            .await;
+                        let _ = peer_tx.send(JoinPeerInput::PreparedTransferReady {
+                            channel_id,
+                            size: prepared.size,
+                            transfer: file_transfer_offer(prepared.content_hash),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = peer_tx.send(JoinPeerInput::PreparedTransferFailed {
+                            channel_id,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+            TransferItemKind::Folder => {
+                let mut gate = ProgressGate::default();
+                let prepared_result = transport
+                    .prepare_directory_path_with_progress(&path, |progress| {
+                        if gate.should_emit(&progress) {
+                            let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                                event: transfer_progress_event(
+                                    &channel_id,
+                                    TransferItemKind::Folder,
+                                    &display_name,
+                                    &progress,
+                                    None,
+                                ),
+                            });
+                        }
+                    })
+                    .await;
+                match prepared_result {
+                    Ok(prepared) => {
+                        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
+                        transport
+                            .register_outgoing_directory(
+                                channel_id.as_str().to_string(),
+                                &path,
+                                prepared.clone(),
+                                Some(progress_tx),
+                            )
+                            .await;
+                        let _ = peer_tx.send(JoinPeerInput::PreparedTransferReady {
+                            channel_id,
+                            size: prepared.total_size,
+                            transfer: folder_transfer_offer(prepared.transfer_digest),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = peer_tx.send(JoinPeerInput::PreparedTransferFailed {
+                            channel_id,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+
 pub(crate) async fn run_machine_host(
     config: &SessionConfig,
     sink: &EventSink,
@@ -233,6 +429,7 @@ pub(crate) async fn run_machine_join_session(
         member_tickets: BTreeMap::new(),
         channels: BTreeMap::new(),
         peer_links: BTreeMap::new(),
+        pending_accepted_files: Default::default(),
         local_name: config.peer_name.clone(),
         local_fingerprint,
         local_ticket,
@@ -278,7 +475,17 @@ pub(crate) async fn run_machine_join_session(
                 .await?;
             }
             peer_input = peer_rx.recv() => {
-                handle_join_peer_input(sink, &mut join_state, &mut stdout, peer_input).await?;
+                handle_join_peer_input(
+                    sink,
+                    transport,
+                    &config.download_dir,
+                    &mut join_state,
+                    &mut stdout,
+                    send,
+                    peer_tx.clone(),
+                    peer_input,
+                )
+                .await?;
             }
         }
     }
@@ -469,6 +676,48 @@ async fn handle_host_input(
             emit_event(stdout, &event).await?;
             Ok(LoopControl::Continue)
         }
+        HostInput::PreparedTransferReady {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            match room.update_channel_transfer(host_member, &channel_id, Some(size), transfer) {
+                Ok(routed) => {
+                    maybe_start_host_pending_receive(
+                        room,
+                        peers,
+                        host_state,
+                        room.host_member(),
+                        &channel_id,
+                        &config.download_dir,
+                        transport,
+                        host_tx,
+                    )?;
+                    deliver_routed_events(room.host_member(), routed, stdout, peers).await?;
+                }
+                Err(RoomEngineError::UnknownChannel { .. } | RoomEngineError::NotChannelOpener { .. }) => {}
+                Err(error) => return Err(room_error(error)),
+            }
+            Ok(LoopControl::Continue)
+        }
+        HostInput::PreparedTransferFailed {
+            channel_id,
+            message,
+        } => {
+            match room.close_channel(
+                host_member,
+                &channel_id,
+                Some("sender failed to prepare transfer".into()),
+            ) {
+                Ok(routed) => {
+                    deliver_routed_events(room.host_member(), routed, stdout, peers).await?;
+                }
+                Err(RoomEngineError::UnknownChannel { .. } | RoomEngineError::NotChannelOpener { .. }) => {}
+                Err(error) => return Err(room_error(error)),
+            }
+            emit_event(stdout, &local_error("transfer_prepare_failed", &message)).await?;
+            Ok(LoopControl::Continue)
+        }
     }
 }
 
@@ -622,6 +871,13 @@ async fn handle_join_authority_message(
     match message {
         Some(AuthorityLinkMessage::MachineEvent { event }) => {
             apply_machine_event(join_state, &event);
+            maybe_start_join_pending_receive(
+                join_state,
+                &config.download_dir,
+                transport,
+                peer_tx.clone(),
+                &event,
+            )?;
             emit_event(stdout, &event).await?;
             Ok(matches!(event, MachineEvent::RoomClosed { .. }))
         }
@@ -677,8 +933,12 @@ async fn handle_join_authority_message(
 
 async fn handle_join_peer_input(
     sink: &EventSink,
+    transport: &IrohTransport,
+    download_dir: &Path,
     join_state: &mut JoinState,
     stdout: &mut tokio::io::Stdout,
+    authority_send: &mut SendStream,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     peer_input: Option<JoinPeerInput>,
 ) -> Result<(), CliError> {
     match peer_input {
@@ -716,6 +976,13 @@ async fn handle_join_peer_input(
                 return Ok(());
             }
             apply_machine_event(join_state, &event);
+            maybe_start_join_pending_receive(
+                join_state,
+                download_dir,
+                transport,
+                peer_tx.clone(),
+                &event,
+            )?;
             emit_event(stdout, &event).await?;
         }
         Some(JoinPeerInput::Disconnected { member_id }) => {
@@ -731,6 +998,49 @@ async fn handle_join_peer_input(
         Some(JoinPeerInput::LocalEvent { event }) => {
             apply_machine_event(join_state, &event);
             emit_event(stdout, &event).await?;
+        }
+        Some(JoinPeerInput::PreparedTransferReady {
+            channel_id,
+            size,
+            transfer,
+        }) => {
+            if !join_state.channels.contains_key(&channel_id) {
+                return Ok(());
+            }
+            send_peer_command(
+                authority_send,
+                &MachineCommand::UpdateChannelTransfer {
+                    channel_id: channel_id.clone(),
+                    size: Some(size),
+                    transfer: transfer.clone(),
+                },
+            )
+            .await?;
+            apply_machine_event(
+                join_state,
+                &MachineEvent::ChannelTransferReady {
+                    channel_id,
+                    size: Some(size),
+                    transfer,
+                },
+            );
+        }
+        Some(JoinPeerInput::PreparedTransferFailed {
+            channel_id,
+            message,
+        }) => {
+            if join_state.channels.contains_key(&channel_id) {
+                let _ = send_peer_command(
+                    authority_send,
+                    &MachineCommand::CloseChannel {
+                        channel_id: channel_id.clone(),
+                        reason: Some("sender failed to prepare transfer".into()),
+                    },
+                )
+                .await;
+                join_state.channels.remove(&channel_id);
+            }
+            emit_event(stdout, &local_error("transfer_prepare_failed", &message)).await?;
         }
         None => {}
     }
@@ -985,6 +1295,28 @@ async fn handle_join_command(
             apply_machine_event(state, &local_event);
             Ok(())
         }
+        MachineCommand::UpdateChannelTransfer {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            let local_event = MachineEvent::ChannelTransferReady {
+                channel_id: channel_id.clone(),
+                size,
+                transfer: transfer.clone(),
+            };
+            send_peer_command(
+                authority_send,
+                &MachineCommand::UpdateChannelTransfer {
+                    channel_id,
+                    size,
+                    transfer,
+                },
+            )
+            .await?;
+            apply_machine_event(state, &local_event);
+            Ok(())
+        }
         MachineCommand::AcceptChannel { channel_id } => {
             send_peer_command(
                 authority_send,
@@ -993,51 +1325,21 @@ async fn handle_join_command(
                 },
             )
             .await?;
-            if let Some(PendingFileTransfer {
-                provider_ticket,
-                transfer,
-                name,
-                size,
-                ..
-            }) = join_pending_file_transfer(state, &self_member, &channel_id)?
+            if let Some(PendingFileTransfer { transfer, size, .. }) =
+                join_pending_file_transfer(state, &self_member, &channel_id)?
             {
-                let target_path = receive_target_path(download_dir, &name)?;
-                match (transfer.item_kind.clone(), transfer.integrity.clone()) {
-                    (TransferItemKind::File, Some(integrity)) => {
-                        spawn_join_direct_receive(
-                            transport.clone(),
-                            peer_tx,
-                            PeerTicket {
-                                encoded: provider_ticket,
-                            },
-                            channel_id,
-                            integrity.value,
-                            name,
-                            size,
-                            target_path,
-                        );
-                    }
-                    (TransferItemKind::Folder, Some(integrity)) => {
-                        spawn_join_direct_directory_receive(
-                            transport.clone(),
-                            peer_tx,
-                            PeerTicket {
-                                encoded: provider_ticket,
-                            },
-                            channel_id,
-                            integrity.value,
-                            name,
-                            size,
-                            target_path,
-                        );
-                    }
-                    _ => {
-                        return Err(CliError::runtime(format!(
-                            "file channel {} has unsupported transfer metadata",
-                            channel_id.as_str()
-                        )));
-                    }
-                }
+                state.pending_accepted_files.insert(channel_id.clone());
+                maybe_start_join_pending_receive(
+                    state,
+                    download_dir,
+                    transport,
+                    peer_tx,
+                    &MachineEvent::ChannelTransferReady {
+                        channel_id,
+                        size,
+                        transfer,
+                    },
+                )?;
             }
             Ok(())
         }
@@ -1107,94 +1409,37 @@ async fn send_path_from_join(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let (display_name, size, transfer) = if expanded_path.is_file() {
+    let (item_kind, display_name, provisional_size) = if expanded_path.is_file() {
         let display_name = expanded_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| expanded_path.display().to_string());
-        let prepared = transport
-            .prepare_file_path_with_progress(&expanded_path, {
-                let channel_id = channel_id.clone();
-                let peer_tx = peer_tx.clone();
-                let display_name = display_name.clone();
-                let mut gate = ProgressGate::default();
-                move |progress| {
-                    if gate.should_emit(&progress) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: transfer_progress_event(
-                                &channel_id,
-                                TransferItemKind::File,
-                                &display_name,
-                                &progress,
-                                None,
-                            ),
-                        });
-                    }
-                }
-            })
-            .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
-        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
-        transport
-            .register_outgoing_file(
-                channel_id.as_str().to_string(),
-                &expanded_path,
-                prepared.clone(),
-                Some(progress_tx),
-            )
-            .await;
-        (
-            display_name,
-            prepared.size,
-            file_transfer_offer(prepared.content_hash),
-        )
+        let file_size = std::fs::metadata(&expanded_path)
+            .map_err(|error| {
+                CliError::local_io(format!(
+                    "failed to read metadata for {}: {error}",
+                    expanded_path.display()
+                ))
+            })?
+            .len();
+        (TransferItemKind::File, display_name, Some(file_size))
     } else if expanded_path.is_dir() {
-        let prepared = transport
-            .prepare_directory_path_with_progress(&expanded_path, {
-                let channel_id = channel_id.clone();
-                let peer_tx = peer_tx.clone();
-                let display_name = expanded_path
-                    .file_name()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| expanded_path.display().to_string());
-                let mut gate = ProgressGate::default();
-                move |progress| {
-                    if gate.should_emit(&progress) {
-                        let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                            event: transfer_progress_event(
-                                &channel_id,
-                                TransferItemKind::Folder,
-                                &display_name,
-                                &progress,
-                                None,
-                            ),
-                        });
-                    }
-                }
-            })
-            .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
-        let progress_tx = spawn_join_transfer_progress_forwarder(peer_tx.clone());
-        transport
-            .register_outgoing_directory(
-                channel_id.as_str().to_string(),
-                &expanded_path,
-                prepared.clone(),
-                Some(progress_tx),
-            )
-            .await;
-        (
-            prepared.display_name,
-            prepared.total_size,
-            folder_transfer_offer(prepared.transfer_digest),
-        )
+        let display_name = expanded_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| expanded_path.display().to_string());
+        (TransferItemKind::Folder, display_name, None)
     } else {
         return Err(CliError::usage(format!(
             "path {} is not a file or directory",
             expanded_path.display()
         )));
     };
-    let name = name.or(Some(display_name));
+    let name = name.or(Some(display_name.clone()));
+    let provisional_transfer = TransferOffer {
+        item_kind: item_kind.clone(),
+        integrity: None,
+    };
     let local_event = MachineEvent::ChannelOpened {
         channel_id: channel_id.clone(),
         kind: ChannelKind::File,
@@ -1202,24 +1447,32 @@ async fn send_path_from_join(
         from_name: state.local_name.clone(),
         to: to.clone(),
         name: name.clone(),
-        size: Some(size),
+        size: provisional_size,
         mime: mime.clone(),
-        transfer: Some(transfer.clone()),
+        transfer: Some(provisional_transfer.clone()),
     };
     send_peer_command(
         authority_send,
         &MachineCommand::OpenChannel {
-            channel_id,
+            channel_id: channel_id.clone(),
             kind: ChannelKind::File,
             to,
             name,
-            size: Some(size),
+            size: provisional_size,
             mime,
-            transfer: Some(transfer),
+            transfer: Some(provisional_transfer),
         },
     )
     .await?;
     apply_machine_event(state, &local_event);
+    spawn_join_prepare_path_task(
+        transport.clone(),
+        peer_tx,
+        channel_id,
+        expanded_path,
+        item_kind,
+        display_name,
+    );
     Ok(())
 }
 
@@ -1372,97 +1625,59 @@ async fn send_path_from_host(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let expanded_path = expand_user_path(&path);
-    let (size, transfer, open_name) = if expanded_path.is_file() {
+    let (item_kind, display_name, provisional_size) = if expanded_path.is_file() {
         let display_name = expanded_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| expanded_path.display().to_string());
-        let mut gate = ProgressGate::default();
-        let prepared = transport
-            .prepare_file_path_with_progress(&expanded_path, |progress| {
-                if gate.should_emit(&progress) {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: transfer_progress_event(
-                            &channel_id,
-                            TransferItemKind::File,
-                            &display_name,
-                            &progress,
-                            None,
-                        ),
-                    });
-                }
-            })
-            .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
-        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
-        transport
-            .register_outgoing_file(
-                channel_id.as_str().to_string(),
-                &expanded_path,
-                prepared.clone(),
-                Some(progress_tx),
-            )
-            .await;
-        (
-            prepared.size,
-            file_transfer_offer(prepared.content_hash),
-            name.or(Some(display_name)),
-        )
+        let file_size = std::fs::metadata(&expanded_path)
+            .map_err(|error| {
+                CliError::local_io(format!(
+                    "failed to read metadata for {}: {error}",
+                    expanded_path.display()
+                ))
+            })?
+            .len();
+        (TransferItemKind::File, display_name, Some(file_size))
     } else if expanded_path.is_dir() {
         let display_name = expanded_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| expanded_path.display().to_string());
-        let mut gate = ProgressGate::default();
-        let prepared = transport
-            .prepare_directory_path_with_progress(&expanded_path, |progress| {
-                if gate.should_emit(&progress) {
-                    let _ = host_tx.send(HostInput::LocalEvent {
-                        event: transfer_progress_event(
-                            &channel_id,
-                            TransferItemKind::Folder,
-                            &display_name,
-                            &progress,
-                            None,
-                        ),
-                    });
-                }
-            })
-            .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
-        let progress_tx = spawn_host_transfer_progress_forwarder(host_tx.clone());
-        transport
-            .register_outgoing_directory(
-                channel_id.as_str().to_string(),
-                &expanded_path,
-                prepared.clone(),
-                Some(progress_tx),
-            )
-            .await;
-        (
-            prepared.total_size,
-            folder_transfer_offer(prepared.transfer_digest),
-            name.or(Some(prepared.display_name)),
-        )
+        (TransferItemKind::Folder, display_name, None)
     } else {
         return Err(CliError::usage(format!(
             "path {} is not a file or directory",
             expanded_path.display()
         )));
     };
+    let open_name = name.or(Some(display_name.clone()));
+    let provisional_transfer = TransferOffer {
+        item_kind: item_kind.clone(),
+        integrity: None,
+    };
     let routed = room
         .open_channel(
             sender,
-            channel_id,
+            channel_id.clone(),
             ChannelKind::File,
             to,
             open_name,
-            Some(size),
+            provisional_size,
             mime,
-            Some(transfer),
+            Some(provisional_transfer),
         )
         .map_err(room_error)?;
-    deliver_routed_events(room.host_member(), routed, stdout, peers).await
+    deliver_routed_events(room.host_member(), routed, stdout, peers).await?;
+    spawn_host_prepare_path_task(
+        transport.clone(),
+        host_tx.clone(),
+        channel_id,
+        expanded_path,
+        item_kind,
+        display_name,
+    );
+    Ok(())
 }
 
 fn transfer_progress_event(
@@ -1500,6 +1715,75 @@ fn folder_transfer_offer(transfer_digest: String) -> TransferOffer {
             value: transfer_digest,
         }),
     }
+}
+
+fn maybe_start_join_pending_receive(
+    state: &mut JoinState,
+    download_dir: &Path,
+    transport: &IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    event: &MachineEvent,
+) -> Result<(), CliError> {
+    let MachineEvent::ChannelTransferReady { channel_id, .. } = event else {
+        return Ok(());
+    };
+    if !state.pending_accepted_files.contains(channel_id) {
+        return Ok(());
+    }
+    let Some(self_member) = state.self_member.clone() else {
+        return Ok(());
+    };
+    let Some(PendingFileTransfer {
+        provider_ticket,
+        transfer,
+        name,
+        size,
+    }) = join_pending_file_transfer(state, &self_member, channel_id)?
+    else {
+        return Ok(());
+    };
+    match (transfer.item_kind.clone(), transfer.integrity.clone()) {
+        (TransferItemKind::File, Some(integrity)) => {
+            let target_path = receive_target_path(download_dir, &name)?;
+            state.pending_accepted_files.remove(channel_id);
+            spawn_join_direct_receive(
+                transport.clone(),
+                peer_tx,
+                PeerTicket {
+                    encoded: provider_ticket,
+                },
+                channel_id.clone(),
+                integrity.value,
+                name,
+                size,
+                target_path,
+            );
+        }
+        (TransferItemKind::Folder, Some(integrity)) => {
+            let target_path = receive_target_path(download_dir, &name)?;
+            state.pending_accepted_files.remove(channel_id);
+            spawn_join_direct_directory_receive(
+                transport.clone(),
+                peer_tx,
+                PeerTicket {
+                    encoded: provider_ticket,
+                },
+                channel_id.clone(),
+                integrity.value,
+                name,
+                size,
+                target_path,
+            );
+        }
+        (TransferItemKind::File, None) => {}
+        _ => {
+            return Err(CliError::runtime(format!(
+                "file channel {} has unsupported transfer metadata",
+                channel_id.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn host_pending_file_download(
@@ -1551,6 +1835,63 @@ fn host_pending_file_download(
     )))
 }
 
+fn maybe_start_host_pending_receive(
+    room: &RoomEngine,
+    peers: &BTreeMap<MemberId, PeerHandle>,
+    host_state: &mut HostState,
+    self_member: &MemberId,
+    channel_id: &ChannelId,
+    download_dir: &Path,
+    transport: &IrohTransport,
+    host_tx: &mpsc::UnboundedSender<HostInput>,
+) -> Result<(), CliError> {
+    if !host_state.pending_accepted_files.contains(channel_id) {
+        return Ok(());
+    }
+    let Some((provider, file)) = host_pending_file_download(room, peers, self_member, channel_id)?
+    else {
+        return Ok(());
+    };
+    match (file.transfer.item_kind.clone(), file.transfer.integrity.clone()) {
+        (TransferItemKind::File, Some(integrity)) => {
+            let target_path = receive_target_path(download_dir, &file.name)?;
+            host_state.pending_accepted_files.remove(channel_id);
+            spawn_host_direct_receive(
+                transport.clone(),
+                host_tx.clone(),
+                provider,
+                channel_id.clone(),
+                integrity.value,
+                file.name,
+                file.size,
+                target_path,
+            );
+        }
+        (TransferItemKind::Folder, Some(integrity)) => {
+            let target_path = receive_target_path(download_dir, &file.name)?;
+            host_state.pending_accepted_files.remove(channel_id);
+            spawn_host_direct_directory_receive(
+                transport.clone(),
+                host_tx.clone(),
+                provider,
+                channel_id.clone(),
+                integrity.value,
+                file.name,
+                file.size,
+                target_path,
+            );
+        }
+        (TransferItemKind::File, None) => {}
+        _ => {
+            return Err(CliError::runtime(format!(
+                "file channel {} has unsupported transfer metadata",
+                channel_id.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_host_command(
     room: &mut RoomEngine,
     sender: &MemberId,
@@ -1558,7 +1899,7 @@ async fn handle_host_command(
     download_dir: &Path,
     stdout: &mut tokio::io::Stdout,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
-    _host_state: &mut HostState,
+    host_state: &mut HostState,
     transport: &IrohTransport,
     host_tx: &mpsc::UnboundedSender<HostInput>,
     local_command: bool,
@@ -1595,6 +1936,26 @@ async fn handle_host_command(
             let routed = room
                 .open_channel(sender, channel_id, kind, to, name, size, mime, transfer)
                 .map_err(room_error)?;
+            deliver_routed_events(room.host_member(), routed, stdout, peers).await
+        }
+        MachineCommand::UpdateChannelTransfer {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            let routed = room
+                .update_channel_transfer(sender, &channel_id, size, transfer)
+                .map_err(room_error)?;
+            maybe_start_host_pending_receive(
+                room,
+                peers,
+                host_state,
+                room.host_member(),
+                &channel_id,
+                download_dir,
+                transport,
+                host_tx,
+            )?;
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
         }
         MachineCommand::RejectChannel { channel_id, reason } => {
@@ -1673,42 +2034,18 @@ async fn handle_host_command(
                 .accept_channel(sender, &channel_id)
                 .map_err(room_error)?;
             if local_command {
-                if let Some((provider, file)) =
-                    host_pending_file_download(room, peers, sender, &channel_id)?
-                {
-                    let target_path = receive_target_path(download_dir, &file.name)?;
-                    match (file.transfer.item_kind.clone(), file.transfer.integrity.clone()) {
-                        (TransferItemKind::File, Some(integrity)) => {
-                            spawn_host_direct_receive(
-                                transport.clone(),
-                                host_tx.clone(),
-                                provider,
-                                channel_id.clone(),
-                                integrity.value,
-                                file.name,
-                                file.size,
-                                target_path,
-                            );
-                        }
-                        (TransferItemKind::Folder, Some(integrity)) => {
-                            spawn_host_direct_directory_receive(
-                                transport.clone(),
-                                host_tx.clone(),
-                                provider,
-                                channel_id.clone(),
-                                integrity.value,
-                                file.name,
-                                file.size,
-                                target_path,
-                            );
-                        }
-                        _ => {
-                            return Err(CliError::runtime(format!(
-                                "file channel {} has unsupported transfer metadata",
-                                channel_id.as_str()
-                            )));
-                        }
-                    }
+                if host_pending_file_download(room, peers, sender, &channel_id)?.is_some() {
+                    host_state.pending_accepted_files.insert(channel_id.clone());
+                    maybe_start_host_pending_receive(
+                        room,
+                        peers,
+                        host_state,
+                        sender,
+                        &channel_id,
+                        download_dir,
+                        transport,
+                        host_tx,
+                    )?;
                 }
             }
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
@@ -1779,6 +2116,7 @@ fn command_channel_id(command: &MachineCommand) -> Option<ChannelId> {
         MachineCommand::SendFile { channel_id, .. }
         | MachineCommand::SendPath { channel_id, .. }
         | MachineCommand::OpenChannel { channel_id, .. }
+        | MachineCommand::UpdateChannelTransfer { channel_id, .. }
         | MachineCommand::AcceptChannel { channel_id }
         | MachineCommand::RejectChannel { channel_id, .. }
         | MachineCommand::SendChannelData { channel_id, .. }

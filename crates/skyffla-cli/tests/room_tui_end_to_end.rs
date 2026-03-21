@@ -114,14 +114,64 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
         .await?;
 
     host.send_line("/accept").await?;
-    host.expect_line_contains("accepting file report.txt 11B")
-        .await?;
     host.expect_line_contains("downloading file (report.txt)")
         .await?;
     let saved_line = host
         .expect_line_contains("file report.txt 11B saved to ")
         .await?;
     let saved_path = extract_saved_path(&saved_line, "file report.txt 11B saved to ", &host_home)
+        .context("missing saved filename in TUI output")?;
+
+    assert_eq!(std::fs::read(saved_path)?, b"mesh report");
+
+    host.shutdown().await?;
+    join.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_tui_join_receiver_starts_after_single_early_accept() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-room-tui-host");
+    let join_home = fresh_test_dir("skyffla-cli-room-tui-join");
+    for home in [&host_home, &join_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(host_home.join("report.txt"), b"mesh report")?;
+
+    let room = unique_room_name();
+    let mut host = TuiProc::spawn("host", &room, &server.url, "alpha", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut join = TuiProc::spawn("join", &room, &server.url, "beta", &join_home).await?;
+
+    host.expect_line_contains("member joined: beta").await?;
+    join.expect_line_contains("joined room").await?;
+    join.expect_line_contains("members:").await?;
+    join.expect_line_contains("direct room link ready: alpha (m1)")
+        .await?;
+
+    host.send_line(r#"/send m2 ~/report.txt"#).await?;
+    host.expect_line_contains("preparing file report.txt to send to beta")
+        .await?;
+    join.expect_line_contains("alpha wants to send file report.txt (11B) - /accept or /reject")
+        .await?;
+
+    join.send_line("/accept").await?;
+    join.expect_line_contains("accepted file report.txt 11B; waiting for sender to finish preparing")
+        .await?;
+    host.expect_line_contains("beta accepted file report.txt")
+        .await?;
+    join.expect_line_contains("downloading file (report.txt)")
+        .await?;
+    let saved_line = join
+        .expect_line_contains("file report.txt 11B saved to ")
+        .await?;
+    let saved_path = extract_saved_path(&saved_line, "file report.txt 11B saved to ", &join_home)
         .context("missing saved filename in TUI output")?;
 
     assert_eq!(std::fs::read(saved_path)?, b"mesh report");

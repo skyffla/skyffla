@@ -69,6 +69,8 @@ Wrappers should fail on machine major mismatch and tolerate additive minor chang
 The current machine major reflects the file-channel contract change from
 blob-required metadata to explicit transfer metadata. Wrappers speaking the
 older `1.x` file-channel shape should be treated as incompatible with `2.x`.
+The current `2.1` minor adds provisional file-channel opens followed by a
+later `channel_transfer_ready` event once transfer integrity metadata is ready.
 
 ### Rendezvous HTTP API
 

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -238,6 +238,11 @@ pub enum MachineCommand {
         mime: Option<String>,
         transfer: Option<TransferOffer>,
     },
+    UpdateChannelTransfer {
+        channel_id: ChannelId,
+        size: Option<u64>,
+        transfer: TransferOffer,
+    },
     AcceptChannel {
         channel_id: ChannelId,
     },
@@ -303,6 +308,16 @@ impl MachineCommand {
                 }
                 to.validate()?;
                 validate_channel_transfer(kind, transfer.as_ref())
+            }
+            Self::UpdateChannelTransfer {
+                channel_id,
+                transfer,
+                ..
+            } => {
+                if channel_id.as_str().trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
+                }
+                transfer.validate()
             }
             Self::AcceptChannel { channel_id }
             | Self::RejectChannel { channel_id, .. }
@@ -377,6 +392,11 @@ pub enum MachineEvent {
         channel_id: ChannelId,
         member_id: MemberId,
         member_name: String,
+    },
+    ChannelTransferReady {
+        channel_id: ChannelId,
+        size: Option<u64>,
+        transfer: TransferOffer,
     },
     ChannelRejected {
         channel_id: ChannelId,
@@ -535,6 +555,16 @@ impl MachineEvent {
                     });
                 }
                 Ok(())
+            }
+            Self::ChannelTransferReady {
+                channel_id,
+                transfer,
+                ..
+            } => {
+                if channel_id.as_str().trim().is_empty() {
+                    return Err(RoomProtocolError::EmptyIdentifier { kind: "channel_id" });
+                }
+                transfer.validate()
             }
             Self::ChannelData {
                 channel_id,
@@ -868,6 +898,34 @@ mod tests {
     }
 
     #[test]
+    fn documented_update_channel_transfer_command_shape_round_trips() {
+        let json = r#"{
+            "type":"update_channel_transfer",
+            "channel_id":"c8",
+            "size":1234,
+            "transfer":{
+                "item_kind":"file",
+                "integrity":{"algorithm":"blake3","value":"feedbeef"}
+            }
+        }"#;
+
+        let command: MachineCommand =
+            serde_json::from_str(json).expect("update_channel_transfer command should parse");
+
+        assert_eq!(
+            command,
+            MachineCommand::UpdateChannelTransfer {
+                channel_id: ChannelId::new("c8").expect("valid channel id"),
+                size: Some(1234),
+                transfer: file_transfer_offer(),
+            }
+        );
+        command
+            .validate()
+            .expect("update_channel_transfer should validate");
+    }
+
+    #[test]
     fn documented_channel_accepted_event_shape_round_trips() {
         let json = r#"{
             "type":"channel_accepted",
@@ -888,6 +946,34 @@ mod tests {
             }
         );
         event.validate().expect("channel_accepted should validate");
+    }
+
+    #[test]
+    fn documented_channel_transfer_ready_event_shape_round_trips() {
+        let json = r#"{
+            "type":"channel_transfer_ready",
+            "channel_id":"c7",
+            "size":1234,
+            "transfer":{
+                "item_kind":"file",
+                "integrity":{"algorithm":"blake3","value":"feedbeef"}
+            }
+        }"#;
+
+        let event: MachineEvent =
+            serde_json::from_str(json).expect("channel_transfer_ready event should parse");
+
+        assert_eq!(
+            event,
+            MachineEvent::ChannelTransferReady {
+                channel_id: ChannelId::new("c7").expect("valid channel id"),
+                size: Some(1234),
+                transfer: file_transfer_offer(),
+            }
+        );
+        event
+            .validate()
+            .expect("channel_transfer_ready should validate");
     }
 
     #[test]
