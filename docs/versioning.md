@@ -44,10 +44,10 @@ Compatibility is checked during the peer handshake. Peers must share the same wi
 File-transfer compatibility is negotiated separately inside the hello payload
 via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
 major version while refusing `send_path` when the advertised file-transfer
-major version is missing or incompatible. The current `3.x` file-transfer
-major covers the native streamed path with explicit receiver credit messages and
-windowed sending; `2.x` peers should be treated as incompatible for
-`send_path`.
+major version is missing or incompatible. The current `4.x` file-transfer
+major covers the native streamed path with explicit receiver credit messages,
+windowed sending, and manifest-first directory transfer with per-entry fetches;
+`3.x` peers should be treated as incompatible for `send_path`.
 
 ### Machine protocol
 
