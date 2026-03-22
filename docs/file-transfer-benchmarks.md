@@ -19,6 +19,9 @@ stays close to `transfer`.
 | 2026-03-21 | `189efe5` | File, 2048 MiB | 27.22s | 34.58s | 34.58s | 59.2 MiB/s | 59.2 MiB/s | Single-file hashing overlaps transfer |
 | 2026-03-21 | `189efe5` | Folder, 2048 MiB, 128 files | 0.003s | 45.58s | 45.59s | 44.9 MiB/s | 44.9 MiB/s | Lightweight folder plan, but one transfer connection per file |
 | 2026-03-22 | `338f8d7` | Folder, 2048 MiB, 128 files | 0.003s | 32.75s | 32.75s | 62.5 MiB/s | 62.5 MiB/s | Lightweight folder plan with one shared transfer connection and 4 workers |
+| 2026-03-22 | `338f8d7` | Folder, 2048 MiB, 128 files, `N=1` | 0.002s | 50.78s | 50.79s | 40.3 MiB/s | 40.3 MiB/s | Single worker underutilizes the path |
+| 2026-03-22 | `338f8d7` | Folder, 2048 MiB, 128 files, `N=8` | 0.003s | 33.15s | 33.16s | 61.8 MiB/s | 61.8 MiB/s | Slightly worse than `N=4` on this machine |
+| 2026-03-22 | `338f8d7` | Folder, 2048 MiB, 8192 files, `N=4` | 0.039s | 38.26s | 38.33s | 53.5 MiB/s | 53.4 MiB/s | Many-small-files case; overhead is visible but still better than `N=1` |
 
 ## Takeaways
 
@@ -29,3 +32,8 @@ stays close to `transfer`.
 - Reusing one shared transfer connection across folder workers recovered the
   throughput loss and brought the `2048 MiB / 128 file` folder case down to
   about `33s` total.
+- For this workload on this machine, `N=4` is the best measured folder worker
+  count so far. `N=1` is much worse, and `N=8` does not beat `N=4`.
+- Spreading the same `2048 MiB` across `8192` files drops folder throughput to
+  about `53.5 MiB/s`, which confirms that per-file overhead matters for
+  smaller files even with the shared-connection worker design.
