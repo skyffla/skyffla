@@ -217,10 +217,14 @@ async fn machine_joiner_can_chat_directly_to_host_member() -> Result<()> {
             && event.pointer("/member/name") == Some(&Value::String("beta".into()))
     })
     .await?;
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    host.expect_stderr_contains(
+        "\"event\":\"room_link_connected\",\"member_id\":\"m2\",\"member_name\":\"beta\"",
+    )
+    .await?;
+    beta.expect_stderr_contains(
+        "\"event\":\"room_link_connected\",\"member_id\":\"m1\",\"member_name\":\"host\"",
+    )
+    .await?;
 
     beta.send(r#"{"type":"send_chat","to":{"type":"member","member_id":"m1"},"text":"hi host"}"#)
         .await?;
@@ -331,10 +335,14 @@ async fn machine_file_channel_requires_transfer_metadata_and_rejects_inline_data
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    host.expect_stderr_contains(
+        "\"event\":\"room_link_connected\",\"member_id\":\"m2\",\"member_name\":\"beta\"",
+    )
+    .await?;
+    beta.expect_stderr_contains(
+        "\"event\":\"room_link_connected\",\"member_id\":\"m1\",\"member_name\":\"host\"",
+    )
+    .await?;
 
     host.send(
         r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","transfer":{"item_kind":"file","integrity":{"algorithm":"blake3","value":"feedbeef"}}}"#,
