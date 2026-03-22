@@ -403,10 +403,8 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut beta, "m1", "host").await?;
 
     host.send(r#"/send --channel f1 --to m2 --path "~/report.txt""#)
         .await?;
@@ -481,10 +479,8 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut beta, "m1", "host").await?;
 
     host.send(r#"/send --channel folder1 --to m2 --path "~/artpack""#)
         .await?;
@@ -577,15 +573,10 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut host, "m3", "gamma").await?;
+    expect_room_link_connected(&mut beta, "m3", "gamma").await?;
+    expect_room_link_connected(&mut gamma, "m2", "beta").await?;
 
     host.send(&format!(
         r#"/send --channel f-all --to all --path "{}""#,
@@ -825,10 +816,8 @@ async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut beta, "m1", "host").await?;
 
     host.send(
         r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m2"}}"#,
@@ -906,10 +895,8 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut beta, "m1", "host").await?;
 
     let command = serde_json::json!({
         "type": "send_path",
@@ -1041,10 +1028,8 @@ async fn machine_native_folder_transfer_reports_baseline() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "m2", "beta").await?;
+    expect_room_link_connected(&mut beta, "m1", "host").await?;
 
     let command = serde_json::json!({
         "type": "send_path",
@@ -1476,6 +1461,17 @@ fn linked_member_id_named(lines: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+async fn expect_room_link_connected(
+    proc: &mut MachineProc,
+    member_id: &str,
+    member_name: &str,
+) -> Result<()> {
+    proc.expect_stderr_contains(&format!(
+        "\"event\":\"room_link_connected\",\"member_id\":\"{member_id}\",\"member_name\":\"{member_name}\"",
+    ))
+    .await
 }
 
 fn perf_file_size_mib() -> u64 {
