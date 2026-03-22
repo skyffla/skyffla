@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError,
-    Route, MACHINE_PROTOCOL_VERSION,
+    ChannelId, ChannelKind, MachineEvent, Member, MemberId, RoomId, RoomProtocolError, Route,
+    TransferOffer, MACHINE_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +42,7 @@ struct ChannelState {
     name: Option<String>,
     size: Option<u64>,
     mime: Option<String>,
-    blob: Option<BlobRef>,
+    transfer: Option<TransferOffer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct RoomChannel {
     pub name: Option<String>,
     pub size: Option<u64>,
     pub mime: Option<String>,
-    pub blob: Option<BlobRef>,
+    pub transfer: Option<TransferOffer>,
 }
 
 impl RoomEngine {
@@ -105,7 +105,7 @@ impl RoomEngine {
             name: channel.name.clone(),
             size: channel.size,
             mime: channel.mime.clone(),
-            blob: channel.blob.clone(),
+            transfer: channel.transfer.clone(),
         })
     }
 
@@ -222,7 +222,7 @@ impl RoomEngine {
         name: Option<String>,
         size: Option<u64>,
         mime: Option<String>,
-        blob: Option<BlobRef>,
+        transfer: Option<TransferOffer>,
     ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
         self.require_member(from)?;
         if self.channels.contains_key(&channel_id) {
@@ -240,7 +240,7 @@ impl RoomEngine {
             name,
             size,
             mime,
-            blob,
+            transfer,
         };
         event.validate()?;
         self.channels.insert(
@@ -252,7 +252,7 @@ impl RoomEngine {
                 name: event_name(&event),
                 size: event_size(&event),
                 mime: event_mime(&event),
-                blob: event_blob(&event),
+                transfer: event_transfer(&event),
             },
         );
 
@@ -281,6 +281,66 @@ impl RoomEngine {
                 member_name,
             },
         )
+    }
+
+    pub fn update_channel_transfer(
+        &mut self,
+        member_id: &MemberId,
+        channel_id: &ChannelId,
+        size: Option<u64>,
+        transfer: TransferOffer,
+    ) -> Result<Vec<RoutedEvent>, RoomEngineError> {
+        self.require_member(member_id)?;
+        let channel =
+            self.channels
+                .get_mut(channel_id)
+                .ok_or_else(|| RoomEngineError::UnknownChannel {
+                    channel_id: channel_id.clone(),
+                })?;
+        if channel.opener != *member_id {
+            return Err(RoomEngineError::NotChannelOpener {
+                member_id: member_id.clone(),
+                channel_id: channel_id.clone(),
+            });
+        }
+        if channel.kind != ChannelKind::File {
+            return Err(RoomEngineError::ChannelTransferUpdateUnsupported {
+                channel_id: channel_id.clone(),
+                kind: channel.kind.clone(),
+            });
+        }
+
+        let event = match transfer.item_kind {
+            skyffla_protocol::room::TransferItemKind::File => {
+                MachineEvent::ChannelTransferFinalized {
+                    channel_id: channel_id.clone(),
+                    size,
+                    transfer,
+                }
+            }
+            skyffla_protocol::room::TransferItemKind::Folder => {
+                MachineEvent::ChannelTransferReady {
+                    channel_id: channel_id.clone(),
+                    size,
+                    transfer,
+                }
+            }
+        };
+        event.validate()?;
+        channel.size = event_size(&event);
+        channel.transfer = event_transfer(&event);
+
+        Ok(channel
+            .participants
+            .iter()
+            .filter(|recipient| *recipient != member_id)
+            .filter(|recipient| self.members.contains_key(*recipient))
+            .cloned()
+            .map(|recipient| RoutedEvent {
+                recipient,
+                event: event.clone(),
+            })
+            .collect())
     }
 
     pub fn reject_channel(
@@ -491,7 +551,9 @@ fn event_name(event: &MachineEvent) -> Option<String> {
 
 fn event_size(event: &MachineEvent) -> Option<u64> {
     match event {
-        MachineEvent::ChannelOpened { size, .. } => *size,
+        MachineEvent::ChannelOpened { size, .. }
+        | MachineEvent::ChannelTransferReady { size, .. }
+        | MachineEvent::ChannelTransferFinalized { size, .. } => *size,
         _ => None,
     }
 }
@@ -503,9 +565,11 @@ fn event_mime(event: &MachineEvent) -> Option<String> {
     }
 }
 
-fn event_blob(event: &MachineEvent) -> Option<BlobRef> {
+fn event_transfer(event: &MachineEvent) -> Option<TransferOffer> {
     match event {
-        MachineEvent::ChannelOpened { blob, .. } => blob.clone(),
+        MachineEvent::ChannelOpened { transfer, .. } => transfer.clone(),
+        MachineEvent::ChannelTransferReady { transfer, .. }
+        | MachineEvent::ChannelTransferFinalized { transfer, .. } => Some(transfer.clone()),
         _ => None,
     }
 }
@@ -526,7 +590,15 @@ pub enum RoomEngineError {
         member_id: MemberId,
         channel_id: ChannelId,
     },
+    NotChannelOpener {
+        member_id: MemberId,
+        channel_id: ChannelId,
+    },
     ChannelDataUnsupported {
+        channel_id: ChannelId,
+        kind: ChannelKind,
+    },
+    ChannelTransferUpdateUnsupported {
         channel_id: ChannelId,
         kind: ChannelKind,
     },
@@ -557,10 +629,29 @@ impl fmt::Display for RoomEngineError {
                     channel_id.as_str()
                 )
             }
+            Self::NotChannelOpener {
+                member_id,
+                channel_id,
+            } => {
+                write!(
+                    f,
+                    "member {} did not open channel {}",
+                    member_id.as_str(),
+                    channel_id.as_str()
+                )
+            }
             Self::ChannelDataUnsupported { channel_id, kind } => {
                 write!(
                     f,
                     "channel {} of kind {:?} does not support inline channel data",
+                    channel_id.as_str(),
+                    kind
+                )
+            }
+            Self::ChannelTransferUpdateUnsupported { channel_id, kind } => {
+                write!(
+                    f,
+                    "channel {} of kind {:?} does not support transfer updates",
                     channel_id.as_str(),
                     kind
                 )
@@ -580,9 +671,28 @@ impl From<RoomProtocolError> for RoomEngineError {
 
 #[cfg(test)]
 mod tests {
-    use skyffla_protocol::room::{BlobFormat, ChannelKind, MachineEvent};
+    use skyffla_protocol::room::{
+        ChannelKind, MachineEvent, TransferDigest, TransferItemKind, TransferOffer,
+    };
 
     use super::*;
+
+    fn file_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: Some(TransferDigest {
+                algorithm: "blake3".into(),
+                value: "feedbeef".into(),
+            }),
+        }
+    }
+
+    fn provisional_file_transfer_offer() -> TransferOffer {
+        TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: None,
+        }
+    }
 
     fn member_id(value: &str) -> MemberId {
         MemberId::new(value).expect("valid member id")
@@ -767,10 +877,7 @@ mod tests {
             Some("report.txt".into()),
             Some(5),
             Some("text/plain".into()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
+            Some(file_transfer_offer()),
         )
         .expect("file channel opens");
 
@@ -786,6 +893,49 @@ mod tests {
             late_data,
             Err(RoomEngineError::ChannelDataUnsupported { .. })
         ));
+    }
+
+    #[test]
+    fn file_channel_transfer_update_routes_and_updates_room_state() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("file1"),
+            ChannelKind::File,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            Some("report.txt".into()),
+            Some(5),
+            Some("text/plain".into()),
+            Some(provisional_file_transfer_offer()),
+        )
+        .expect("file channel opens");
+
+        let routed = room
+            .update_channel_transfer(
+                &host_member,
+                &channel_id("file1"),
+                Some(5),
+                file_transfer_offer(),
+            )
+            .expect("transfer update succeeds");
+
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].recipient, beta.member.member_id);
+        assert!(matches!(
+            routed[0].event,
+            MachineEvent::ChannelTransferFinalized { .. }
+        ));
+        assert_eq!(
+            room.channel(&channel_id("file1"))
+                .expect("channel present")
+                .transfer,
+            Some(file_transfer_offer())
+        );
     }
 
     #[test]
@@ -950,10 +1100,7 @@ mod tests {
             Some("report.txt".into()),
             Some(12),
             Some("text/plain".into()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
+            Some(file_transfer_offer()),
         )
         .expect("channel opens");
 
@@ -1017,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn file_channels_require_blob_metadata_and_reject_inline_data() {
+    fn file_channels_require_transfer_metadata_and_reject_inline_data() {
         let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
         let beta = room.join("beta", None).expect("beta joins");
         let host_member = room.host_member().clone();
@@ -1032,10 +1179,7 @@ mod tests {
             Some("report.pdf".into()),
             Some(1024),
             Some("application/pdf".into()),
-            Some(BlobRef {
-                hash: "abc123".into(),
-                format: BlobFormat::Blob,
-            }),
+            Some(file_transfer_offer()),
         )
         .expect("file channel opens");
 

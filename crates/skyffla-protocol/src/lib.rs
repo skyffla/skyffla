@@ -11,6 +11,7 @@ pub use framing::{
 };
 
 pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const FILE_TRANSFER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolVersion {
@@ -158,6 +159,8 @@ impl ControlMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Hello {
     pub protocol_version: ProtocolVersion,
+    #[serde(default)]
+    pub file_transfer_version: Option<ProtocolVersion>,
     pub session_id: String,
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,

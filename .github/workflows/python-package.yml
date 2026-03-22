@@ -3,7 +3,12 @@ name: Python Wrapper
 on:
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
       - "wrappers/python/**"
+      - "examples/python/**"
       - ".github/workflows/python-package.yml"
   push:
     branches:

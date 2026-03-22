@@ -3,6 +3,10 @@ name: Node Wrapper
 on:
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
       - "wrappers/node/**"
       - "examples/node/**"
       - ".github/workflows/node-package.yml"

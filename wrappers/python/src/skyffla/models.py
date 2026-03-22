@@ -71,7 +71,7 @@ class ProtocolVersion(SkyfflaModel):
         return f"{self.major}.{self.minor}"
 
 
-MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=1, minor=0)
+MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=2, minor=0)
 
 
 class BlobRef(SkyfflaModel):
@@ -82,6 +82,21 @@ class BlobRef(SkyfflaModel):
     @classmethod
     def _validate_hash(cls, value: str) -> str:
         return _require_non_empty(value, "blob_hash")
+
+
+class TransferDigest(SkyfflaModel):
+    algorithm: str
+    value: str
+
+    @field_validator("algorithm", "value")
+    @classmethod
+    def _validate_required_fields(cls, value: str, info: Any) -> str:
+        return _require_non_empty(value, info.field_name or "field")
+
+
+class TransferOffer(SkyfflaModel):
+    item_kind: TransferItemKind
+    integrity: TransferDigest | None = None
 
 
 class Member(SkyfflaModel):
@@ -172,6 +187,7 @@ class OpenChannel(SkyfflaModel):
     size: int | None = None
     mime: str | None = None
     blob: BlobRef | None = None
+    transfer: TransferOffer | None = None
 
     @field_validator("channel_id")
     @classmethod
@@ -181,9 +197,13 @@ class OpenChannel(SkyfflaModel):
     @model_validator(mode="after")
     def _validate_blob(self) -> OpenChannel:
         if self.kind == ChannelKind.FILE and self.blob is None:
-            raise ValueError("file channels require blob metadata")
-        if self.kind != ChannelKind.FILE and self.blob is not None:
-            raise ValueError("blob metadata is only allowed for file channels")
+            if self.transfer is None:
+                raise ValueError("file channels require blob or transfer metadata")
+        if self.kind != ChannelKind.FILE:
+            if self.blob is not None:
+                raise ValueError("blob metadata is only allowed for file channels")
+            if self.transfer is not None:
+                raise ValueError("transfer metadata is only allowed for file channels")
         return self
 
 
@@ -335,6 +355,7 @@ class ChannelOpened(SkyfflaModel):
     size: int | None = None
     mime: str | None = None
     blob: BlobRef | None = None
+    transfer: TransferOffer | None = None
 
     @field_validator("channel_id", "from_", "from_name")
     @classmethod
@@ -344,9 +365,13 @@ class ChannelOpened(SkyfflaModel):
     @model_validator(mode="after")
     def _validate_blob(self) -> ChannelOpened:
         if self.kind == ChannelKind.FILE and self.blob is None:
-            raise ValueError("file channels require blob metadata")
-        if self.kind != ChannelKind.FILE and self.blob is not None:
-            raise ValueError("blob metadata is only allowed for file channels")
+            if self.transfer is None:
+                raise ValueError("file channels require blob or transfer metadata")
+        if self.kind != ChannelKind.FILE:
+            if self.blob is not None:
+                raise ValueError("blob metadata is only allowed for file channels")
+            if self.transfer is not None:
+                raise ValueError("transfer metadata is only allowed for file channels")
         return self
 
 

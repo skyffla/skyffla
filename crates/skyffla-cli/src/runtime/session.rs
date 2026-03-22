@@ -97,6 +97,7 @@ pub(crate) async fn run_connected_session(
             &connection,
             &mut send,
             &mut recv,
+            &peer,
             Some(identity.fingerprint.clone()),
             local_ticket.encoded,
             peer.peer_ticket.clone(),

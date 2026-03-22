@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferItemKind,
+    ChannelId, ChannelKind, MachineEvent, Member, MemberId, Route, TransferOffer,
 };
 use skyffla_protocol::room_link::PeerLinkMessage;
+use skyffla_protocol::ProtocolVersion;
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
@@ -16,10 +18,13 @@ pub(super) struct JoinState {
     pub(super) member_tickets: BTreeMap<MemberId, String>,
     pub(super) channels: BTreeMap<ChannelId, JoinChannelState>,
     pub(super) peer_links: BTreeMap<MemberId, mpsc::UnboundedSender<PeerLinkMessage>>,
+    pub(super) pending_accepted_files: BTreeSet<ChannelId>,
+    pub(super) pending_received_files: BTreeMap<ChannelId, PendingReceivedFile>,
     pub(super) local_name: String,
     pub(super) local_fingerprint: Option<String>,
     pub(super) local_ticket: String,
     pub(super) pending_host_ticket: Option<String>,
+    pub(super) host_file_transfer_version: Option<ProtocolVersion>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,33 +32,32 @@ pub(super) struct JoinChannelState {
     pub(super) opener: MemberId,
     pub(super) kind: ChannelKind,
     pub(super) participants: BTreeSet<MemberId>,
-    pub(super) item_kind: Option<TransferItemKind>,
     pub(super) name: Option<String>,
     pub(super) size: Option<u64>,
-    pub(super) blob: Option<BlobRef>,
+    pub(super) transfer: Option<TransferOffer>,
     pub(super) local_file_ready: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingFileTransfer {
     pub(super) provider_ticket: String,
-    pub(super) blob: BlobRef,
-    pub(super) item_kind: TransferItemKind,
-    pub(super) name: String,
-    pub(super) size: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ExportableFileTransfer {
-    pub(super) blob: BlobRef,
-    pub(super) item_kind: TransferItemKind,
+    pub(super) transfer: TransferOffer,
     pub(super) name: String,
     pub(super) size: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct HostState {
-    pub(super) ready_file_channels: BTreeSet<ChannelId>,
+    pub(super) pending_accepted_files: BTreeSet<ChannelId>,
+    pub(super) pending_received_files: BTreeMap<ChannelId, PendingReceivedFile>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingReceivedFile {
+    pub(super) temp_path: PathBuf,
+    pub(super) final_path: PathBuf,
+    pub(super) actual_hash: String,
+    pub(super) size: u64,
 }
 
 pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
@@ -90,7 +94,7 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             to,
             name,
             size,
-            blob,
+            transfer,
             ..
         } => {
             if let Ok(participants) = event_participants(state, from, to) {
@@ -100,24 +104,35 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
                         opener: from.clone(),
                         kind: kind.clone(),
                         participants,
-                        item_kind: blob.as_ref().map(|blob| match blob.format {
-                            skyffla_protocol::room::BlobFormat::Blob => TransferItemKind::File,
-                            skyffla_protocol::room::BlobFormat::Collection => {
-                                TransferItemKind::Folder
-                            }
-                        }),
                         name: name.clone(),
                         size: *size,
-                        blob: blob.clone(),
+                        transfer: transfer.clone(),
                         local_file_ready: state.self_member.as_ref() == Some(from),
                     },
                 );
             }
         }
-        MachineEvent::ChannelFileReady { channel_id, .. } => {
+        MachineEvent::ChannelTransferReady {
+            channel_id,
+            size,
+            transfer,
+        }
+        | MachineEvent::ChannelTransferFinalized {
+            channel_id,
+            size,
+            transfer,
+        } => {
+            if let Some(channel) = state.channels.get_mut(channel_id) {
+                channel.size = *size;
+                channel.transfer = Some(transfer.clone());
+            }
+        }
+        MachineEvent::ChannelPathReceived { channel_id, .. } => {
             if let Some(channel) = state.channels.get_mut(channel_id) {
                 channel.local_file_ready = true;
             }
+            state.pending_accepted_files.remove(channel_id);
+            state.pending_received_files.remove(channel_id);
         }
         MachineEvent::ChannelClosed { channel_id, .. }
         | MachineEvent::ChannelRejected { channel_id, .. } => {
@@ -126,6 +141,16 @@ pub(super) fn apply_machine_event(state: &mut JoinState, event: &MachineEvent) {
             } else {
                 state.channels.remove(channel_id);
             }
+            let keep_pending = state.self_member.as_ref().is_some_and(|self_member| {
+                state
+                    .channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.participants.contains(self_member))
+            });
+            if !keep_pending {
+                state.pending_accepted_files.remove(channel_id);
+            }
+            state.pending_received_files.remove(channel_id);
         }
         _ => {}
     }
@@ -197,7 +222,7 @@ pub(super) fn join_channel_recipients(
         .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
     if channel.kind == ChannelKind::File {
         return Err(CliError::runtime(format!(
-            "channel {} is blob-backed and does not accept inline channel data",
+            "channel {} is transfer-backed and does not accept inline channel data",
             channel_id.as_str()
         )));
     }
@@ -237,9 +262,9 @@ pub(super) fn join_pending_file_transfer(
             channel_id.as_str()
         )));
     }
-    let blob = channel.blob.clone().ok_or_else(|| {
+    let transfer = channel.transfer.clone().ok_or_else(|| {
         CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
+            "file channel {} is missing transfer metadata",
             channel_id.as_str()
         ))
     })?;
@@ -255,8 +280,7 @@ pub(super) fn join_pending_file_transfer(
         })?;
     Ok(Some(PendingFileTransfer {
         provider_ticket,
-        blob,
-        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
+        transfer,
         name: channel
             .name
             .clone()
@@ -265,59 +289,11 @@ pub(super) fn join_pending_file_transfer(
     }))
 }
 
-pub(super) fn join_exportable_file(
-    state: &JoinState,
-    self_member: &MemberId,
-    channel_id: &ChannelId,
-) -> Result<ExportableFileTransfer, CliError> {
-    let channel = state
-        .channels
-        .get(channel_id)
-        .ok_or_else(|| CliError::runtime(format!("unknown channel {}", channel_id.as_str())))?;
-    if channel.kind != ChannelKind::File {
-        return Err(CliError::runtime(format!(
-            "channel {} is not a file channel",
-            channel_id.as_str()
-        )));
-    }
-    if !channel.participants.contains(self_member) {
-        return Err(CliError::runtime(format!(
-            "member {} is not part of channel {}",
-            self_member.as_str(),
-            channel_id.as_str()
-        )));
-    }
-    if !channel.local_file_ready {
-        return Err(CliError::runtime(format!(
-            "file channel {} is not ready yet",
-            channel_id.as_str()
-        )));
-    }
-    let blob = channel.blob.clone().ok_or_else(|| {
-        CliError::runtime(format!(
-            "file channel {} is missing blob metadata",
-            channel_id.as_str()
-        ))
-    })?;
-    Ok(ExportableFileTransfer {
-        blob,
-        item_kind: channel.item_kind.clone().unwrap_or(TransferItemKind::File),
-        name: channel
-            .name
-            .clone()
-            .unwrap_or_else(|| channel_id.as_str().to_string()),
-        size: channel.size,
-    })
-}
-
 pub(super) fn apply_host_event(state: &mut HostState, event: &MachineEvent) {
     match event {
-        MachineEvent::ChannelFileReady { channel_id, .. } => {
-            state.ready_file_channels.insert(channel_id.clone());
-        }
-        MachineEvent::ChannelRejected { channel_id, .. }
-        | MachineEvent::ChannelClosed { channel_id, .. } => {
-            state.ready_file_channels.remove(channel_id);
+        MachineEvent::ChannelPathReceived { channel_id, .. } => {
+            state.pending_accepted_files.remove(channel_id);
+            state.pending_received_files.remove(channel_id);
         }
         _ => {}
     }

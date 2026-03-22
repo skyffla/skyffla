@@ -2,7 +2,7 @@ pub mod room;
 
 use std::fmt;
 
-use skyffla_protocol::SessionMode;
+use skyffla_protocol::{ProtocolVersion, SessionMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPeer {
@@ -10,6 +10,7 @@ pub struct SessionPeer {
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,
     pub peer_ticket: Option<String>,
+    pub file_transfer_version: Option<ProtocolVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

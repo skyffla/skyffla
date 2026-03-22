@@ -33,12 +33,22 @@ Defined in:
 Used in:
 
 - peer hello / hello-ack handshake
+- file-transfer capability/version advertisement in `hello`
 
 Current constant:
 
 - `WIRE_PROTOCOL_VERSION`
 
 Compatibility is checked during the peer handshake. Peers must share the same wire major version.
+
+File-transfer compatibility is negotiated separately inside the hello payload
+via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
+major version while refusing `send_path` when the advertised file-transfer
+major version is missing or incompatible. The current `1.x` file-transfer
+major covers the native streamed path with explicit receiver credit messages,
+single-file overlap where receivers may download before the sender publishes
+the final whole-file digest, and lightweight-plan folder overlap where
+per-file verification happens inside bounded transfer workers.
 
 ### Machine protocol
 
@@ -56,6 +66,14 @@ Current constant:
 - `MACHINE_PROTOCOL_VERSION`
 
 Wrappers should fail on machine major mismatch and tolerate additive minor changes.
+
+The current machine major reflects the file-channel contract change from
+blob-required metadata to explicit transfer metadata. It also includes
+provisional transfer opens, the distinct `channel_transfer_finalized` event for
+single-file transfers, and the lightweight folder-plan behavior where
+`channel_transfer_ready` means the native directory receive path may begin
+without an upfront whole-transfer digest. Wrappers speaking the older `1.x`
+file-channel shape should be treated as incompatible with `2.x`.
 
 ### Rendezvous HTTP API
 

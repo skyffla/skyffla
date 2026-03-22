@@ -9,14 +9,14 @@ This note is for someone who cloned this repo and wants to run Skyffla themselve
 Skyffla has two separate infrastructure layers:
 
 - Skyffla rendezvous
-- `iroh` peer transport and blob transfer
+- `iroh` peer transport
 
 In this repo today:
 
 - You can self-host the Skyffla rendezvous service directly.
 - The transport layer uses `iroh`'s default production setup unless code is changed.
-- File and folder transfer use `iroh-blobs` on the same endpoint stack as chat,
-  channels, and other peer traffic.
+- File and folder transfer use Skyffla's native transfer protocol on the same
+  `iroh` endpoint stack as chat, channels, and other peer traffic.
 
 Relevant local code:
 
@@ -60,7 +60,7 @@ Those defaults include:
 
 That means a small self-hosted Skyffla deployment is not fully self-contained by
 default. You host rendezvous, but transport bootstrap, relay fallback, and
-blob-backed file or folder transfer still depend on `iroh` public
+native file or folder transfer still depend on `iroh` public
 infrastructure.
 
 ## What now uses that transport stack
@@ -69,8 +69,8 @@ Today the `iroh` endpoint is used for:
 
 - room authority and peer links
 - raw duplex `--stdio`
-- blob-backed file transfer
-- blob-backed folder transfer via `iroh-blobs` collections
+- native file transfer
+- native folder transfer
 
 So if you keep the default `iroh` production setup, that choice affects both the
 interactive room traffic and the file or folder payload path.

@@ -34,7 +34,7 @@ test("documented chat event shape round trips", () => {
 test("room welcome uses structured protocol version", () => {
   const event = parseMachineEvent({
     type: "room_welcome",
-    protocol_version: { major: 1, minor: 0 },
+    protocol_version: { major: 2, minor: 0 },
     room_id: "warehouse",
     self_member: "m1",
     host_member: "m1",
@@ -44,7 +44,7 @@ test("room welcome uses structured protocol version", () => {
   assert.deepEqual(event.protocol_version, MACHINE_PROTOCOL_VERSION);
   assert.deepEqual(dumpMessage(event), {
     type: "room_welcome",
-    protocol_version: { major: 1, minor: 0 },
+    protocol_version: { major: 2, minor: 0 },
     room_id: "warehouse",
     self_member: "m1",
     host_member: "m1",
@@ -120,10 +120,10 @@ test("parse cli version reads standard output", () => {
 });
 
 test("machine protocol version requires matching major", () => {
-  ensureMachineProtocolVersion({ major: 1, minor: 7 });
+  ensureMachineProtocolVersion({ major: 2, minor: 7 });
 
   assert.throws(
-    () => ensureMachineProtocolVersion({ major: 2, minor: 0 }),
+    () => ensureMachineProtocolVersion({ major: 3, minor: 0 }),
     (error) =>
       error instanceof SkyfflaMachineProtocolMismatch &&
       error.message.includes("same machine protocol major version"),

@@ -33,7 +33,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `1.0`
+- `2.0`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -88,7 +88,7 @@ Peer-delivered events:
 
 - `chat`
 - `channel_data`
-- file readiness/export completion once the channel is established
+- file transfer progress and receive completion once the channel is established
 
 Wrappers should not need to care which transport link carried an event, but they should understand that:
 
@@ -136,22 +136,40 @@ Open a file channel:
   "name":"report.pdf",
   "size":1234,
   "mime":"application/pdf",
-  "blob":{"hash":"abc123","format":"blob"}
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
 }
 ```
 
 Rules:
 
-- `file` channels require `blob`
-- `machine` and `clipboard` channels must not include `blob`
+- `file` channels require `transfer`
+- `machine` and `clipboard` channels must not include `transfer`
 
-### `send_file`
+### `send_path`
 
-`send_file` is a local convenience command for the sender. It imports a local file or directory into the blob store, then lowers to `open_channel(kind=file, blob=...)`.
+`send_path` is the primary machine command for sending a file or folder.
+
+Current behavior:
+
+- regular files: open a provisional `file` channel early with
+  `transfer.item_kind = "file"` and `transfer.integrity = null`, allow the
+  receiver to accept or reject immediately, then publish final transfer
+  metadata with `update_channel_transfer` once preparation completes
+- directories: open a provisional `file` channel early with
+  `transfer.item_kind = "folder"` and `transfer.integrity = null`, do a cheap
+  directory discovery pass, then publish folder readiness with
+  `update_channel_transfer`; per-file verification happens inside the native
+  transfer workers instead of up front
+
+Accepted transfers are saved automatically into the receiver's resolved
+download directory. There is no separate export step in the normal flow.
 
 ```json
 {
-  "type":"send_file",
+  "type":"send_path",
   "channel_id":"f1",
   "to":{"type":"member","member_id":"m2"},
   "path":"./report.txt",
@@ -160,11 +178,33 @@ Rules:
 }
 ```
 
+### `update_channel_transfer`
+
+`update_channel_transfer` finalizes a previously opened provisional file
+channel once the sender has finished preparing the transfer metadata.
+
+```json
+{
+  "type":"update_channel_transfer",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
+}
+```
+
 ### `accept_channel`
 
 ```json
 {"type":"accept_channel","channel_id":"c7"}
 ```
+
+For provisional file channels, `accept_channel` may arrive before the sender
+has finished preparing the final integrity metadata. Single-file transfers may
+start downloading immediately after accept, while folder transfers stay
+accepted but waiting until a matching `channel_transfer_ready` arrives.
 
 ### `reject_channel`
 
@@ -188,13 +228,9 @@ For `machine` and `clipboard` channels:
 {"type":"close_channel","channel_id":"c7","reason":"done"}
 ```
 
-### `export_channel_file`
-
-`export_channel_file` is a local convenience command for recipients after a file channel becomes ready.
-
-```json
-{"type":"export_channel_file","channel_id":"f1","path":"./downloads/report.txt"}
-```
+Recipients do not need a separate export command in the normal flow. Accepted
+file and folder transfers are saved automatically into the local download
+directory.
 
 ## Events
 
@@ -203,7 +239,7 @@ For `machine` and `clipboard` channels:
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":1,"minor":0},
+  "protocol_version":{"major":3,"minor":0},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
@@ -261,16 +297,55 @@ For `machine` and `clipboard` channels:
   "to":{"type":"member","member_id":"m1"},
   "name":"agent-link",
   "size":null,
-  "mime":null,
-  "blob":null
+  "mime":null
 }
 ```
+
+For file and folder channels, `transfer.integrity` may be absent in the
+initial `channel_opened` event while the sender is still preparing or
+finalizing the transfer metadata.
 
 ### `channel_accepted`
 
 ```json
 {"type":"channel_accepted","channel_id":"c7","member_id":"m1","member_name":"alpha"}
 ```
+
+### `channel_transfer_ready`
+
+```json
+{
+  "type":"channel_transfer_ready",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"folder",
+    "integrity":null
+  }
+}
+```
+
+This event updates a previously opened provisional folder channel once the
+lightweight folder plan is ready. A receiver that already accepted the folder
+should begin the native receive path once this event arrives.
+
+### `channel_transfer_finalized`
+
+```json
+{
+  "type":"channel_transfer_finalized",
+  "channel_id":"f1",
+  "size":1234,
+  "transfer":{
+    "item_kind":"file",
+    "integrity":{"algorithm":"blake3","value":"feedbeef"}
+  }
+}
+```
+
+This event publishes the final whole-file digest for a single-file transfer.
+Receivers save into a temporary path first and only emit `channel_path_received`
+after the finalized digest matches the locally downloaded bytes.
 
 ### `channel_rejected`
 
@@ -296,23 +371,20 @@ For `machine` and `clipboard` channels:
 {"type":"channel_closed","channel_id":"c7","member_id":"m1","member_name":"alpha","reason":"done"}
 ```
 
-### `channel_file_ready`
+### `channel_path_received`
 
 ```json
 {
-  "type":"channel_file_ready",
+  "type":"channel_path_received",
   "channel_id":"f1",
-  "blob":{"hash":"abc123","format":"blob"}
+  "path":"./downloads/report.txt",
+  "size":1234
 }
 ```
 
-For folders, `format` is `collection`.
+For folders, `path` is the saved directory root.
 
-### `channel_file_exported`
-
-```json
-{"type":"channel_file_exported","channel_id":"f1","path":"./downloads/report.txt","size":1234}
-```
+This event is the normal receive completion signal for accepted transfers.
 
 ### `error`
 
@@ -325,9 +397,14 @@ For folders, `format` is `collection`.
 - `send_chat.text` must not be empty
 - `send_channel_data.body` must not be empty
 - `member_snapshot.members` must not be empty
-- `file` channels require blob metadata
-- non-file channels must not include blob metadata
-- `send_file` and `export_channel_file` are local machine commands, not peer-forwarded room commands
+- `file` channels require transfer metadata
+- provisional file channels may omit `transfer.integrity` in the initial
+  `channel_opened`, but the sender must later publish final metadata with
+  `update_channel_transfer` before bytes move
+- non-file channels must not include transfer metadata
+- `send_path` is a local machine command, not a peer-forwarded room command
+- accepted file and folder transfers save automatically; wrappers do not need a
+  follow-up export command in the normal flow
 
 ## Wrapper Guidance
 

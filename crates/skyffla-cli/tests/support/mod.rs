@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,6 +51,7 @@ pub struct LocalDiscoveryTestGuard {
 pub struct TestServer {
     pub url: String,
     task: tokio::task::JoinHandle<()>,
+    _guard: LocalDiscoveryTestGuard,
 }
 
 pub fn acquire_local_discovery_test_guard() -> Result<LocalDiscoveryTestGuard> {
@@ -111,6 +113,7 @@ fn local_discovery_process_guard() -> &'static Mutex<()> {
 
 impl TestServer {
     pub async fn spawn() -> Result<Option<Self>> {
+        let guard = acquire_local_discovery_test_guard()?;
         let listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(listener) => listener,
             Err(error) if is_socket_permission_error(&error) => return Ok(None),
@@ -138,7 +141,11 @@ impl TestServer {
         });
         let url = format!("http://{addr}");
         wait_for_server_ready(&url).await?;
-        Ok(Some(Self { url, task }))
+        Ok(Some(Self {
+            url,
+            task,
+            _guard: guard,
+        }))
     }
 
     pub fn abort(self) {
@@ -184,6 +191,87 @@ pub fn fresh_test_dir(prefix: &str) -> PathBuf {
         .expect("clock should be after epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+}
+
+pub fn perf_file_size_mib() -> u64 {
+    std::env::var("SKYFFLA_PERF_FILE_MIB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(512)
+}
+
+pub fn perf_timeout() -> Duration {
+    std::env::var("SKYFFLA_PERF_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(180))
+}
+
+pub fn ensure_perf_source_file(size_mib: u64) -> Result<PathBuf> {
+    let cache_root = std::env::temp_dir().join("skyffla-transfer-perf");
+    std::fs::create_dir_all(&cache_root)
+        .with_context(|| format!("failed to create {}", cache_root.display()))?;
+    let path = cache_root.join(format!("perf-random-{size_mib}m.bin"));
+    let expected_len = size_mib * 1024 * 1024;
+    if std::fs::metadata(&path)
+        .map(|meta| meta.len() == expected_len)
+        .unwrap_or(false)
+    {
+        return Ok(path);
+    }
+
+    let file = File::create(&path)
+        .with_context(|| format!("failed to create perf source file {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut remaining = expected_len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(buffer.len() as u64) as usize;
+        fill_pseudorandom_bytes(&mut buffer[..chunk_len], &mut state);
+        writer
+            .write_all(&buffer[..chunk_len])
+            .with_context(|| format!("failed writing perf source file {}", path.display()))?;
+        remaining -= chunk_len as u64;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("failed flushing perf source file {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn bytes_to_mib(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
+pub fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
+    if elapsed.is_zero() {
+        return "inf MiB/s".into();
+    }
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("{:.1}MiB/s", mib / elapsed.as_secs_f64())
+}
+
+pub fn format_duration_short(elapsed: Duration) -> String {
+    if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", elapsed.as_secs_f64())
+    } else {
+        format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
+    }
+}
+
+fn fill_pseudorandom_bytes(buf: &mut [u8], state: &mut u64) {
+    for chunk in buf.chunks_mut(8) {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        let value = state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+        let len = chunk.len();
+        chunk.copy_from_slice(&value[..len]);
+    }
 }
 
 pub fn unique_room_name() -> String {
@@ -239,7 +327,7 @@ pub async fn wait_for_room_ready(server_url: &str, room: &str) -> Result<()> {
 fn is_transport_permission_error(error: &TransportError) -> bool {
     matches!(error, TransportError::EndpointBind(bind_error) if {
         let message = bind_error.to_string();
-        message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
+        message.contains("Operation not permitted") || message.contains("permission denied")
     })
 }
 

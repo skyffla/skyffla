@@ -9,13 +9,49 @@ pub(super) fn parse_machine_command_line(line: &str) -> Result<MachineCommand, C
     };
     let head = head.strip_prefix('/').unwrap_or(head.as_str());
     match head {
+        "send" => parse_send_command(tail),
         "file" => parse_file_command(tail),
         "channel" => parse_channel_command(tail),
         "chat" => parse_chat_command(tail),
         other => Err(CliError::usage(format!(
-            "unknown machine command {other:?}; expected JSON or one of /file, /channel, /chat"
+            "unknown machine command {other:?}; expected JSON or one of /send, /file, /channel, /chat"
         ))),
     }
+}
+
+fn parse_send_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
+    let mut channel_id = None;
+    let mut to = None;
+    let mut path = None;
+    let mut name = None;
+    let mut mime = None;
+    let mut iter = tokens.iter();
+    while let Some(token) = iter.next() {
+        match token.as_str() {
+            "--channel" => channel_id = Some(required_value(&mut iter, "--channel")?),
+            "--to" => to = Some(parse_route(&required_value(&mut iter, "--to")?)?),
+            "--path" => path = Some(required_value(&mut iter, "--path")?),
+            "--name" => name = Some(required_value(&mut iter, "--name")?),
+            "--mime" => mime = Some(required_value(&mut iter, "--mime")?),
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected send argument {other:?}"
+                )));
+            }
+        }
+    }
+    let command = MachineCommand::SendPath {
+        channel_id: ChannelId::new(channel_id.ok_or_else(|| CliError::usage("missing --channel"))?)
+            .map_err(|error| CliError::usage(error.to_string()))?,
+        to: to.ok_or_else(|| CliError::usage("missing --to"))?,
+        path: path.ok_or_else(|| CliError::usage("missing --path"))?,
+        name,
+        mime,
+    };
+    command
+        .validate()
+        .map_err(|error| CliError::usage(error.to_string()))?;
+    Ok(command)
 }
 
 fn parse_file_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
@@ -25,42 +61,7 @@ fn parse_file_command(tokens: &[String]) -> Result<MachineCommand, CliError> {
         ));
     };
     match subcommand.as_str() {
-        "send" => {
-            let mut channel_id = None;
-            let mut to = None;
-            let mut path = None;
-            let mut name = None;
-            let mut mime = None;
-            let mut iter = tail.iter();
-            while let Some(token) = iter.next() {
-                match token.as_str() {
-                    "--channel" => channel_id = Some(required_value(&mut iter, "--channel")?),
-                    "--to" => to = Some(parse_route(&required_value(&mut iter, "--to")?)?),
-                    "--path" => path = Some(required_value(&mut iter, "--path")?),
-                    "--name" => name = Some(required_value(&mut iter, "--name")?),
-                    "--mime" => mime = Some(required_value(&mut iter, "--mime")?),
-                    other => {
-                        return Err(CliError::usage(format!(
-                            "unexpected file send argument {other:?}"
-                        )));
-                    }
-                }
-            }
-            let command = MachineCommand::SendFile {
-                channel_id: ChannelId::new(
-                    channel_id.ok_or_else(|| CliError::usage("missing --channel"))?,
-                )
-                .map_err(|error| CliError::usage(error.to_string()))?,
-                to: to.ok_or_else(|| CliError::usage("missing --to"))?,
-                path: path.ok_or_else(|| CliError::usage("missing --path"))?,
-                name,
-                mime,
-            };
-            command
-                .validate()
-                .map_err(|error| CliError::usage(error.to_string()))?;
-            Ok(command)
-        }
+        "send" => parse_send_command(tail),
         "export" => {
             let mut channel_id = None;
             let mut path = None;
@@ -271,14 +272,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_file_send_command_with_quotes() {
+    fn parses_send_command_with_quotes() {
         let command = parse_machine_command_line(
-            r#"/file send --channel f1 --to m2 --path "./folder name" --name "demo dir" --mime text/plain"#,
+            r#"/send --channel f1 --to m2 --path "./folder name" --name "demo dir" --mime text/plain"#,
         )
         .unwrap();
         assert_eq!(
             command,
-            MachineCommand::SendFile {
+            MachineCommand::SendPath {
                 channel_id: ChannelId::new("f1").unwrap(),
                 to: Route::Member {
                     member_id: MemberId::new("m2").unwrap()

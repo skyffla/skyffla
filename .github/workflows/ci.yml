@@ -75,6 +75,10 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --bins --locked
 
+      - name: Run macOS machine transfer smoke
+        if: matrix.runner == 'macos-15'
+        run: cargo test -p skyffla --test machine_end_to_end machine_send_file_downloads_and_saves_on_accept --locked -- --nocapture
+
   skipped:
     needs: changes
     if: needs.changes.outputs.rust != 'true'

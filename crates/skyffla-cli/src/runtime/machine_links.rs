@@ -1,14 +1,17 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::room::{
-    BlobRef, ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind,
+    ChannelId, MachineCommand, MachineEvent, Member, MemberId, TransferItemKind, TransferOffer,
     TransferPhase,
 };
 use skyffla_protocol::room_link::{AuthorityLinkMessage, PeerLinkMessage};
+use skyffla_protocol::ProtocolVersion;
 use skyffla_session::SessionPeer;
 use skyffla_transport::{
-    ConnectionStatus, IrohConnection, IrohTransport, LocalTransferProgress, PeerTicket,
+    ConnectionStatus, IrohConnection, IrohTransport, PeerTicket, ReceivedFile,
+    DEFAULT_DIRECTORY_TRANSFER_WORKERS,
 };
 use tokio::sync::mpsc;
 
@@ -16,6 +19,7 @@ use crate::cli_error::CliError;
 use crate::config::SessionConfig;
 use crate::net::framing::{read_framed, write_framed};
 use crate::runtime::handshake::exchange_hello;
+use crate::runtime::transfer_progress::ProgressEmissionGate;
 
 #[derive(Debug)]
 pub(crate) struct ConnectedPeer {
@@ -32,6 +36,7 @@ pub(crate) struct PeerHandle {
     pub(crate) peer_sender: Option<mpsc::UnboundedSender<PeerLinkMessage>>,
     pub(crate) member: Member,
     pub(crate) ticket: Option<String>,
+    pub(crate) file_transfer_version: Option<ProtocolVersion>,
     pub(crate) pending_events: Vec<MachineEvent>,
 }
 
@@ -60,6 +65,19 @@ pub(crate) enum HostInput {
     LocalEvent {
         event: MachineEvent,
     },
+    PreparedTransferReady {
+        channel_id: ChannelId,
+        size: u64,
+        transfer: TransferOffer,
+    },
+    PreparedTransferFailed {
+        channel_id: ChannelId,
+        message: String,
+    },
+    ReceivedFileReadyToFinalize {
+        channel_id: ChannelId,
+        received: ReceivedFile,
+    },
 }
 
 #[derive(Debug)]
@@ -81,6 +99,19 @@ pub(crate) enum JoinPeerInput {
     },
     LocalEvent {
         event: MachineEvent,
+    },
+    PreparedTransferReady {
+        channel_id: ChannelId,
+        size: u64,
+        transfer: TransferOffer,
+    },
+    PreparedTransferFailed {
+        channel_id: ChannelId,
+        message: String,
+    },
+    ReceivedFileReadyToFinalize {
+        channel_id: ChannelId,
+        received: ReceivedFile,
     },
 }
 
@@ -130,6 +161,54 @@ pub(crate) fn spawn_accept_loop(
                         message: error.to_string(),
                     });
                 }
+            }
+        }
+    })
+}
+
+pub(crate) fn spawn_host_transfer_accept_loop(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let connection = match transport.accept_transfer_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = host_tx.send(HostInput::PeerProtocolError {
+                        message: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            if let Err(error) = transport.serve_registered_transfer(connection).await {
+                let _ = host_tx.send(HostInput::PeerProtocolError {
+                    message: error.to_string(),
+                });
+            }
+        }
+    })
+}
+
+pub(crate) fn spawn_join_transfer_accept_loop(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let connection = match transport.accept_transfer_connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                        message: error.to_string(),
+                    });
+                    break;
+                }
+            };
+            if let Err(error) = transport.serve_registered_transfer(connection).await {
+                let _ = peer_tx.send(JoinPeerInput::ProtocolError {
+                    message: error.to_string(),
+                });
             }
         }
     })
@@ -388,44 +467,55 @@ pub(crate) fn spawn_outbound_peer_link(
     });
 }
 
-pub(crate) fn spawn_join_blob_download(
+pub(crate) fn spawn_join_direct_receive(
     transport: IrohTransport,
     peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    blob: BlobRef,
-    item_kind: TransferItemKind,
     name: String,
-    size: Option<u64>,
+    expected_size: u64,
+    target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
+        let mut gate = ProgressEmissionGate::default();
         match transport
-            .fetch_blob_with_progress(&provider, &blob, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
+            .receive_file_to_temp_with_progress(
+                &provider,
+                channel_id.as_str(),
+                Some(expected_size),
+                &target_path,
+                |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        Some(expected_size),
+                    ) {
+                        return;
+                    }
                     let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),
-                            item_kind: item_kind.clone(),
+                            item_kind: TransferItemKind::File,
                             name: name.clone(),
                             phase: TransferPhase::Downloading,
                             bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
+                            bytes_total: Some(expected_size),
                         },
                     });
-                }
-            })
+                },
+            )
             .await
         {
-            Ok(()) => {
-                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
-                    event: MachineEvent::ChannelFileReady { channel_id, blob },
+            Ok(received) => {
+                let _ = peer_tx.send(JoinPeerInput::ReceivedFileReadyToFinalize {
+                    channel_id,
+                    received,
                 });
             }
             Err(error) => {
                 let _ = peer_tx.send(JoinPeerInput::LocalEvent {
                     event: MachineEvent::Error {
-                        code: "blob_fetch_failed".into(),
+                        code: "direct_receive_failed".into(),
                         message: error.to_string(),
                         channel_id: Some(channel_id),
                     },
@@ -435,44 +525,55 @@ pub(crate) fn spawn_join_blob_download(
     });
 }
 
-pub(crate) fn spawn_host_blob_download(
+pub(crate) fn spawn_host_direct_receive(
     transport: IrohTransport,
     host_tx: mpsc::UnboundedSender<HostInput>,
     provider: PeerTicket,
     channel_id: ChannelId,
-    blob: BlobRef,
-    item_kind: TransferItemKind,
     name: String,
-    size: Option<u64>,
+    expected_size: u64,
+    target_path: PathBuf,
 ) {
     tokio::spawn(async move {
-        let mut last_step = None;
+        let mut gate = ProgressEmissionGate::default();
         match transport
-            .fetch_blob_with_progress(&provider, &blob, |progress| {
-                if should_emit_progress(&mut last_step, &progress, size) {
+            .receive_file_to_temp_with_progress(
+                &provider,
+                channel_id.as_str(),
+                Some(expected_size),
+                &target_path,
+                |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        Some(expected_size),
+                    ) {
+                        return;
+                    }
                     let _ = host_tx.send(HostInput::LocalEvent {
                         event: MachineEvent::TransferProgress {
                             channel_id: channel_id.clone(),
-                            item_kind: item_kind.clone(),
+                            item_kind: TransferItemKind::File,
                             name: name.clone(),
                             phase: TransferPhase::Downloading,
                             bytes_complete: progress.bytes_complete,
-                            bytes_total: size.or(progress.bytes_total),
+                            bytes_total: Some(expected_size),
                         },
                     });
-                }
-            })
+                },
+            )
             .await
         {
-            Ok(()) => {
-                let _ = host_tx.send(HostInput::LocalEvent {
-                    event: MachineEvent::ChannelFileReady { channel_id, blob },
+            Ok(received) => {
+                let _ = host_tx.send(HostInput::ReceivedFileReadyToFinalize {
+                    channel_id,
+                    received,
                 });
             }
             Err(error) => {
                 let _ = host_tx.send(HostInput::LocalEvent {
                     event: MachineEvent::Error {
-                        code: "blob_fetch_failed".into(),
+                        code: "direct_receive_failed".into(),
                         message: error.to_string(),
                         channel_id: Some(channel_id),
                     },
@@ -482,19 +583,154 @@ pub(crate) fn spawn_host_blob_download(
     });
 }
 
-fn should_emit_progress(
-    last_step: &mut Option<u64>,
-    progress: &LocalTransferProgress,
-    total_override: Option<u64>,
-) -> bool {
-    let total = total_override.or(progress.bytes_total);
-    let step = match total {
-        Some(total) if total > 0 => (progress.bytes_complete.saturating_mul(100) / total) / 10,
-        _ => progress.bytes_complete / (256 * 1024),
-    };
-    let emit = *last_step != Some(step) || progress.bytes_complete == 0;
-    *last_step = Some(step);
-    emit
+pub(crate) fn spawn_join_direct_directory_receive(
+    transport: IrohTransport,
+    peer_tx: mpsc::UnboundedSender<JoinPeerInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    name: String,
+    size: Option<u64>,
+    target_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
+        match transport
+            .receive_directory_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &target_path,
+                directory_transfer_worker_count(),
+                |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
+                    let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::Folder,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
+                },
+            )
+            .await
+        {
+            Ok(size) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::TransferProgress {
+                        channel_id: channel_id.clone(),
+                        item_kind: TransferItemKind::Folder,
+                        name: name.clone(),
+                        phase: TransferPhase::Exporting,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    },
+                });
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::ChannelPathReceived {
+                        channel_id,
+                        path: target_path.display().to_string(),
+                        size,
+                    },
+                });
+            }
+            Err(error) => {
+                let _ = peer_tx.send(JoinPeerInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "direct_receive_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_host_direct_directory_receive(
+    transport: IrohTransport,
+    host_tx: mpsc::UnboundedSender<HostInput>,
+    provider: PeerTicket,
+    channel_id: ChannelId,
+    name: String,
+    size: Option<u64>,
+    target_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut gate = ProgressEmissionGate::default();
+        match transport
+            .receive_directory_with_progress(
+                &provider,
+                channel_id.as_str(),
+                &target_path,
+                directory_transfer_worker_count(),
+                |progress| {
+                    if !gate.should_emit(
+                        &TransferPhase::Downloading,
+                        progress.bytes_complete,
+                        size.or(progress.bytes_total),
+                    ) {
+                        return;
+                    }
+                    let _ = host_tx.send(HostInput::LocalEvent {
+                        event: MachineEvent::TransferProgress {
+                            channel_id: channel_id.clone(),
+                            item_kind: TransferItemKind::Folder,
+                            name: name.clone(),
+                            phase: TransferPhase::Downloading,
+                            bytes_complete: progress.bytes_complete,
+                            bytes_total: size.or(progress.bytes_total),
+                        },
+                    });
+                },
+            )
+            .await
+        {
+            Ok(size) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::TransferProgress {
+                        channel_id: channel_id.clone(),
+                        item_kind: TransferItemKind::Folder,
+                        name: name.clone(),
+                        phase: TransferPhase::Exporting,
+                        bytes_complete: 0,
+                        bytes_total: Some(size),
+                    },
+                });
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::ChannelPathReceived {
+                        channel_id,
+                        path: target_path.display().to_string(),
+                        size,
+                    },
+                });
+            }
+            Err(error) => {
+                let _ = host_tx.send(HostInput::LocalEvent {
+                    event: MachineEvent::Error {
+                        code: "direct_receive_failed".into(),
+                        message: error.to_string(),
+                        channel_id: Some(channel_id),
+                    },
+                });
+            }
+        }
+    });
+}
+
+fn directory_transfer_worker_count() -> usize {
+    std::env::var("SKYFFLA_DIRECTORY_TRANSFER_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_DIRECTORY_TRANSFER_WORKERS)
 }
 
 pub(crate) fn introduce_member_to_existing_peers(
@@ -565,8 +801,9 @@ pub(crate) fn peer_event_matches_sender(member_id: &MemberId, event: &MachineEve
         | MachineEvent::MemberJoined { .. }
         | MachineEvent::MemberLeft { .. }
         | MachineEvent::RoomClosed { .. }
-        | MachineEvent::ChannelFileReady { .. }
-        | MachineEvent::ChannelFileExported { .. }
+        | MachineEvent::ChannelTransferReady { .. }
+        | MachineEvent::ChannelTransferFinalized { .. }
+        | MachineEvent::ChannelPathReceived { .. }
         | MachineEvent::TransferProgress { .. }
         | MachineEvent::Error { .. } => true,
     }
