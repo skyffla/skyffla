@@ -239,7 +239,7 @@ directory.
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":3,"minor":0},
+  "protocol_version":{"major":2,"minor":0},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
