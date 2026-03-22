@@ -44,10 +44,8 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
             && member_count(event) == Some(2)
     })
     .await?;
-    host.expect_stderr_contains("\"member_name\":\"join\"")
-        .await?;
-    join.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "join").await?;
+    expect_room_link_connected(&mut join, "host").await?;
 
     host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello machine room"}"#)
         .await?;
@@ -84,15 +82,10 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut host, "gamma").await?;
+    expect_room_link_connected(&mut beta, "gamma").await?;
+    expect_room_link_connected(&mut gamma, "beta").await?;
     let beta_stderr = beta.stderr_lines().await;
     let beta_events = beta.events().await;
     let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
@@ -819,48 +812,6 @@ impl MachineProc {
                     bail!(
                         "timed out waiting for {} on {}\n{}",
                         label,
-                        self.label,
-                        self.debug_dump().await
-                    )
-                }
-            }
-        }
-    }
-
-    async fn expect_stderr_contains(&mut self, needle: &str) -> Result<()> {
-        let deadline = Instant::now() + PROCESS_TIMEOUT;
-        loop {
-            if self
-                .stderr_seen
-                .lock()
-                .await
-                .iter()
-                .any(|line| line.contains(needle))
-            {
-                return Ok(());
-            }
-
-            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-                bail!(
-                    "timed out waiting for stderr containing {:?} on {}\n{}",
-                    needle,
-                    self.label,
-                    self.debug_dump().await
-                );
-            };
-
-            match tokio::time::timeout(timeout, self.stderr_rx.recv()).await {
-                Ok(Some(_)) => {}
-                Ok(None) => bail!(
-                    "stderr closed while waiting for {:?} on {}\n{}",
-                    needle,
-                    self.label,
-                    self.debug_dump().await
-                ),
-                Err(_) => {
-                    bail!(
-                        "timed out waiting for stderr containing {:?} on {}\n{}",
-                        needle,
                         self.label,
                         self.debug_dump().await
                     )
