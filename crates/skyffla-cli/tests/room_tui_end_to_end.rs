@@ -274,6 +274,11 @@ async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()>
     alpha.expect_line_contains("member joined: gamma").await?;
     beta.expect_line_contains("members:").await?;
     gamma.expect_line_contains("members:").await?;
+    alpha
+        .expect_line_contains("direct room link ready: beta")
+        .await?;
+    beta.expect_line_contains("direct room link ready: alpha")
+        .await?;
 
     beta.send_line(r#"/send alpha ~/secret.txt"#).await?;
     beta.expect_line_contains("preparing file secret.txt to send to alpha")
