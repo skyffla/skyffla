@@ -108,6 +108,8 @@ async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
     host.expect_line_contains("member joined: beta").await?;
     join.expect_line_contains("joined room").await?;
     join.expect_line_contains("members:").await?;
+    host.expect_line_contains("direct room link ready: beta (m2)")
+        .await?;
     join.expect_line_contains("direct room link ready: alpha (m1)")
         .await?;
 
