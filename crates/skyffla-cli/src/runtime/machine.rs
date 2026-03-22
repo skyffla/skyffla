@@ -1396,44 +1396,25 @@ async fn handle_join_command(
             )
             .await?;
             if let Some(PendingFileTransfer {
-                provider_ticket,
+                provider_ticket: _,
                 transfer,
-                name,
+                name: _,
                 size,
             }) =
                 join_pending_file_transfer(state, &self_member, &channel_id)?
             {
                 state.pending_accepted_files.insert(channel_id.clone());
-                match (transfer.item_kind.clone(), size) {
-                    (TransferItemKind::File, Some(size)) => {
-                        let target_path = receive_target_path(download_dir, &name)?;
-                        state.pending_accepted_files.remove(&channel_id);
-                        spawn_join_direct_receive(
-                            transport.clone(),
-                            peer_tx,
-                            PeerTicket {
-                                encoded: provider_ticket,
-                            },
-                            channel_id,
-                            name,
-                            size,
-                            target_path,
-                        );
-                    }
-                    _ => {
-                        maybe_start_join_pending_receive(
-                            state,
-                            download_dir,
-                            transport,
-                            peer_tx,
-                            &MachineEvent::ChannelTransferReady {
-                                channel_id,
-                                size,
-                                transfer,
-                            },
-                        )?;
-                    }
-                }
+                maybe_start_join_pending_receive(
+                    state,
+                    download_dir,
+                    transport,
+                    peer_tx,
+                    &MachineEvent::ChannelTransferReady {
+                        channel_id,
+                        size,
+                        transfer,
+                    },
+                )?;
             }
             Ok(())
         }
@@ -1988,6 +1969,27 @@ fn maybe_start_join_pending_receive(
         return Ok(());
     };
     match transfer.item_kind.clone() {
+        TransferItemKind::File => {
+            let Some(size) = size else {
+                return Ok(());
+            };
+            if transfer.integrity.is_none() {
+                return Ok(());
+            }
+            let target_path = receive_target_path(download_dir, &name)?;
+            state.pending_accepted_files.remove(channel_id);
+            spawn_join_direct_receive(
+                transport.clone(),
+                peer_tx,
+                PeerTicket {
+                    encoded: provider_ticket,
+                },
+                channel_id.clone(),
+                name,
+                size,
+                target_path,
+            );
+        }
         TransferItemKind::Folder => {
             let target_path = receive_target_path(download_dir, &name)?;
             state.pending_accepted_files.remove(channel_id);
@@ -2003,7 +2005,6 @@ fn maybe_start_join_pending_receive(
                 target_path,
             );
         }
-        TransferItemKind::File => {}
     }
     Ok(())
 }
@@ -2075,6 +2076,25 @@ fn maybe_start_host_pending_receive(
         return Ok(());
     };
     match file.transfer.item_kind.clone() {
+        TransferItemKind::File => {
+            let Some(size) = file.size else {
+                return Ok(());
+            };
+            if file.transfer.integrity.is_none() {
+                return Ok(());
+            }
+            let target_path = receive_target_path(download_dir, &file.name)?;
+            host_state.pending_accepted_files.remove(channel_id);
+            spawn_host_direct_receive(
+                transport.clone(),
+                host_tx.clone(),
+                provider,
+                channel_id.clone(),
+                file.name,
+                size,
+                target_path,
+            );
+        }
         TransferItemKind::Folder => {
             let target_path = receive_target_path(download_dir, &file.name)?;
             host_state.pending_accepted_files.remove(channel_id);
@@ -2088,7 +2108,6 @@ fn maybe_start_host_pending_receive(
                 target_path,
             );
         }
-        TransferItemKind::File => {}
     }
     Ok(())
 }
@@ -2237,37 +2256,20 @@ async fn handle_host_command(
                 .accept_channel(sender, &channel_id)
                 .map_err(room_error)?;
             if local_command {
-                if let Some((provider, file)) =
+                if let Some((_provider, _file)) =
                     host_pending_file_download(room, peers, sender, &channel_id)?
                 {
                     host_state.pending_accepted_files.insert(channel_id.clone());
-                    match (file.transfer.item_kind, file.size) {
-                        (TransferItemKind::File, Some(size)) => {
-                            let target_path = receive_target_path(download_dir, &file.name)?;
-                            host_state.pending_accepted_files.remove(&channel_id);
-                            spawn_host_direct_receive(
-                                transport.clone(),
-                                host_tx.clone(),
-                                provider,
-                                channel_id.clone(),
-                                file.name,
-                                size,
-                                target_path,
-                            );
-                        }
-                        _ => {
-                            maybe_start_host_pending_receive(
-                                room,
-                                peers,
-                                host_state,
-                                sender,
-                                &channel_id,
-                                download_dir,
-                                transport,
-                                host_tx,
-                            )?;
-                        }
-                    }
+                    maybe_start_host_pending_receive(
+                        room,
+                        peers,
+                        host_state,
+                        sender,
+                        &channel_id,
+                        download_dir,
+                        transport,
+                        host_tx,
+                    )?;
                 }
             }
             deliver_routed_events(room.host_member(), routed, stdout, peers).await
@@ -2435,5 +2437,123 @@ impl JoinState {
             .as_ref()
             .and_then(|member_id| self.members.get(member_id))
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use skyffla_protocol::room::{ChannelKind, TransferDigest};
+
+    use super::*;
+    use crate::runtime::machine_state::JoinChannelState;
+
+    fn join_state_with_pending_file(
+        self_member: &MemberId,
+        host_member: &MemberId,
+        channel_id: &ChannelId,
+        transfer: TransferOffer,
+    ) -> JoinState {
+        let mut channels = BTreeMap::new();
+        channels.insert(
+            channel_id.clone(),
+            JoinChannelState {
+                opener: host_member.clone(),
+                kind: ChannelKind::File,
+                participants: BTreeSet::from([host_member.clone(), self_member.clone()]),
+                name: Some("report.txt".into()),
+                size: Some(11),
+                transfer: Some(transfer),
+                local_file_ready: false,
+            },
+        );
+        let mut member_tickets = BTreeMap::new();
+        member_tickets.insert(host_member.clone(), "provider-ticket".into());
+
+        JoinState {
+            self_member: Some(self_member.clone()),
+            host_member: Some(host_member.clone()),
+            members: BTreeMap::new(),
+            member_tickets,
+            channels,
+            peer_links: BTreeMap::new(),
+            pending_accepted_files: BTreeSet::from([channel_id.clone()]),
+            pending_received_files: BTreeMap::new(),
+            local_name: "beta".into(),
+            local_fingerprint: None,
+            local_ticket: "local-ticket".into(),
+            pending_host_ticket: None,
+            host_file_transfer_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn provisional_file_accept_stays_pending_until_integrity_is_available() {
+        let host_member = MemberId::new("m1").unwrap();
+        let self_member = MemberId::new("m2").unwrap();
+        let channel_id = ChannelId::new("file-1").unwrap();
+        let transfer = TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: None,
+        };
+        let mut state =
+            join_state_with_pending_file(&self_member, &host_member, &channel_id, transfer.clone());
+        let transport = IrohTransport::bind().await.unwrap();
+        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+
+        maybe_start_join_pending_receive(
+            &mut state,
+            Path::new("."),
+            &transport,
+            peer_tx,
+            &MachineEvent::ChannelTransferReady {
+                channel_id: channel_id.clone(),
+                size: Some(11),
+                transfer,
+            },
+        )
+        .unwrap();
+
+        assert!(state.pending_accepted_files.contains(&channel_id));
+        assert!(state.pending_received_files.is_empty());
+        assert!(peer_rx.try_recv().is_err());
+
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn finalized_file_accept_starts_receive_and_clears_pending_flag() {
+        let host_member = MemberId::new("m1").unwrap();
+        let self_member = MemberId::new("m2").unwrap();
+        let channel_id = ChannelId::new("file-1").unwrap();
+        let transfer = TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: Some(TransferDigest {
+                algorithm: "blake3".into(),
+                value: "feedbeef".into(),
+            }),
+        };
+        let mut state =
+            join_state_with_pending_file(&self_member, &host_member, &channel_id, transfer.clone());
+        let transport = IrohTransport::bind().await.unwrap();
+        let (peer_tx, _peer_rx) = mpsc::unbounded_channel();
+
+        maybe_start_join_pending_receive(
+            &mut state,
+            Path::new("."),
+            &transport,
+            peer_tx,
+            &MachineEvent::ChannelTransferFinalized {
+                channel_id: channel_id.clone(),
+                size: Some(11),
+                transfer,
+            },
+        )
+        .unwrap();
+
+        assert!(!state.pending_accepted_files.contains(&channel_id));
+
+        transport.close().await;
     }
 }
