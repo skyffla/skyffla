@@ -8,7 +8,6 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 - Redesign file and folder transfers around native streaming `send_path`, including separate file-transfer capability negotiation, receiver credit flow control, overlapped hashing and transfer, shared folder transfer connections, improved TUI progress reporting, and new file-transfer architecture and benchmark docs.
 - Bump the wrapper-facing machine protocol to `2.0` for the new transfer metadata and event flow, and update the Python and Node wrappers to validate the new shape.
-- Fix an early-accept room TUI file receive race that could leave accepted transfers stuck while the sender was still preparing the final transfer metadata.
 
 ## [1.2.1] - 2026-03-17
 
