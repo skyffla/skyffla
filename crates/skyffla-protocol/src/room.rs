@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {

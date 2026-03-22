@@ -71,7 +71,7 @@ class ProtocolVersion(SkyfflaModel):
         return f"{self.major}.{self.minor}"
 
 
-MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=3, minor=0)
+MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=2, minor=0)
 
 
 class BlobRef(SkyfflaModel):
