@@ -41,7 +41,7 @@ def _find_binary() -> str:
 
 def _skip_if_permission_error(exc: SkyfflaProcessExited) -> None:
     message = str(exc)
-    if "Operation not permitted" in message or "Failed to bind sockets" in message:
+    if "Operation not permitted" in message or "permission denied" in message:
         pytest.skip("local environment does not allow Skyffla transport sockets")
 
 

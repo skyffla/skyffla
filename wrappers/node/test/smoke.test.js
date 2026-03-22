@@ -31,7 +31,7 @@ function isPermissionError(error) {
   const message = String(error?.message ?? error);
   return (
     message.includes("Operation not permitted") ||
-    message.includes("Failed to bind sockets") ||
+    message.includes("permission denied") ||
     message.includes("listen EPERM")
   );
 }

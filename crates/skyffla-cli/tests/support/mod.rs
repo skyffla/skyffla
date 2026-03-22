@@ -327,7 +327,7 @@ pub async fn wait_for_room_ready(server_url: &str, room: &str) -> Result<()> {
 fn is_transport_permission_error(error: &TransportError) -> bool {
     matches!(error, TransportError::EndpointBind(bind_error) if {
         let message = bind_error.to_string();
-        message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
+        message.contains("Operation not permitted") || message.contains("permission denied")
     })
 }
 

@@ -43,7 +43,7 @@ def test_room_welcome_uses_structured_protocol_version() -> None:
     event = parse_machine_event(
         {
             "type": "room_welcome",
-            "protocol_version": {"major": 1, "minor": 0},
+            "protocol_version": {"major": 3, "minor": 0},
             "room_id": "warehouse",
             "self_member": "m1",
             "host_member": "m1",
@@ -54,7 +54,7 @@ def test_room_welcome_uses_structured_protocol_version() -> None:
     assert event.protocol_version == MACHINE_PROTOCOL_VERSION
     assert dump_message(event) == {
         "type": "room_welcome",
-        "protocol_version": {"major": 1, "minor": 0},
+        "protocol_version": {"major": 3, "minor": 0},
         "room_id": "warehouse",
         "self_member": "m1",
         "host_member": "m1",
@@ -99,10 +99,10 @@ def test_parse_cli_version_reads_standard_output() -> None:
 
 
 def test_machine_protocol_version_requires_matching_major() -> None:
-    ensure_machine_protocol_version(ProtocolVersion(major=1, minor=7))
+    ensure_machine_protocol_version(ProtocolVersion(major=3, minor=7))
 
     try:
-        ensure_machine_protocol_version(ProtocolVersion(major=2, minor=0))
+        ensure_machine_protocol_version(ProtocolVersion(major=4, minor=0))
     except SkyfflaMachineProtocolMismatch as exc:
         assert "same machine protocol major version" in str(exc)
     else:

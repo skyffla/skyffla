@@ -28,7 +28,7 @@ export const TransferPhase = Object.freeze({
 });
 
 export const MACHINE_PROTOCOL_VERSION = Object.freeze({
-  major: 1,
+  major: 3,
   minor: 0,
 });
 
