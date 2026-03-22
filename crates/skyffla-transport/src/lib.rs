@@ -569,7 +569,7 @@ impl IrohTransport {
         worker_count: usize,
         mut on_progress: impl FnMut(LocalTransferProgress),
     ) -> Result<u64, TransportError> {
-        let (_connection, send, mut recv) =
+        let (connection, mut send, mut recv) =
             request_transfer_connection(self, provider, TransferRequest::manifest(channel_id))
                 .await?;
         let (total_size, entries) = expect_ready_directory_response(
@@ -590,12 +590,11 @@ impl IrohTransport {
         tokio::fs::create_dir_all(&temp_root)
             .await
             .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+        let _ = send.finish();
         drop(recv);
-        drop(send);
 
         receive_directory_entries(
-            self.clone(),
-            provider.clone(),
+            connection,
             channel_id,
             &temp_root,
             &entries,
@@ -693,62 +692,16 @@ impl IrohTransport {
             }
             RegisteredTransfer::Directory(registered) => {
                 if let Some(entry_path) = request.entry_path {
-                    let (entry, source) =
-                        match lookup_directory_entry(&registered, &request.channel_id, &entry_path)
-                        {
-                            Ok(value) => value,
-                            Err(TransportError::DirectFileSend(message)) => {
-                                write_transfer_error_response(&mut send, message).await?;
-                                return Ok(());
-                            }
-                            Err(error) => return Err(error),
-                        };
-                    write_transfer_message(
-                        &mut send,
-                        &TransferResponse::ReadyFile {
-                            size: entry.size,
-                            content_hash: None,
-                        },
-                        "transfer response",
+                    let (_, credit_recv) = connection.accept_data_stream().await?;
+                    serve_directory_entry_request(
+                        registered,
+                        request.channel_id.clone(),
+                        entry_path,
+                        send,
+                        recv,
+                        credit_recv,
                     )
                     .await?;
-                    let (_, mut credit_recv) = connection.accept_data_stream().await?;
-                    let mut file = File::open(&source)
-                        .await
-                        .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-                    let mut last_entry_bytes = 0_u64;
-                    let content_hash = serve_file_with_credit_and_hash(
-                        &mut send,
-                        &mut credit_recv,
-                        &mut file,
-                        |entry_bytes_complete| {
-                            let delta = entry_bytes_complete.saturating_sub(last_entry_bytes);
-                            last_entry_bytes = entry_bytes_complete;
-                            if let Some(progress_tx) = &registered.progress_tx {
-                                let bytes_complete = registered
-                                    .aggregate_progress
-                                    .fetch_add(delta, std::sync::atomic::Ordering::Relaxed)
-                                    .saturating_add(delta);
-                                let _ = progress_tx.send(TransferRuntimeProgress {
-                                    channel_id: request.channel_id.clone(),
-                                    item_kind: TransferItemKind::Folder,
-                                    name: registered.prepared.display_name.clone(),
-                                    phase: TransferPhase::Downloading,
-                                    bytes_complete,
-                                    bytes_total: Some(registered.prepared.total_size),
-                                });
-                            }
-                        },
-                    )
-                    .await?;
-                    write_transfer_message(
-                        &mut send,
-                        &TransferResponse::FinalizedFile { content_hash },
-                        "transfer response",
-                    )
-                    .await?;
-                    let _ = send.finish();
-                    let _ = recv.read_to_end(1024).await;
                     return Ok(());
                 } else {
                     write_transfer_message(
@@ -770,8 +723,56 @@ impl IrohTransport {
                             bytes_total: Some(registered.prepared.total_size),
                         });
                     }
-                    let _ = send.finish();
-                    let _ = recv.read_to_end(1024).await;
+                    send.finish()
+                        .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+                    let expected_file_requests = registered
+                        .prepared
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.entry_kind == PreparedDirectoryEntryKind::File)
+                        .count();
+                    let mut join_set = tokio::task::JoinSet::new();
+                    for _ in 0..expected_file_requests {
+                        let (entry_send, mut entry_recv) = connection.accept_data_stream().await?;
+                        let request: Option<TransferRequest> =
+                            read_transfer_message(&mut entry_recv, "transfer request").await?;
+                        let Some(request) = request else {
+                            return Err(TransportError::DirectFileSend(
+                                "directory transfer connection closed before all file requests arrived"
+                                    .into(),
+                            ));
+                        };
+                        let Some(entry_path) = request.entry_path else {
+                            return Err(TransportError::DirectFileSend(format!(
+                                "directory transfer channel {} expected entry request, got manifest",
+                                request.channel_id
+                            )));
+                        };
+                        let (_, credit_recv) = connection.accept_data_stream().await?;
+                        let registered = registered.clone();
+                        join_set.spawn(async move {
+                            serve_directory_entry_request(
+                                registered,
+                                request.channel_id,
+                                entry_path,
+                                entry_send,
+                                entry_recv,
+                                credit_recv,
+                            )
+                            .await
+                        });
+                    }
+                    while let Some(result) = join_set.join_next().await {
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err(error),
+                            Err(error) => {
+                                return Err(TransportError::DirectFileSend(format!(
+                                    "directory transfer task failed: {error}"
+                                )));
+                            }
+                        }
+                    }
                     return Ok(());
                 }
             }
@@ -1052,8 +1053,7 @@ async fn receive_file_to_temp(
 }
 
 async fn receive_directory_entries(
-    transport: IrohTransport,
-    provider: PeerTicket,
+    connection: IrohConnection,
     channel_id: &str,
     temp_root: &Path,
     entries: &[PreparedDirectoryEntry],
@@ -1064,6 +1064,7 @@ async fn receive_directory_entries(
     let mut total_complete = 0_u64;
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut join_set = tokio::task::JoinSet::new();
+    let stream_open_lock = Arc::new(Mutex::new(()));
     let file_entries = entries
         .iter()
         .filter(|entry| entry.entry_kind == PreparedDirectoryEntryKind::File)
@@ -1092,12 +1093,12 @@ async fn receive_directory_entries(
     while entry_index < file_entries.len() && in_flight < worker_count {
         spawn_directory_entry_receive(
             &mut join_set,
-            transport.clone(),
-            provider.clone(),
+            connection.clone(),
             channel_id.to_string(),
             temp_root.to_path_buf(),
             file_entries[entry_index].clone(),
             progress_tx.clone(),
+            stream_open_lock.clone(),
         );
         entry_index += 1;
         in_flight += 1;
@@ -1135,12 +1136,12 @@ async fn receive_directory_entries(
                 if entry_index < file_entries.len() {
                     spawn_directory_entry_receive(
                         &mut join_set,
-                        transport.clone(),
-                        provider.clone(),
+                        connection.clone(),
                         channel_id.to_string(),
                         temp_root.to_path_buf(),
                         file_entries[entry_index].clone(),
                         progress_tx.clone(),
+                        stream_open_lock.clone(),
                     );
                     entry_index += 1;
                     in_flight += 1;
@@ -1196,20 +1197,91 @@ fn lookup_directory_entry(
     Ok((entry, registered.root.join(relative_path)))
 }
 
+async fn serve_directory_entry_request(
+    registered: RegisteredDirectory,
+    channel_id: String,
+    entry_path: String,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    mut credit_recv: RecvStream,
+) -> Result<(), TransportError> {
+    let (entry, source) = match lookup_directory_entry(&registered, &channel_id, &entry_path) {
+        Ok(value) => value,
+        Err(TransportError::DirectFileSend(message)) => {
+            write_transfer_error_response(&mut send, message).await?;
+            send.finish()
+                .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    write_transfer_message(
+        &mut send,
+        &TransferResponse::ReadyFile {
+            size: entry.size,
+            content_hash: None,
+        },
+        "transfer response",
+    )
+    .await?;
+    let mut file = File::open(&source)
+        .await
+        .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+    let mut last_entry_bytes = 0_u64;
+    let content_hash = serve_file_with_credit_and_hash(
+        &mut send,
+        &mut credit_recv,
+        &mut file,
+        |entry_bytes_complete| {
+            let delta = entry_bytes_complete.saturating_sub(last_entry_bytes);
+            last_entry_bytes = entry_bytes_complete;
+            if let Some(progress_tx) = &registered.progress_tx {
+                let bytes_complete = registered
+                    .aggregate_progress
+                    .fetch_add(delta, std::sync::atomic::Ordering::Relaxed)
+                    .saturating_add(delta);
+                let _ = progress_tx.send(TransferRuntimeProgress {
+                    channel_id: channel_id.clone(),
+                    item_kind: TransferItemKind::Folder,
+                    name: registered.prepared.display_name.clone(),
+                    phase: TransferPhase::Downloading,
+                    bytes_complete,
+                    bytes_total: Some(registered.prepared.total_size),
+                });
+            }
+        },
+    )
+    .await?;
+    write_transfer_message(
+        &mut send,
+        &TransferResponse::FinalizedFile { content_hash },
+        "transfer response",
+    )
+    .await?;
+    send.finish()
+        .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+    let _ = recv.read_to_end(1024).await;
+    Ok(())
+}
+
 async fn receive_directory_entry(
-    transport: IrohTransport,
-    provider: PeerTicket,
+    connection: IrohConnection,
     channel_id: String,
     temp_root: PathBuf,
     entry: PreparedDirectoryEntry,
     progress_tx: mpsc::UnboundedSender<u64>,
+    stream_open_lock: Arc<Mutex<()>>,
 ) -> Result<(), TransportError> {
-    let (connection, mut send, mut recv) = request_transfer_connection(
-        &transport,
-        &provider,
-        TransferRequest::entry(channel_id, entry.relative_path.clone()),
+    let _stream_open_guard = stream_open_lock.lock().await;
+    let (mut send, mut recv) = connection.open_data_stream().await?;
+    let (mut credit_send, _) = connection.open_data_stream().await?;
+    write_transfer_message(
+        &mut send,
+        &TransferRequest::entry(channel_id, entry.relative_path.clone()),
+        "transfer request",
     )
     .await?;
+    drop(_stream_open_guard);
 
     let size = expect_ready_file_response(
         read_transfer_response_required(&mut recv).await?,
@@ -1234,7 +1306,6 @@ async fn receive_directory_entry(
     let mut file = File::create(&destination)
         .await
         .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
-    let (mut credit_send, _) = connection.open_data_stream().await?;
     write_transfer_credit(&mut credit_send, TRANSFER_WINDOW_BYTES, "receiver credit").await?;
 
     let mut hasher = blake3::Hasher::new();
@@ -1306,21 +1377,21 @@ async fn receive_directory_entry(
 
 fn spawn_directory_entry_receive(
     join_set: &mut tokio::task::JoinSet<Result<(), TransportError>>,
-    transport: IrohTransport,
-    provider: PeerTicket,
+    connection: IrohConnection,
     channel_id: String,
     temp_root: PathBuf,
     entry: PreparedDirectoryEntry,
     progress_tx: mpsc::UnboundedSender<u64>,
+    stream_open_lock: Arc<Mutex<()>>,
 ) {
     join_set.spawn(async move {
         receive_directory_entry(
-            transport,
-            provider,
+            connection,
             channel_id,
             temp_root,
             entry,
             progress_tx,
+            stream_open_lock,
         )
         .await
     });
@@ -1990,22 +2061,15 @@ mod tests {
             .await;
         let host_ticket = host.local_ticket().expect("host ticket should encode");
         let server = host.clone();
-        let expected_connections = 1 + prepared
-            .entries
-            .iter()
-            .filter(|entry| entry.entry_kind == PreparedDirectoryEntryKind::File)
-            .count();
         let serve_task = tokio::spawn(async move {
-            for _ in 0..expected_connections {
-                let connection = server
-                    .accept_transfer_connection()
-                    .await
-                    .expect("host should accept transfer connection");
-                server
-                    .serve_registered_transfer(connection)
-                    .await
-                    .expect("host should serve registered directory");
-            }
+            let connection = server
+                .accept_transfer_connection()
+                .await
+                .expect("host should accept transfer connection");
+            server
+                .serve_registered_transfer(connection)
+                .await
+                .expect("host should serve registered directory");
         });
 
         let size = joiner
