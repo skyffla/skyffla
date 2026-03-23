@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
@@ -26,6 +27,10 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         return run_scripted_room_tui(role, config).await;
     }
 
+    ensure_interactive_terminal()?;
+    let mut backend = spawn_machine_backend(role, config).await?;
+    let mut ui = UiState::new(&config.room_id, &config.peer_name, "room")
+        .map_err(|error| CliError::local_io(error.to_string()))?;
     let _terminal =
         TerminalUiGuard::activate().map_err(|error| CliError::runtime(error.to_string()))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -45,9 +50,6 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         }
     });
 
-    let mut backend = spawn_machine_backend(role, config).await?;
-    let mut ui = UiState::new(&config.room_id, &config.peer_name, "room")
-        .map_err(|error| CliError::local_io(error.to_string()))?;
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
 
     ui.system("room session ready; use /help for commands".to_string());
@@ -1477,6 +1479,23 @@ fn scripted_mode() -> bool {
     std::env::var_os("SKYFFLA_TUI_SCRIPTED").is_some()
 }
 
+fn ensure_interactive_terminal() -> Result<(), CliError> {
+    if interactive_tui_supported(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
+        return Ok(());
+    }
+
+    Err(CliError::usage(
+        "default room UI requires an interactive terminal; rerun in a terminal or use --machine",
+    ))
+}
+
+fn interactive_tui_supported(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
+}
+
 fn scripted_progress_lines_enabled() -> bool {
     std::env::var_os("SKYFFLA_TUI_SCRIPTED_QUIET_PROGRESS").is_none()
 }
@@ -2105,6 +2124,13 @@ mod tests {
             ),
             "sent file transfer-test-2g-random.bin (2048.0MiB in 32s at 64.0MiB/s)"
         );
+    }
+
+    #[test]
+    fn interactive_tui_requires_terminal_on_both_stdin_and_stdout() {
+        assert!(interactive_tui_supported(true, true));
+        assert!(!interactive_tui_supported(false, true));
+        assert!(!interactive_tui_supported(true, false));
     }
 
     #[test]
