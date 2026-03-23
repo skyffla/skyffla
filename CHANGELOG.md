@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-23
+
+- Simplify the public CLI to `skyffla <room-id>` with `--host`, remove the old `host` and `join` commands, and update the TUI backend spawning, wrappers, docs, and examples to match.
+- Remove raw 1:1 `--stdio` support so the product surface is room-first and the automation story stays centered on wrappers and machine mode.
+- Rename internal `stream_id` usage to `room_id` across the CLI, session flow, local state, and user-facing messages.
+- Improve TUI startup failures so non-interactive launches and early backend exits surface clear terminal errors instead of briefly flashing and disappearing.
+- Preserve rendezvous HTTP rejection details in client errors, and bump the rendezvous API to `2.0` so old servers fail with an explicit API-version mismatch after the capability schema cleanup.
+
 ## [1.3.0] - 2026-03-22
 
 - Redesign file and folder transfers around native streaming `send_path`, including separate file-transfer capability negotiation, receiver credit flow control, overlapped hashing and transfer, shared folder transfer connections, improved TUI progress reporting, and new file-transfer architecture and benchmark docs.
