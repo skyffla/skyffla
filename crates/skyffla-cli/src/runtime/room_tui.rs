@@ -51,6 +51,9 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
     });
 
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut last_backend_status = None;
 
     ui.system("room session ready; use /help for commands".to_string());
     ui.render();
@@ -83,7 +86,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                 }
                 ui.render();
             }
-            maybe_event = backend.stdout_rx.recv() => {
+            maybe_event = backend.stdout_rx.recv(), if stdout_open => {
                 match maybe_event {
                     Some(event) => {
                         let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
@@ -98,27 +101,25 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                             break;
                         }
                     }
-                    None => break,
+                    None => stdout_open = false,
                 }
             }
-            maybe_status = backend.stderr_rx.recv() => {
+            maybe_status = backend.stderr_rx.recv(), if stderr_open => {
                 match maybe_status {
                     Some(line) => {
                         if let Some(message) = status_line(&line) {
+                            last_backend_status = Some(message.clone());
                             ui.system(message);
                             ui.render();
                         }
                     }
-                    None => {}
+                    None => stderr_open = false,
                 }
             }
             status = backend.child.wait() => {
                 let status = status.map_err(|error| CliError::runtime(error.to_string()))?;
-                if !status.success() {
-                    ui.system(format!("backend exited with status {status}"));
-                    ui.render();
-                }
-                break;
+                drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+                return Err(backend_exit_error(status, last_backend_status));
             }
         }
     }
@@ -131,6 +132,9 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
     let include_transfer_progress_lines = scripted_progress_lines_enabled();
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut last_backend_status = None;
 
     loop {
         tokio::select! {
@@ -165,7 +169,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                     Err(error) => return Err(CliError::runtime(error.to_string())),
                 }
             }
-            maybe_event = backend.stdout_rx.recv() => {
+            maybe_event = backend.stdout_rx.recv(), if stdout_open => {
                 match maybe_event {
                     Some(event) => {
                         let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
@@ -188,22 +192,23 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                             break;
                         }
                     }
-                    None => break,
+                    None => stdout_open = false,
                 }
             }
-            maybe_status = backend.stderr_rx.recv() => {
+            maybe_status = backend.stderr_rx.recv(), if stderr_open => {
                 if let Some(line) = maybe_status {
                     if let Some(message) = status_line(&line) {
+                        last_backend_status = Some(message.clone());
                         emit_scripted_line(&message).await?;
                     }
+                } else {
+                    stderr_open = false;
                 }
             }
             status = backend.child.wait() => {
                 let status = status.map_err(|error| CliError::runtime(error.to_string()))?;
-                if !status.success() {
-                    emit_scripted_line(&format!("backend exited with status {status}")).await?;
-                }
-                break;
+                drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+                return Err(backend_exit_error(status, last_backend_status));
             }
         }
     }
@@ -1472,6 +1477,31 @@ fn status_line(line: &str) -> Option<String> {
             value.get("message")?.as_str()?
         )),
         _ => None,
+    }
+}
+
+fn drain_backend_status_lines(
+    stderr_rx: &mut mpsc::UnboundedReceiver<String>,
+    last_backend_status: &mut Option<String>,
+) {
+    while let Ok(line) = stderr_rx.try_recv() {
+        if let Some(message) = status_line(&line) {
+            *last_backend_status = Some(message);
+        }
+    }
+}
+
+fn backend_exit_error(
+    status: std::process::ExitStatus,
+    last_backend_status: Option<String>,
+) -> CliError {
+    if let Some(message) = last_backend_status {
+        return CliError::runtime(message);
+    }
+    if status.success() {
+        CliError::runtime("room backend exited unexpectedly")
+    } else {
+        CliError::runtime(format!("backend exited with status {status}"))
     }
 }
 
