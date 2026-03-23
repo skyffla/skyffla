@@ -141,9 +141,7 @@ fn validate_room_id(room_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        resolve_auto_accept_policy, resolve_peer_name, resolve_room_id, validate_room_id,
-    };
+    use super::{resolve_auto_accept_policy, resolve_peer_name, resolve_room_id, validate_room_id};
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
     #[test]

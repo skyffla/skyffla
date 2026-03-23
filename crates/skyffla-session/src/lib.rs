@@ -52,24 +52,14 @@ pub enum SessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    HostRequested {
-        room_id: String,
-    },
-    JoinRequested {
-        room_id: String,
-    },
+    HostRequested { room_id: String },
+    JoinRequested { room_id: String },
     TransportConnecting,
-    PeerConnected {
-        session_id: String,
-    },
-    Negotiated {
-        session_id: String,
-    },
+    PeerConnected { session_id: String },
+    Negotiated { session_id: String },
     CloseRequested,
     Closed,
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 #[derive(Debug)]
@@ -106,10 +96,9 @@ impl SessionMachine {
             (SessionState::Connecting { .. }, SessionEvent::PeerConnected { session_id }) => {
                 SessionState::Negotiating { session_id }
             }
-            (
-                SessionState::Negotiating { .. },
-                SessionEvent::Negotiated { session_id },
-            ) => SessionState::Machine { session_id },
+            (SessionState::Negotiating { .. }, SessionEvent::Negotiated { session_id }) => {
+                SessionState::Machine { session_id }
+            }
             (SessionState::Machine { .. }, SessionEvent::CloseRequested)
             | (SessionState::Hosting { .. }, SessionEvent::CloseRequested)
             | (SessionState::Joining { .. }, SessionEvent::CloseRequested)
