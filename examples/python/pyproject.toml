@@ -12,7 +12,7 @@ dependencies = [
   "openai>=1.0",
   "pydantic>=2.8,<3",
   "python-dotenv>=1.0",
-  "skyffla==1.2.1",
+  "skyffla",
 ]
 
 [dependency-groups]
@@ -22,6 +22,9 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+skyffla = { path = "../../wrappers/python" }
 
 [tool.pytest.ini_options]
 testpaths = ["room-agents-studio"]

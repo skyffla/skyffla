@@ -447,7 +447,10 @@ async function spawnRoom(role, roomId, options) {
   const binary = options.binary ?? defaultBinary();
   await ensureBinaryVersion(binary);
 
-  const argv = [role, roomId, "machine", "--json"];
+  const argv = [roomId, "--machine", "--json"];
+  if (role === "host") {
+    argv.push("--host");
+  }
   if (options.server !== undefined) {
     argv.push("--server", options.server);
   }
