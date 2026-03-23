@@ -10,7 +10,7 @@ pub use framing::{
     decode_frame, encode_frame, read_frame, write_frame, FrameError, MAX_FRAME_SIZE,
 };
 
-pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
 pub const FILE_TRANSFER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,20 +42,12 @@ pub enum TransportCapability {
     WebsocketRelay,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionMode {
-    Stdio,
-    Machine,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Capabilities {
     pub chat: bool,
     pub file: bool,
     pub folder: bool,
     pub clipboard: bool,
-    pub stdio: bool,
     pub transport: Vec<TransportCapability>,
 }
 
@@ -66,7 +58,6 @@ impl Default for Capabilities {
             file: true,
             folder: true,
             clipboard: true,
-            stdio: true,
             transport: vec![TransportCapability::NativeDirect],
         }
     }
@@ -167,7 +158,6 @@ pub struct Hello {
     pub peer_ticket: Option<String>,
     pub capabilities: Capabilities,
     pub transport_capabilities: Vec<TransportCapability>,
-    pub session_mode: SessionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,7 +177,6 @@ pub enum TransferKind {
     File,
     FolderArchive,
     Clipboard,
-    Stdio,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

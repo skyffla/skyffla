@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
@@ -26,6 +27,10 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         return run_scripted_room_tui(role, config).await;
     }
 
+    ensure_interactive_terminal()?;
+    let mut backend = spawn_machine_backend(role, config).await?;
+    let mut ui = UiState::new(&config.room_id, &config.peer_name, "room")
+        .map_err(|error| CliError::local_io(error.to_string()))?;
     let _terminal =
         TerminalUiGuard::activate().map_err(|error| CliError::runtime(error.to_string()))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -45,10 +50,10 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         }
     });
 
-    let mut backend = spawn_machine_backend(role, config).await?;
-    let mut ui = UiState::new(&config.stream_id, &config.peer_name, "room")
-        .map_err(|error| CliError::local_io(error.to_string()))?;
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut last_backend_status = None;
 
     ui.system("room session ready; use /help for commands".to_string());
     ui.render();
@@ -81,7 +86,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                 }
                 ui.render();
             }
-            maybe_event = backend.stdout_rx.recv() => {
+            maybe_event = backend.stdout_rx.recv(), if stdout_open => {
                 match maybe_event {
                     Some(event) => {
                         let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
@@ -96,27 +101,25 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
                             break;
                         }
                     }
-                    None => break,
+                    None => stdout_open = false,
                 }
             }
-            maybe_status = backend.stderr_rx.recv() => {
+            maybe_status = backend.stderr_rx.recv(), if stderr_open => {
                 match maybe_status {
                     Some(line) => {
                         if let Some(message) = status_line(&line) {
+                            last_backend_status = Some(message.clone());
                             ui.system(message);
                             ui.render();
                         }
                     }
-                    None => {}
+                    None => stderr_open = false,
                 }
             }
             status = backend.child.wait() => {
                 let status = status.map_err(|error| CliError::runtime(error.to_string()))?;
-                if !status.success() {
-                    ui.system(format!("backend exited with status {status}"));
-                    ui.render();
-                }
-                break;
+                drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+                return Err(backend_exit_error(status, last_backend_status));
             }
         }
     }
@@ -129,6 +132,9 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
     let include_transfer_progress_lines = scripted_progress_lines_enabled();
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut last_backend_status = None;
 
     loop {
         tokio::select! {
@@ -163,7 +169,7 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                     Err(error) => return Err(CliError::runtime(error.to_string())),
                 }
             }
-            maybe_event = backend.stdout_rx.recv() => {
+            maybe_event = backend.stdout_rx.recv(), if stdout_open => {
                 match maybe_event {
                     Some(event) => {
                         let terminal_event = matches!(event, MachineEvent::RoomClosed { .. });
@@ -186,22 +192,23 @@ async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(),
                             break;
                         }
                     }
-                    None => break,
+                    None => stdout_open = false,
                 }
             }
-            maybe_status = backend.stderr_rx.recv() => {
+            maybe_status = backend.stderr_rx.recv(), if stderr_open => {
                 if let Some(line) = maybe_status {
                     if let Some(message) = status_line(&line) {
+                        last_backend_status = Some(message.clone());
                         emit_scripted_line(&message).await?;
                     }
+                } else {
+                    stderr_open = false;
                 }
             }
             status = backend.child.wait() => {
                 let status = status.map_err(|error| CliError::runtime(error.to_string()))?;
-                if !status.success() {
-                    emit_scripted_line(&format!("backend exited with status {status}")).await?;
-                }
-                break;
+                drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+                return Err(backend_exit_error(status, last_backend_status));
             }
         }
     }
@@ -247,12 +254,11 @@ async fn spawn_machine_backend(
 ) -> Result<RoomBackend, CliError> {
     let exe = std::env::current_exe().map_err(|error| CliError::local_io(error.to_string()))?;
     let mut command = Command::new(exe);
-    command.arg(match role {
-        Role::Host => "host",
-        Role::Join => "join",
-    });
-    command.arg(&config.stream_id);
-    command.arg("machine");
+    command.arg(&config.room_id);
+    if matches!(role, Role::Host) {
+        command.arg("--host");
+    }
+    command.arg("--machine");
     command.arg("--server").arg(&config.rendezvous_server);
     command.arg("--download-dir").arg(&config.download_dir);
     command.arg("--name").arg(&config.peer_name);
@@ -870,7 +876,7 @@ fn apply_room_event(
             host_member,
             ..
         } => {
-            ui.stream_id = room_id.as_str().to_string();
+            ui.room_id = room_id.as_str().to_string();
             ui.local_name = state.local_name.clone();
             ui.set_room_identity(self_member.as_str(), host_member.as_str());
         }
@@ -1474,8 +1480,50 @@ fn status_line(line: &str) -> Option<String> {
     }
 }
 
+fn drain_backend_status_lines(
+    stderr_rx: &mut mpsc::UnboundedReceiver<String>,
+    last_backend_status: &mut Option<String>,
+) {
+    while let Ok(line) = stderr_rx.try_recv() {
+        if let Some(message) = status_line(&line) {
+            *last_backend_status = Some(message);
+        }
+    }
+}
+
+fn backend_exit_error(
+    status: std::process::ExitStatus,
+    last_backend_status: Option<String>,
+) -> CliError {
+    if let Some(message) = last_backend_status {
+        return CliError::runtime(message);
+    }
+    if status.success() {
+        CliError::runtime("room backend exited unexpectedly")
+    } else {
+        CliError::runtime(format!("backend exited with status {status}"))
+    }
+}
+
 fn scripted_mode() -> bool {
     std::env::var_os("SKYFFLA_TUI_SCRIPTED").is_some()
+}
+
+fn ensure_interactive_terminal() -> Result<(), CliError> {
+    if interactive_tui_supported(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
+        return Ok(());
+    }
+
+    Err(CliError::usage(
+        "default room UI requires an interactive terminal; rerun in a terminal or use --machine",
+    ))
+}
+
+fn interactive_tui_supported(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
 }
 
 fn scripted_progress_lines_enabled() -> bool {
@@ -2106,6 +2154,13 @@ mod tests {
             ),
             "sent file transfer-test-2g-random.bin (2048.0MiB in 32s at 64.0MiB/s)"
         );
+    }
+
+    #[test]
+    fn interactive_tui_requires_terminal_on_both_stdin_and_stdout() {
+        assert!(interactive_tui_supported(true, true));
+        assert!(!interactive_tui_supported(false, true));
+        assert!(!interactive_tui_supported(true, false));
     }
 
     #[test]

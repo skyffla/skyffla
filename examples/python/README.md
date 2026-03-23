@@ -1,9 +1,9 @@
 # Skyffla Python Examples
 
-These examples are intentionally separate from the wrapper source tree. They
-install the published [`skyffla`](https://pypi.org/project/skyffla/) package
-from PyPI so the setup stays close to what an external user would do.
-The checked-in dependency version should track the latest published wrapper release.
+These examples are intentionally separate from the wrapper source tree, but in a
+repository checkout they install the local `wrappers/python` package via a
+relative `uv` source override. That keeps the examples aligned with the current
+checkout instead of whichever wrapper release happens to be published on PyPI.
 
 ## Setup
 
@@ -19,6 +19,9 @@ Then change into this directory:
 cd examples/python
 uv sync
 ```
+
+If you want to try the published wrapper instead, remove the local source
+override from `pyproject.toml` and install from PyPI.
 
 If you want to run against a local repo build instead of the installed binary,
 set `SKYFFLA_BIN`, for example `SKYFFLA_BIN=../../target/debug/skyffla`.

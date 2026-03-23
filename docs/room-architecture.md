@@ -32,9 +32,6 @@ This room-first architecture applies to:
 - the `machine` API
 - future language wrappers built on `machine`
 
-It does not mean every CLI mode is room-native. `--stdio` remains a separate
-raw 1:1 duplex byte-stream mode.
-
 One host process hosts one room.
 
 ## Current Status
@@ -547,10 +544,10 @@ Because rooms are the native abstraction, the CLI should not introduce a redunda
 Prefer:
 
 ```sh
-skyffla host <room-id>
-skyffla join <room-id>
-skyffla host <room-id> machine
-skyffla join <room-id> machine
+skyffla <room-id> --host
+skyffla <room-id>
+skyffla <room-id> --host --machine
+skyffla <room-id> --machine
 skyffla pipe <room-id> --to <member>
 skyffla send <room-id> <path> --to <member>
 ```
@@ -564,8 +561,8 @@ skyffla room join <room-id>
 
 If rooms are the core model, then:
 
-- `host` means host a room
-- `join` means join a room
+- bare `skyffla <room-id>` means join-or-promote into a room
+- `--host` means explicitly host a room
 - 1:1 is just a two-member room
 
 So the extra `room` command only adds noise.
@@ -681,18 +678,6 @@ The important routing rule is:
 - broadcast is sender fanout to all current members in the roster
 
 ## What Should Be Removed or Reworked
-
-### Rework `SessionMode`
-
-`SessionMode` currently pushes the implementation toward separate runtime worlds.
-
-In the room-native design:
-
-- room semantics are primary
-- TUI and machine are adapters
-- channel kind carries payload semantics
-
-If a mode concept remains, it should describe the client surface, not the room model.
 
 ### Rework the 1:1-centric protocol taxonomy
 

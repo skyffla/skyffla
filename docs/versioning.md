@@ -41,6 +41,10 @@ Current constant:
 
 Compatibility is checked during the peer handshake. Peers must share the same wire major version.
 
+The current wire major is `2.x`. It removed the legacy stdio/session-mode split
+from the peer hello and keeps the handshake focused on room-native machine
+sessions plus file-transfer capability advertisement.
+
 File-transfer compatibility is negotiated separately inside the hello payload
 via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
 major version while refusing `send_path` when the advertised file-transfer
@@ -91,6 +95,12 @@ Current constant:
 - `RENDEZVOUS_API_VERSION`
 
 Clients should validate the rendezvous version header and require the same major API version.
+
+The current rendezvous major is `2.x`. It reflects the breaking capability
+schema cleanup that removed the legacy stdio capability bit from room
+registration payloads. A `2.x` client talking to a `1.x` server should fail
+fast with an explicit rendezvous API version mismatch instead of reaching
+request-body deserialization errors.
 
 ## Operational Guidance
 

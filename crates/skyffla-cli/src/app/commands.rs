@@ -27,7 +27,7 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::HostRequested {
-                stream_id: config.stream_id.clone(),
+                room_id: config.room_id.clone(),
             })
             .context("failed to enter hosting state")
             .map_err(|error| CliError::runtime(error.to_string()))?,
@@ -65,7 +65,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::JoinRequested {
-                stream_id: config.stream_id.clone(),
+                room_id: config.room_id.clone(),
             })
             .context("failed to enter joining state")
             .map_err(|error| CliError::runtime(error.to_string()))?,
@@ -95,7 +95,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
             sink.emit_runtime_event(state_changed_event(
                 session
                     .transition(SessionEvent::HostRequested {
-                        stream_id: config.stream_id.clone(),
+                        room_id: config.room_id.clone(),
                     })
                     .context("failed to enter hosting state after join lookup")
                     .map_err(|error| CliError::runtime(error.to_string()))?,
@@ -118,7 +118,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
 }
 
 fn should_use_room_tui(config: &SessionConfig) -> bool {
-    !config.machine && !config.stdio
+    !config.machine
 }
 
 async fn connect_to_registered_peer(
@@ -176,7 +176,7 @@ async fn run_host_local(
         .map_err(|error| CliError::transport(error.to_string()))?;
     enable_local_discovery(
         transport.endpoint(),
-        &config.stream_id,
+        &config.room_id,
         LocalAnnouncement::Host,
     )
     .map_err(|error| CliError::transport(error.to_string()))?;
@@ -193,12 +193,12 @@ async fn run_join_local(
         .map_err(|error| CliError::transport(error.to_string()))?;
     let mdns = enable_local_discovery(
         transport.endpoint(),
-        &config.stream_id,
+        &config.room_id,
         LocalAnnouncement::Candidate,
     )
     .map_err(|error| CliError::transport(error.to_string()))?;
 
-    match resolve_local_join_decision(&mdns, &config.stream_id, transport.endpoint().id())
+    match resolve_local_join_decision(&mdns, &config.room_id, transport.endpoint().id())
         .await
         .map_err(|error| CliError::transport(error.to_string()))?
     {
@@ -210,14 +210,14 @@ async fn run_join_local(
             sink.emit_runtime_event(state_changed_event(
                 session
                     .transition(SessionEvent::HostRequested {
-                        stream_id: config.stream_id.clone(),
+                        room_id: config.room_id.clone(),
                     })
                     .context("failed to enter hosting state after local discovery")
                     .map_err(|error| CliError::runtime(error.to_string()))?,
             ));
             let _host_mdns = enable_local_discovery(
                 transport.endpoint(),
-                &config.stream_id,
+                &config.room_id,
                 LocalAnnouncement::Host,
             )
             .map_err(|error| CliError::transport(error.to_string()))?;
@@ -244,37 +244,23 @@ async fn wait_for_incoming_peer(
     if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
-            "room_id": config.stream_id,
+            "room_id": config.room_id,
             "server": config.rendezvous_server,
             "created_by_join": created_by_join,
         }));
     } else if created_by_join {
         eprintln!(
             "no host found for room {}; you are now waiting for a peer via {}",
-            config.stream_id, config.rendezvous_server
+            config.room_id, config.rendezvous_server
         );
     } else {
         eprintln!(
             "waiting for peer on room {} via {}",
-            config.stream_id, config.rendezvous_server
+            config.room_id, config.rendezvous_server
         );
     }
 
-    if config.machine {
-        let result = run_machine_host(config, sink, session, &transport).await;
-        let delete_result = delete_room(client, config)
-            .await
-            .map_err(|error| CliError::rendezvous(error.to_string()));
-        transport.close().await;
-        delete_result?;
-        return result;
-    }
-
-    let connection = transport
-        .accept_connection()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let result = run_connected_session(config, sink, session, &transport, connection, true).await;
+    let result = run_machine_host(config, sink, session, &transport).await;
     let delete_result = delete_room(client, config)
         .await
         .map_err(|error| CliError::rendezvous(error.to_string()));
@@ -300,33 +286,23 @@ async fn wait_for_incoming_peer_local(
     if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
-            "room_id": config.stream_id,
+            "room_id": config.room_id,
             "created_by_join": created_by_join,
             "discovery": "mdns",
         }));
     } else if created_by_join {
         eprintln!(
             "no local host found for room {}; you are now advertising on the local network",
-            config.stream_id
+            config.room_id
         );
     } else {
         eprintln!(
             "waiting for local peer on room {} via mDNS discovery",
-            config.stream_id
+            config.room_id
         );
     }
 
-    if config.machine {
-        let result = run_machine_host(config, sink, session, &transport).await;
-        transport.close().await;
-        return result;
-    }
-
-    let connection = transport
-        .accept_connection()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let result = run_connected_session(config, sink, session, &transport, connection, true).await;
+    let result = run_machine_host(config, sink, session, &transport).await;
     transport.close().await;
     result
 }

@@ -20,7 +20,7 @@ struct EventLine {
 }
 
 pub(crate) struct UiState {
-    pub(crate) stream_id: String,
+    pub(crate) room_id: String,
     pub(crate) peer_name: String,
     pub(crate) local_name: String,
     pub(crate) self_member_id: Option<String>,
@@ -60,11 +60,11 @@ impl Drop for TerminalUiGuard {
 }
 
 impl UiState {
-    pub(crate) fn new(stream_id: &str, local_name: &str, peer_name: &str) -> Result<Self> {
+    pub(crate) fn new(room_id: &str, local_name: &str, peer_name: &str) -> Result<Self> {
         let state_path = local_state_file_path();
         let state = load_local_state(&state_path)?;
         Ok(Self {
-            stream_id: stream_id.to_string(),
+            room_id: room_id.to_string(),
             peer_name: peer_name.to_string(),
             local_name: local_name.to_string(),
             self_member_id: None,
@@ -385,7 +385,7 @@ impl UiState {
             clip_line(
                 &format!(
                     "room={} you={} self={} host={} peer={}",
-                    self.stream_id, self.local_name, self_member, host_member, self.peer_name
+                    self.room_id, self.local_name, self_member, host_member, self.peer_name
                 ),
                 width,
             ),

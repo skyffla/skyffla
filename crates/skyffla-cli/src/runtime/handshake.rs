@@ -28,7 +28,6 @@ pub(crate) async fn exchange_hello(
             peer_ticket: local_ticket.map(ToOwned::to_owned),
             capabilities: Capabilities::default(),
             transport_capabilities: vec![TransportCapability::NativeDirect],
-            session_mode: config.session_mode(),
         }),
     );
     write_envelope(send, &hello).await?;
@@ -39,13 +38,6 @@ pub(crate) async fn exchange_hello(
     let peer = match peer_hello.payload {
         ControlMessage::Hello(hello) => {
             ensure_wire_protocol_compatible(hello.protocol_version, "protocol version mismatch")?;
-            if hello.session_mode != config.session_mode() {
-                bail!(
-                    "session mode mismatch: local {:?}, peer {:?}",
-                    config.session_mode(),
-                    hello.session_mode
-                );
-            }
             SessionPeer {
                 session_id: hello.session_id,
                 peer_name: hello.peer_name,
@@ -105,14 +97,14 @@ mod tests {
 
     #[test]
     fn wire_handshake_allows_minor_differences_with_same_major() {
-        let peer = ProtocolVersion::new(1, 7);
+        let peer = ProtocolVersion::new(2, 7);
         assert!(ensure_wire_protocol_compatible(peer, "peer hello").is_ok());
     }
 
     #[test]
     fn wire_handshake_rejects_different_major_versions() {
-        let peer = ProtocolVersion::new(2, 0);
+        let peer = ProtocolVersion::new(3, 0);
         let error = ensure_wire_protocol_compatible(peer, "peer hello").unwrap_err();
-        assert!(error.to_string().contains("local 1.0, peer 2.0"));
+        assert!(error.to_string().contains("local 2.0, peer 3.0"));
     }
 }

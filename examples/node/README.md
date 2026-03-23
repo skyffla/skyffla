@@ -1,9 +1,9 @@
 # Skyffla Node.js Examples
 
-These examples are intentionally separate from the wrapper source tree. They
-install the published [`skyffla`](https://www.npmjs.com/package/skyffla)
-package from npm so the setup stays close to what an external user would do.
-The checked-in dependency version should track the latest published wrapper release.
+These examples are intentionally separate from the wrapper source tree, but in a
+repository checkout they install the local `wrappers/node` package through a
+relative file dependency. That keeps the examples aligned with the current
+checkout instead of whichever wrapper release happens to be published on npm.
 
 ## Setup
 
@@ -19,6 +19,9 @@ Then change into this directory:
 cd examples/node
 npm install
 ```
+
+If you want to try the published wrapper instead, replace the local file
+dependency in `package.json` with the published npm package version.
 
 If you want to run against a local repo build instead of the installed binary,
 set `SKYFFLA_BIN`, for example `SKYFFLA_BIN=../../target/debug/skyffla`.

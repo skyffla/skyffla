@@ -24,9 +24,6 @@ The primary room surfaces are:
 - a room-native Terminal UI (TUI) for people
 - a framed `machine` protocol for wrappers and automation
 
-It also includes raw full-duplex `--stdio` for 1:1 byte streams when you do not
-want room semantics.
-
 Use it when you want direct peer-to-peer communication without building your own
 room control, peer introduction, file transfer, and terminal UX stack first.
 
@@ -73,13 +70,13 @@ Open two or more terminals and join the same room.
 Terminal A:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 Terminal B:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 The first peer hosts the room. Every later peer joins that same room.
@@ -87,7 +84,7 @@ The first peer hosts the room. Every later peer joins that same room.
 You can keep adding members:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 In the default TUI:
@@ -108,11 +105,11 @@ than `demo`.
 Use `machine` for wrappers, agents, and scripted room automation:
 
 ```sh
-skyffla host copper-731 machine
+skyffla copper-731 --host --machine
 ```
 
 ```sh
-skyffla join copper-731 machine
+skyffla copper-731 --machine
 ```
 
 In `machine` mode:
@@ -131,53 +128,22 @@ Both the default TUI and `machine` are room-native:
 - they see the same room/member/channel concepts
 - they differ only in presentation and automation surface
 
-## Raw Duplex `--stdio`
-
-Use `--stdio` when you want a raw full-duplex 1:1 byte pipe instead of room
-chat or the room-native `machine` API.
-
-`--stdio` is useful for:
-
-- shell pipelines
-- agent-to-agent byte streams
-- custom framed protocols such as NDJSON
-
-It is not the multiparty room API.
-
-Terminal A:
-
-```sh
-cat | skyffla host copper-731 --stdio
-```
-
-Terminal B:
-
-```sh
-cat | skyffla join copper-731 --stdio
-```
-
-Type in either terminal to send bytes to the other. `Ctrl-D` closes only your
-send side.
-
-If you want wrappers or automation to participate in rooms, use `machine`, not
-`--stdio`.
-
 ### `--local`
 
 Use `--local` on one LAN when you do not want rendezvous:
 
 ```sh
-skyffla join copper-731 --local
+skyffla copper-731 --local
 ```
 
 ```sh
-skyffla join copper-731 --local
+skyffla copper-731 --local
 ```
 
 Or make one side the explicit host:
 
 ```sh
-skyffla host copper-731 --local
+skyffla copper-731 --host --local
 ```
 
 `--local` uses mDNS discovery, only accepts local peers, and only allows direct
@@ -194,7 +160,7 @@ skyffla-rendezvous
 Point the CLI at it:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla join copper-731
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla copper-731
 ```
 
 `skyffla-rendezvous` ignores `X-Forwarded-For` by default. Only set
@@ -206,7 +172,6 @@ that you control.
 - [`docs/room-architecture.md`](docs/room-architecture.md): room-native architecture and design boundaries
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
 - [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
-- [`docs/stdio-duplex-spec.md`](docs/stdio-duplex-spec.md): raw duplex `--stdio` design note
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
 
 ## Local Development
@@ -245,5 +210,5 @@ cargo run -p skyffla-rendezvous
 Join a room against that local server:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- join copper-731
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- copper-731
 ```

@@ -218,7 +218,9 @@ class Room:
         binary_path = os.fspath(binary or _default_binary())
         await ensure_binary_version(binary_path)
 
-        argv = [binary_path, role, room_id, "machine", "--json"]
+        argv = [binary_path, room_id, "--machine", "--json"]
+        if role == "host":
+            argv.append("--host")
         if server is not None:
             argv.extend(["--server", server])
         if name is not None:

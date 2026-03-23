@@ -68,7 +68,6 @@ infrastructure.
 Today the `iroh` endpoint is used for:
 
 - room authority and peer links
-- raw duplex `--stdio`
 - native file transfer
 - native folder transfer
 

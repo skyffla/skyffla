@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Room, SkyfflaProcessExited } from "../src/index.js";
 
 const RENDEZVOUS_VERSION_HEADER = "x-skyffla-rendezvous-version";
-const RENDEZVOUS_API_VERSION = "1.0";
+const RENDEZVOUS_API_VERSION = "2.0";
 
 async function findBinary(t) {
   if (process.env.SKYFFLA_BIN) {

@@ -9,6 +9,6 @@
     "sync-chat-and-channel": "node sync-chat-and-channel/main.mjs"
   },
   "dependencies": {
-    "skyffla": "1.2.1"
+    "skyffla": "file:../../wrappers/node"
   }
 }

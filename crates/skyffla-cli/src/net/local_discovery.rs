@@ -29,7 +29,7 @@ pub(crate) enum LocalJoinDecision {
 
 pub(crate) fn enable_local_discovery(
     endpoint: &Endpoint,
-    stream_id: &str,
+    room_id: &str,
     announcement: LocalAnnouncement,
 ) -> Result<MdnsAddressLookup> {
     let mdns = MdnsAddressLookup::builder()
@@ -37,16 +37,16 @@ pub(crate) fn enable_local_discovery(
         .build(endpoint.id())
         .context("failed to enable local network discovery")?;
     endpoint.address_lookup().add(mdns.clone());
-    set_local_announcement(endpoint, stream_id, announcement)?;
+    set_local_announcement(endpoint, room_id, announcement)?;
     Ok(mdns)
 }
 
 pub(crate) fn set_local_announcement(
     endpoint: &Endpoint,
-    stream_id: &str,
+    room_id: &str,
     announcement: LocalAnnouncement,
 ) -> Result<()> {
-    let tag = announcement_tag(stream_id, announcement);
+    let tag = announcement_tag(room_id, announcement);
     let user_data =
         UserData::try_from(tag).context("failed to encode local discovery announcement")?;
     endpoint.set_user_data_for_address_lookup(Some(user_data));
@@ -55,7 +55,7 @@ pub(crate) fn set_local_announcement(
 
 pub(crate) async fn resolve_local_join_decision(
     mdns: &MdnsAddressLookup,
-    stream_id: &str,
+    room_id: &str,
     local_id: EndpointId,
 ) -> Result<LocalJoinDecision> {
     let timing = local_discovery_timing();
@@ -66,12 +66,12 @@ pub(crate) async fn resolve_local_join_decision(
     loop {
         match timeout_at(election_deadline, events.next()).await {
             Ok(Some(event)) => {
-                if let Some(match_event) = match_stream_event(event, stream_id) {
+                if let Some(match_event) = match_room_event(event, room_id) {
                     match match_event {
-                        MatchedStreamEvent::Host(endpoint_addr) => {
+                        MatchedRoomEvent::Host(endpoint_addr) => {
                             return Ok(LocalJoinDecision::Connect(endpoint_addr));
                         }
-                        MatchedStreamEvent::Candidate(endpoint_id, endpoint_addr) => {
+                        MatchedRoomEvent::Candidate(endpoint_id, endpoint_addr) => {
                             candidate_endpoints.insert(endpoint_id, Some(endpoint_addr));
                         }
                     }
@@ -85,12 +85,12 @@ pub(crate) async fn resolve_local_join_decision(
     loop {
         match timeout_at(host_deadline, events.next()).await {
             Ok(Some(event)) => {
-                if let Some(match_event) = match_stream_event(event, stream_id) {
+                if let Some(match_event) = match_room_event(event, room_id) {
                     match match_event {
-                        MatchedStreamEvent::Host(endpoint_addr) => {
+                        MatchedRoomEvent::Host(endpoint_addr) => {
                             return Ok(LocalJoinDecision::Connect(endpoint_addr));
                         }
-                        MatchedStreamEvent::Candidate(endpoint_id, endpoint_addr) => {
+                        MatchedRoomEvent::Candidate(endpoint_id, endpoint_addr) => {
                             candidate_endpoints.insert(endpoint_id, Some(endpoint_addr));
                         }
                     }
@@ -139,23 +139,23 @@ fn duration_from_env(name: &str, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
-fn announcement_tag(stream_id: &str, announcement: LocalAnnouncement) -> String {
+fn announcement_tag(room_id: &str, announcement: LocalAnnouncement) -> String {
     let role = match announcement {
         LocalAnnouncement::Host => "host",
         LocalAnnouncement::Candidate => "candidate",
     };
-    format!("{LOCAL_DISCOVERY_PREFIX}:{role}:{stream_id}")
+    format!("{LOCAL_DISCOVERY_PREFIX}:{role}:{room_id}")
 }
 
-fn match_stream_event(event: DiscoveryEvent, stream_id: &str) -> Option<MatchedStreamEvent> {
+fn match_room_event(event: DiscoveryEvent, room_id: &str) -> Option<MatchedRoomEvent> {
     match event {
         DiscoveryEvent::Discovered { endpoint_info, .. } => {
-            let announcement = parse_announcement(endpoint_info.data.user_data()?, stream_id)?;
+            let announcement = parse_announcement(endpoint_info.data.user_data()?, room_id)?;
             match announcement {
                 LocalAnnouncement::Host => {
-                    Some(MatchedStreamEvent::Host(endpoint_info.to_endpoint_addr()))
+                    Some(MatchedRoomEvent::Host(endpoint_info.to_endpoint_addr()))
                 }
-                LocalAnnouncement::Candidate => Some(MatchedStreamEvent::Candidate(
+                LocalAnnouncement::Candidate => Some(MatchedRoomEvent::Candidate(
                     endpoint_info.endpoint_id,
                     endpoint_info.to_endpoint_addr(),
                 )),
@@ -165,12 +165,12 @@ fn match_stream_event(event: DiscoveryEvent, stream_id: &str) -> Option<MatchedS
     }
 }
 
-fn parse_announcement(user_data: &UserData, stream_id: &str) -> Option<LocalAnnouncement> {
+fn parse_announcement(user_data: &UserData, room_id: &str) -> Option<LocalAnnouncement> {
     match user_data.as_ref() {
-        value if value == announcement_tag(stream_id, LocalAnnouncement::Host) => {
+        value if value == announcement_tag(room_id, LocalAnnouncement::Host) => {
             Some(LocalAnnouncement::Host)
         }
-        value if value == announcement_tag(stream_id, LocalAnnouncement::Candidate) => {
+        value if value == announcement_tag(room_id, LocalAnnouncement::Candidate) => {
             Some(LocalAnnouncement::Candidate)
         }
         _ => None,
@@ -200,7 +200,7 @@ fn elected_candidate_endpoint(
         .and_then(|(_, endpoint_addr)| endpoint_addr.clone())
 }
 
-enum MatchedStreamEvent {
+enum MatchedRoomEvent {
     Host(EndpointAddr),
     Candidate(EndpointId, EndpointAddr),
 }
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_stream_host_and_candidate_announcements() {
+    fn parses_room_host_and_candidate_announcements() {
         let host = UserData::from_str(&announcement_tag("room", LocalAnnouncement::Host)).unwrap();
         let candidate =
             UserData::from_str(&announcement_tag("room", LocalAnnouncement::Candidate)).unwrap();
