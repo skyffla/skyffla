@@ -353,7 +353,7 @@ pub(crate) async fn run_machine_host(
         .local_ticket()
         .map_err(|error| CliError::transport(error.to_string()))?;
     let mut room = RoomEngine::new(
-        RoomId::new(&config.stream_id).map_err(protocol_error)?,
+        RoomId::new(&config.room_id).map_err(protocol_error)?,
         config.peer_name.clone(),
         Some(identity.fingerprint.clone()),
     )
@@ -410,7 +410,7 @@ pub(crate) async fn run_machine_host(
     peers.clear();
     sink.emit_json_event(serde_json::json!({
         "event": "machine_session_closed",
-        "room_id": config.stream_id,
+        "room_id": config.room_id,
         "role": "host",
     }));
     Ok(())
@@ -509,7 +509,7 @@ pub(crate) async fn run_machine_join_session(
 
     sink.emit_json_event(serde_json::json!({
         "event": "machine_session_closed",
-        "room_id": config.stream_id,
+        "room_id": config.room_id,
         "role": "join",
     }));
 
@@ -769,7 +769,7 @@ async fn handle_host_peer_connected(
     connected: ConnectedPeer,
 ) -> Result<(), CliError> {
     if !*machine_state_entered {
-        enter_machine_state(session, sink, &config.stream_id)?;
+        enter_machine_state(session, sink, &config.room_id)?;
         *machine_state_entered = true;
     }
 

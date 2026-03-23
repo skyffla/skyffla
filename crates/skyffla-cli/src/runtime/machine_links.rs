@@ -428,7 +428,7 @@ pub(crate) fn spawn_outbound_peer_link(
 
         if let Err(error) = exchange_hello(
             &config,
-            &config.stream_id,
+            &config.room_id,
             &mut send,
             &mut recv,
             local_fingerprint.as_deref(),
@@ -831,7 +831,7 @@ async fn accept_machine_peer(
         .map_err(|error| CliError::transport(error.to_string()))?;
     let peer = exchange_hello(
         config,
-        &config.stream_id,
+        &config.room_id,
         &mut authority_send,
         &mut authority_recv,
         local_fingerprint,
@@ -937,7 +937,7 @@ async fn accept_peer_link(
         .map_err(|error| CliError::transport(error.to_string()))?;
     let peer = exchange_hello(
         config,
-        &config.stream_id,
+        &config.room_id,
         &mut send,
         &mut recv,
         local_fingerprint,

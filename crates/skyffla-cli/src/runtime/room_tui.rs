@@ -46,7 +46,7 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
     });
 
     let mut backend = spawn_machine_backend(role, config).await?;
-    let mut ui = UiState::new(&config.stream_id, &config.peer_name, "room")
+    let mut ui = UiState::new(&config.room_id, &config.peer_name, "room")
         .map_err(|error| CliError::local_io(error.to_string()))?;
     let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
 
@@ -247,7 +247,7 @@ async fn spawn_machine_backend(
 ) -> Result<RoomBackend, CliError> {
     let exe = std::env::current_exe().map_err(|error| CliError::local_io(error.to_string()))?;
     let mut command = Command::new(exe);
-    command.arg(&config.stream_id);
+    command.arg(&config.room_id);
     if matches!(role, Role::Host) {
         command.arg("--host");
     }
@@ -869,7 +869,7 @@ fn apply_room_event(
             host_member,
             ..
         } => {
-            ui.stream_id = room_id.as_str().to_string();
+            ui.room_id = room_id.as_str().to_string();
             ui.local_name = state.local_name.clone();
             ui.set_room_identity(self_member.as_str(), host_member.as_str());
         }

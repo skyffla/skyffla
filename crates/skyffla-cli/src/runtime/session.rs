@@ -24,7 +24,7 @@ pub(crate) async fn run_connected_session(
         .enforce_connection_policy(&connection)
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
-    let session_id = config.stream_id.clone();
+    let session_id = config.room_id.clone();
     sink.emit_runtime_event(state_changed_event(
         session
             .transition(SessionEvent::PeerConnected {

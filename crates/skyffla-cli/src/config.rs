@@ -55,7 +55,7 @@ pub(crate) enum Role {
 #[derive(Clone)]
 pub(crate) struct SessionConfig {
     pub(crate) role: Role,
-    pub(crate) stream_id: String,
+    pub(crate) room_id: String,
     pub(crate) rendezvous_server: String,
     pub(crate) download_dir: PathBuf,
     pub(crate) peer_name: String,
@@ -66,14 +66,14 @@ pub(crate) struct SessionConfig {
 
 impl SessionConfig {
     pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
-        let stream_id = resolve_stream_id(args.room_id, std::env::var("SKYFFLA_STREAM_ID").ok())
+        let room_id = resolve_room_id(args.room_id, std::env::var("SKYFFLA_ROOM_ID").ok())
             .ok_or_else(|| {
-                CliError::usage("missing room id: pass it as an argument or set SKYFFLA_STREAM_ID")
+                CliError::usage("missing room id: pass it as an argument or set SKYFFLA_ROOM_ID")
             })?;
-        validate_stream_id(&stream_id).map_err(|error| CliError::usage(error.to_string()))?;
+        validate_room_id(&room_id).map_err(|error| CliError::usage(error.to_string()))?;
         Ok(Self {
             role,
-            stream_id,
+            room_id,
             rendezvous_server: args.server,
             download_dir: args.download_dir,
             peer_name: resolve_peer_name(
@@ -88,7 +88,7 @@ impl SessionConfig {
     }
 }
 
-fn resolve_stream_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
+fn resolve_room_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
     explicit
         .or(env_value)
         .map(|value| value.trim().to_string())
@@ -125,8 +125,8 @@ fn resolve_auto_accept_policy(
     (AutoAcceptPolicy::none(), "default")
 }
 
-fn validate_stream_id(stream_id: &str) -> Result<()> {
-    if stream_id
+fn validate_room_id(room_id: &str) -> Result<()> {
+    if room_id
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
@@ -134,28 +134,28 @@ fn validate_stream_id(stream_id: &str) -> Result<()> {
     }
 
     bail!(
-        "invalid stream id {:?}: use only ASCII letters, digits, '-' or '_'",
-        stream_id
+        "invalid room id {:?}: use only ASCII letters, digits, '-' or '_'",
+        room_id
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_auto_accept_policy, resolve_peer_name, resolve_stream_id, validate_stream_id,
+        resolve_auto_accept_policy, resolve_peer_name, resolve_room_id, validate_room_id,
     };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
 
     #[test]
-    fn explicit_stream_id_wins_over_environment() {
-        let stream_id = resolve_stream_id(Some("cli-room".into()), Some("env-room".into()));
-        assert_eq!(stream_id.as_deref(), Some("cli-room"));
+    fn explicit_room_id_wins_over_environment() {
+        let room_id = resolve_room_id(Some("cli-room".into()), Some("env-room".into()));
+        assert_eq!(room_id.as_deref(), Some("cli-room"));
     }
 
     #[test]
-    fn blank_stream_ids_are_treated_as_missing() {
-        assert_eq!(resolve_stream_id(Some("   ".into()), None), None);
-        assert_eq!(resolve_stream_id(None, Some(" \n ".into())), None);
+    fn blank_room_ids_are_treated_as_missing() {
+        assert_eq!(resolve_room_id(Some("   ".into()), None), None);
+        assert_eq!(resolve_room_id(None, Some(" \n ".into())), None);
     }
 
     #[test]
@@ -176,12 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn stream_id_rejects_special_characters() {
-        assert!(validate_stream_id("copper-731").is_ok());
-        assert!(validate_stream_id("copper_731").is_ok());
-        assert!(validate_stream_id("copper/731").is_err());
-        assert!(validate_stream_id("copper 731").is_err());
-        assert!(validate_stream_id("copper?731").is_err());
+    fn room_id_rejects_special_characters() {
+        assert!(validate_room_id("copper-731").is_ok());
+        assert!(validate_room_id("copper_731").is_ok());
+        assert!(validate_room_id("copper/731").is_err());
+        assert!(validate_room_id("copper 731").is_err());
+        assert!(validate_room_id("copper?731").is_err());
     }
 
     #[test]

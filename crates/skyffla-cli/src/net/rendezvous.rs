@@ -36,9 +36,9 @@ pub(crate) async fn register_room(
             .await
             .ok()
             .map(|body| body.message)
-            .unwrap_or_else(|| format!("room {} is already hosted", config.stream_id));
+            .unwrap_or_else(|| format!("room {} is already hosted", config.room_id));
         return Err(RegisterRoomError::AlreadyHosted {
-            room_id: config.stream_id.clone(),
+            room_id: config.room_id.clone(),
             message,
         });
     }
@@ -127,7 +127,7 @@ fn room_url(config: &SessionConfig) -> String {
     format!(
         "{}/v1/rooms/{}",
         config.rendezvous_server.trim_end_matches('/'),
-        config.stream_id
+        config.room_id
     )
 }
 
@@ -172,7 +172,7 @@ mod tests {
     fn room_url_trims_trailing_slash_from_server() {
         let config = SessionConfig {
             role: Role::Host,
-            stream_id: "room".into(),
+            room_id: "room".into(),
             rendezvous_server: format!("{DEFAULT_RENDEZVOUS_URL}/"),
             download_dir: PathBuf::from("."),
             peer_name: "peer".into(),

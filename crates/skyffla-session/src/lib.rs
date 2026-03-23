@@ -40,9 +40,9 @@ pub enum RuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     Idle,
-    Hosting { stream_id: String },
-    Joining { stream_id: String },
-    Connecting { stream_id: String },
+    Hosting { room_id: String },
+    Joining { room_id: String },
+    Connecting { room_id: String },
     Negotiating { session_id: String },
     Machine { session_id: String },
     Closing,
@@ -53,10 +53,10 @@ pub enum SessionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     HostRequested {
-        stream_id: String,
+        room_id: String,
     },
     JoinRequested {
-        stream_id: String,
+        room_id: String,
     },
     TransportConnecting,
     PeerConnected {
@@ -88,19 +88,19 @@ impl SessionMachine {
 
     pub fn transition(&mut self, event: SessionEvent) -> Result<&SessionState, SessionError> {
         let next_state = match (&self.state, event) {
-            (SessionState::Idle, SessionEvent::HostRequested { stream_id }) => {
-                SessionState::Hosting { stream_id }
+            (SessionState::Idle, SessionEvent::HostRequested { room_id }) => {
+                SessionState::Hosting { room_id }
             }
-            (SessionState::Joining { .. }, SessionEvent::HostRequested { stream_id }) => {
-                SessionState::Hosting { stream_id }
+            (SessionState::Joining { .. }, SessionEvent::HostRequested { room_id }) => {
+                SessionState::Hosting { room_id }
             }
-            (SessionState::Idle, SessionEvent::JoinRequested { stream_id }) => {
-                SessionState::Joining { stream_id }
+            (SessionState::Idle, SessionEvent::JoinRequested { room_id }) => {
+                SessionState::Joining { room_id }
             }
-            (SessionState::Hosting { stream_id }, SessionEvent::TransportConnecting)
-            | (SessionState::Joining { stream_id }, SessionEvent::TransportConnecting) => {
+            (SessionState::Hosting { room_id }, SessionEvent::TransportConnecting)
+            | (SessionState::Joining { room_id }, SessionEvent::TransportConnecting) => {
                 SessionState::Connecting {
-                    stream_id: stream_id.clone(),
+                    room_id: room_id.clone(),
                 }
             }
             (SessionState::Connecting { .. }, SessionEvent::PeerConnected { session_id }) => {
@@ -176,7 +176,7 @@ mod tests {
         let mut machine = SessionMachine::new();
         machine
             .transition(SessionEvent::HostRequested {
-                stream_id: "demo".into(),
+                room_id: "demo".into(),
             })
             .expect("host should be accepted");
         machine
@@ -216,19 +216,19 @@ mod tests {
         let mut machine = SessionMachine::new();
         machine
             .transition(SessionEvent::JoinRequested {
-                stream_id: "demo".into(),
+                room_id: "demo".into(),
             })
             .expect("join should be accepted");
         machine
             .transition(SessionEvent::HostRequested {
-                stream_id: "demo".into(),
+                room_id: "demo".into(),
             })
             .expect("join should be able to claim the room");
 
         assert_eq!(
             machine.state(),
             &SessionState::Hosting {
-                stream_id: "demo".into()
+                room_id: "demo".into()
             }
         );
     }
