@@ -96,6 +96,12 @@ Current constant:
 
 Clients should validate the rendezvous version header and require the same major API version.
 
+The current rendezvous major is `2.x`. It reflects the breaking capability
+schema cleanup that removed the legacy stdio capability bit from room
+registration payloads. A `2.x` client talking to a `1.x` server should fail
+fast with an explicit rendezvous API version mismatch instead of reaching
+request-body deserialization errors.
+
 ## Operational Guidance
 
 - Bump `minor` for additive, backward-compatible protocol changes within an existing family.

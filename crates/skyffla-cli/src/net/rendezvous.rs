@@ -285,10 +285,10 @@ mod tests {
     #[test]
     fn rejects_incompatible_rendezvous_major_version() {
         let mut headers = HeaderMap::new();
-        headers.insert(RENDEZVOUS_VERSION_HEADER, HeaderValue::from_static("2.0"));
+        headers.insert(RENDEZVOUS_VERSION_HEADER, HeaderValue::from_static("1.0"));
         let error = ensure_rendezvous_compatible(&headers).unwrap_err();
         assert!(error
             .to_string()
-            .contains(&format!("local {}, server 2.0", RENDEZVOUS_API_VERSION)));
+            .contains(&format!("local {}, server 1.0", RENDEZVOUS_API_VERSION)));
     }
 }

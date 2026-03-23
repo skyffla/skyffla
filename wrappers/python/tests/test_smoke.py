@@ -24,7 +24,7 @@ from skyffla import (
 )
 
 RENDEZVOUS_VERSION_HEADER = "x-skyffla-rendezvous-version"
-RENDEZVOUS_API_VERSION = "1.0"
+RENDEZVOUS_API_VERSION = "2.0"
 
 
 def _find_binary() -> str:
