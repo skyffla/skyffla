@@ -1,6 +1,6 @@
 use std::fmt;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde::Deserialize;
 use skyffla_protocol::{Capabilities, ProtocolVersion};
@@ -31,22 +31,23 @@ pub(crate) async fn register_room(
     ensure_rendezvous_compatible(response.headers()).map_err(RegisterRoomError::Other)?;
 
     if response.status() == StatusCode::CONFLICT {
-        let message = response
-            .json::<RendezvousErrorResponse>()
-            .await
-            .ok()
-            .map(|body| body.message)
-            .unwrap_or_else(|| format!("room {} is already hosted", config.room_id));
+        let status = response.status();
+        let body = response.text().await.ok();
+        let message = parse_rendezvous_error_message(body.as_deref()).unwrap_or_else(|| {
+            format!("room {} is already hosted (HTTP {status})", config.room_id)
+        });
         return Err(RegisterRoomError::AlreadyHosted {
             room_id: config.room_id.clone(),
             message,
         });
     }
 
-    response
-        .error_for_status()
-        .context("rendezvous server rejected room registration")
-        .map_err(RegisterRoomError::Other)?;
+    if !response.status().is_success() {
+        return Err(RegisterRoomError::Other(
+            rejected_rendezvous_response(response, "rendezvous server rejected room registration")
+                .await,
+        ));
+    }
     Ok(())
 }
 
@@ -65,9 +66,15 @@ pub(crate) async fn resolve_room(
         return Ok(None);
     }
 
+    if !response.status().is_success() {
+        return Err(rejected_rendezvous_response(
+            response,
+            "rendezvous server rejected room lookup",
+        )
+        .await);
+    }
+
     let room = response
-        .error_for_status()
-        .context("rendezvous server rejected room lookup")?
         .json()
         .await
         .context("failed to decode rendezvous lookup response")?;
@@ -86,9 +93,13 @@ pub(crate) async fn delete_room(client: &Client, config: &SessionConfig) -> Resu
         return Ok(());
     }
 
-    response
-        .error_for_status()
-        .context("rendezvous server rejected room deletion")?;
+    if !response.status().is_success() {
+        return Err(rejected_rendezvous_response(
+            response,
+            "rendezvous server rejected room deletion",
+        )
+        .await);
+    }
     Ok(())
 }
 
@@ -150,7 +161,34 @@ impl std::error::Error for RegisterRoomError {}
 
 #[derive(Debug, Deserialize)]
 struct RendezvousErrorResponse {
+    #[allow(dead_code)]
+    error: Option<String>,
     message: String,
+}
+
+async fn rejected_rendezvous_response(response: reqwest::Response, context: &str) -> anyhow::Error {
+    let status = response.status();
+    let body = response.text().await.ok();
+    anyhow!(format_rejection_message(context, status, body.as_deref()))
+}
+
+fn format_rejection_message(context: &str, status: StatusCode, body: Option<&str>) -> String {
+    match parse_rendezvous_error_message(body) {
+        Some(message) => format!("{context}: HTTP {status}: {message}"),
+        None => format!("{context}: HTTP {status}"),
+    }
+}
+
+fn parse_rendezvous_error_message(body: Option<&str>) -> Option<String> {
+    let body = body?.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    serde_json::from_str::<RendezvousErrorResponse>(body)
+        .ok()
+        .map(|response| response.message)
+        .or_else(|| Some(body.to_string()))
 }
 
 #[cfg(test)]
@@ -162,7 +200,8 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        ensure_rendezvous_compatible, is_delete_success, parse_rendezvous_version, room_url,
+        ensure_rendezvous_compatible, format_rejection_message, is_delete_success,
+        parse_rendezvous_error_message, parse_rendezvous_version, room_url,
         RendezvousErrorResponse,
     };
     use reqwest::header::{HeaderMap, HeaderValue};
@@ -195,6 +234,38 @@ mod tests {
         .expect("rendezvous error response should deserialize");
 
         assert_eq!(body.message, "room demo is already hosted");
+    }
+
+    #[test]
+    fn parses_plain_text_rendezvous_error_message() {
+        assert_eq!(
+            parse_rendezvous_error_message(Some("rate limit exceeded")),
+            Some("rate limit exceeded".into())
+        );
+    }
+
+    #[test]
+    fn formats_rejection_message_with_http_status_and_body() {
+        assert_eq!(
+            format_rejection_message(
+                "rendezvous server rejected room registration",
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(r#"{"error":"rate_limited","message":"retry after 12 seconds"}"#),
+            ),
+            "rendezvous server rejected room registration: HTTP 429 Too Many Requests: retry after 12 seconds"
+        );
+    }
+
+    #[test]
+    fn formats_rejection_message_without_body() {
+        assert_eq!(
+            format_rejection_message(
+                "rendezvous server rejected room lookup",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+            ),
+            "rendezvous server rejected room lookup: HTTP 500 Internal Server Error"
+        );
     }
 
     #[test]
