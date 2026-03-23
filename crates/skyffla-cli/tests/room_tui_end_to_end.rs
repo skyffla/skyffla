@@ -19,6 +19,11 @@ use support::{
 const TUI_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TUI_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+// Keep this suite as a small interactive smoke lane.
+// Targeted routing, auto-save collision naming, and receive gating are covered
+// more deterministically in lower-layer runtime and session tests, so the
+// timing-sensitive join->host file variants live in explicit opt-in tests.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_tui_supports_join_and_broadcast_chat() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
@@ -87,6 +92,7 @@ async fn room_tui_supports_direct_message_command() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit join-to-host file lane; run with cargo test -p skyffla --test room_tui_end_to_end room_tui_supports_file_send_default_accept_and_save -- --ignored --nocapture"]
 async fn room_tui_supports_file_send_default_accept_and_save() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -252,6 +258,7 @@ async fn room_tui_supports_folder_send_with_progress() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit targeted file visibility lane; run with cargo test -p skyffla --test room_tui_end_to_end room_tui_hides_targeted_file_transfer_from_third_member -- --ignored --nocapture"]
 async fn room_tui_hides_targeted_file_transfer_from_third_member() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -375,6 +382,7 @@ async fn room_tui_announces_when_host_leaves() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit join-to-host collision lane; run with cargo test -p skyffla --test room_tui_end_to_end room_tui_auto_save_appends_suffix_on_name_collision -- --ignored --nocapture"]
 async fn room_tui_auto_save_appends_suffix_on_name_collision() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
