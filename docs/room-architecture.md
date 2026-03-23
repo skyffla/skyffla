@@ -544,10 +544,10 @@ Because rooms are the native abstraction, the CLI should not introduce a redunda
 Prefer:
 
 ```sh
-skyffla host <room-id>
-skyffla join <room-id>
-skyffla host <room-id> machine
-skyffla join <room-id> machine
+skyffla <room-id> --host
+skyffla <room-id>
+skyffla <room-id> --host --machine
+skyffla <room-id> --machine
 skyffla pipe <room-id> --to <member>
 skyffla send <room-id> <path> --to <member>
 ```
@@ -561,8 +561,8 @@ skyffla room join <room-id>
 
 If rooms are the core model, then:
 
-- `host` means host a room
-- `join` means join a room
+- bare `skyffla <room-id>` means join-or-promote into a room
+- `--host` means explicitly host a room
 - 1:1 is just a two-member room
 
 So the extra `room` command only adds noise.

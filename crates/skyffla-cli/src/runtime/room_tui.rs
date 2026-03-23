@@ -247,12 +247,11 @@ async fn spawn_machine_backend(
 ) -> Result<RoomBackend, CliError> {
     let exe = std::env::current_exe().map_err(|error| CliError::local_io(error.to_string()))?;
     let mut command = Command::new(exe);
-    command.arg(match role {
-        Role::Host => "host",
-        Role::Join => "join",
-    });
     command.arg(&config.stream_id);
-    command.arg("machine");
+    if matches!(role, Role::Host) {
+        command.arg("--host");
+    }
+    command.arg("--machine");
     command.arg("--server").arg(&config.rendezvous_server);
     command.arg("--download-dir").arg(&config.download_dir);
     command.arg("--name").arg(&config.peer_name);

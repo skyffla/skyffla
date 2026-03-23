@@ -153,9 +153,8 @@ impl MachineProc {
         let bin = env!("CARGO_BIN_EXE_skyffla");
         let mut command = Command::new(bin);
         command
-            .arg(role)
             .arg(room)
-            .arg("machine")
+            .arg("--machine")
             .arg("--server")
             .arg(UNREACHABLE_SERVER)
             .arg("--name")
@@ -166,6 +165,9 @@ impl MachineProc {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if role == "host" {
+            command.arg("--host");
+        }
 
         let mut child = command
             .spawn()

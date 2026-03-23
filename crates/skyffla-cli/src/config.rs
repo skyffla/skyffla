@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 
 #[cfg(test)]
 use crate::accept_policy::AutoAcceptPolicy;
@@ -15,23 +15,17 @@ pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8
 #[command(about = "Minimal Skyffla peer CLI", long_about = None)]
 #[command(version, propagate_version = true)]
 pub(crate) struct Cli {
-    #[command(subcommand)]
-    pub(crate) command: Command,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum Command {
-    #[command(about = "Explicitly host a stream and wait for a peer")]
-    Host(SessionArgs),
-    #[command(about = "Join a stream, or create it if nobody is hosting yet")]
-    Join(SessionArgs),
+    #[arg(long, help = "Explicitly host the room instead of join-or-promote")]
+    pub(crate) host: bool,
+    #[command(flatten)]
+    pub(crate) session: SessionArgs,
 }
 
 #[derive(Args, Clone)]
 pub(crate) struct SessionArgs {
     pub(crate) room_id: Option<String>,
-    #[arg(value_enum)]
-    pub(crate) surface: Option<ClientSurface>,
+    #[arg(long, help = "Use the machine protocol instead of the default TUI")]
+    pub(crate) machine: bool,
     #[arg(
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
@@ -50,11 +44,6 @@ pub(crate) struct SessionArgs {
     pub(crate) auto_accept: Vec<AutoAcceptTarget>,
     #[arg(long, conflicts_with = "auto_accept")]
     pub(crate) reject_all: bool,
-}
-
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClientSurface {
-    Machine,
 }
 
 #[derive(Clone, Copy)]
@@ -92,7 +81,7 @@ impl SessionConfig {
                 std::env::var("USER").ok(),
                 std::env::var("USERNAME").ok(),
             ),
-            machine: matches!(args.surface, Some(ClientSurface::Machine)),
+            machine: args.machine,
             json_events: args.json,
             local_mode: args.local,
         })

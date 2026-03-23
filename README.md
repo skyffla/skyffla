@@ -70,13 +70,13 @@ Open two or more terminals and join the same room.
 Terminal A:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 Terminal B:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 The first peer hosts the room. Every later peer joins that same room.
@@ -84,7 +84,7 @@ The first peer hosts the room. Every later peer joins that same room.
 You can keep adding members:
 
 ```sh
-skyffla join copper-731
+skyffla copper-731
 ```
 
 In the default TUI:
@@ -105,11 +105,11 @@ than `demo`.
 Use `machine` for wrappers, agents, and scripted room automation:
 
 ```sh
-skyffla host copper-731 machine
+skyffla copper-731 --host --machine
 ```
 
 ```sh
-skyffla join copper-731 machine
+skyffla copper-731 --machine
 ```
 
 In `machine` mode:
@@ -133,17 +133,17 @@ Both the default TUI and `machine` are room-native:
 Use `--local` on one LAN when you do not want rendezvous:
 
 ```sh
-skyffla join copper-731 --local
+skyffla copper-731 --local
 ```
 
 ```sh
-skyffla join copper-731 --local
+skyffla copper-731 --local
 ```
 
 Or make one side the explicit host:
 
 ```sh
-skyffla host copper-731 --local
+skyffla copper-731 --host --local
 ```
 
 `--local` uses mDNS discovery, only accepts local peers, and only allows direct
@@ -160,7 +160,7 @@ skyffla-rendezvous
 Point the CLI at it:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla join copper-731
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla copper-731
 ```
 
 `skyffla-rendezvous` ignores `X-Forwarded-For` by default. Only set
@@ -210,5 +210,5 @@ cargo run -p skyffla-rendezvous
 Join a room against that local server:
 
 ```sh
-SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- join copper-731
+SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 cargo run -p skyffla -- copper-731
 ```

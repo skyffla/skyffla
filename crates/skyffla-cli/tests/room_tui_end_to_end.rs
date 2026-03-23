@@ -562,7 +562,6 @@ impl TuiProc {
         let bin = env!("CARGO_BIN_EXE_skyffla");
         let mut command = Command::new(bin);
         command
-            .arg(role)
             .arg(room)
             .arg("--server")
             .arg(server_url)
@@ -574,6 +573,9 @@ impl TuiProc {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if role == "host" {
+            command.arg("--host");
+        }
         if quiet_progress {
             command.env("SKYFFLA_TUI_SCRIPTED_QUIET_PROGRESS", "1");
         }
