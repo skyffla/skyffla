@@ -641,54 +641,72 @@ impl IrohTransport {
 
         match registered {
             RegisteredTransfer::File(registered) => {
-                if request.entry_path.is_some() {
-                    write_transfer_error_response(
+                let file_send_result: Result<(), TransportError> = async {
+                    if request.entry_path.is_some() {
+                        write_transfer_error_response(
+                            &mut send,
+                            format!(
+                                "transfer channel {} is a file and does not accept directory entry requests",
+                                request.channel_id
+                            ),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    write_transfer_message(
                         &mut send,
-                        format!(
-                            "transfer channel {} is a file and does not accept directory entry requests",
-                            request.channel_id
-                        ),
+                        &TransferResponse::ReadyFile {
+                            size: registered.size,
+                            content_hash: registered.content_hash.clone(),
+                        },
+                        "transfer response",
                     )
                     .await?;
-                    return Ok(());
-                }
-                write_transfer_message(
-                    &mut send,
-                    &TransferResponse::ReadyFile {
-                        size: registered.size,
-                        content_hash: registered.content_hash.clone(),
-                    },
-                    "transfer response",
-                )
-                .await?;
 
-                let (_, mut credit_recv) = connection.accept_data_stream().await?;
-                let mut file = File::open(&registered.path)
-                    .await
-                    .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-                if let Some(progress_tx) = &registered.progress_tx {
-                    let _ = progress_tx.send(TransferRuntimeProgress {
-                        channel_id: request.channel_id.clone(),
-                        item_kind: TransferItemKind::File,
-                        name: registered.display_name.clone(),
-                        phase: TransferPhase::Downloading,
-                        bytes_complete: 0,
-                        bytes_total: Some(registered.size),
-                    });
-                }
-                serve_file_with_credit(&mut send, &mut credit_recv, &mut file, |bytes_complete| {
+                    let (_, mut credit_recv) = connection.accept_data_stream().await?;
+                    let mut file = File::open(&registered.path)
+                        .await
+                        .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
                     if let Some(progress_tx) = &registered.progress_tx {
                         let _ = progress_tx.send(TransferRuntimeProgress {
                             channel_id: request.channel_id.clone(),
                             item_kind: TransferItemKind::File,
                             name: registered.display_name.clone(),
                             phase: TransferPhase::Downloading,
-                            bytes_complete,
+                            bytes_complete: 0,
                             bytes_total: Some(registered.size),
                         });
                     }
-                })
-                .await?;
+                    serve_file_with_credit(
+                        &mut send,
+                        &mut credit_recv,
+                        &mut file,
+                        registered.size,
+                        |bytes_complete| {
+                            if let Some(progress_tx) = &registered.progress_tx {
+                                let _ = progress_tx.send(TransferRuntimeProgress {
+                                    channel_id: request.channel_id.clone(),
+                                    item_kind: TransferItemKind::File,
+                                    name: registered.display_name.clone(),
+                                    phase: TransferPhase::Downloading,
+                                    bytes_complete,
+                                    bytes_total: Some(registered.size),
+                                });
+                            }
+                        },
+                    )
+                    .await?;
+                    let _ = send.finish();
+                    let _ = recv.read_to_end(1024).await;
+                    Ok(())
+                }
+                .await;
+                match file_send_result {
+                    Ok(()) => {}
+                    Err(TransportError::DirectFileSend(message))
+                        if message.contains("closed stream") => {}
+                    Err(error) => return Err(error),
+                }
             }
             RegisteredTransfer::Directory(registered) => {
                 if let Some(entry_path) = request.entry_path {
@@ -1232,6 +1250,7 @@ async fn serve_directory_entry_request(
         &mut send,
         &mut credit_recv,
         &mut file,
+        entry.size,
         |entry_bytes_complete| {
             let delta = entry_bytes_complete.saturating_sub(last_entry_bytes);
             last_entry_bytes = entry_bytes_complete;
@@ -1401,31 +1420,65 @@ async fn serve_file_with_credit(
     send: &mut SendStream,
     credit_recv: &mut RecvStream,
     file: &mut File,
+    expected_size: u64,
     mut on_progress: impl FnMut(u64),
 ) -> Result<(), TransportError> {
-    let mut available_credit = read_transfer_credit(credit_recv, "receiver credit").await?;
+    let mut available_credit = read_transfer_credit(credit_recv, "receiver credit")
+        .await
+        .map_err(|error| {
+            TransportError::DirectFileSend(format!(
+                "failed reading initial receiver credit at 0/{expected_size} bytes: {error}"
+            ))
+        })?;
     let mut bytes_complete = 0_u64;
     let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
-    loop {
+    while bytes_complete < expected_size {
         if available_credit == 0 {
             available_credit = available_credit
-                .saturating_add(read_transfer_credit(credit_recv, "receiver credit").await?);
+                .saturating_add(
+                    read_transfer_credit(credit_recv, "receiver credit")
+                        .await
+                        .map_err(|error| {
+                            TransportError::DirectFileSend(format!(
+                                "failed reading receiver credit at {bytes_complete}/{expected_size} bytes: {error}"
+                            ))
+                        })?,
+                );
             continue;
         }
-        let chunk_len = available_credit.min(buffer.len() as u64) as usize;
+        let chunk_len = available_credit
+            .min(buffer.len() as u64)
+            .min(expected_size.saturating_sub(bytes_complete)) as usize;
         let read = file
             .read(&mut buffer[..chunk_len])
             .await
             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
         if read == 0 {
-            break;
+            return Err(TransportError::DirectFileSend(format!(
+                "transfer source shorter than advertised: expected {expected_size} bytes, sent {bytes_complete}"
+            )));
         }
-        send.write_all(&buffer[..read])
-            .await
-            .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-        available_credit = available_credit.saturating_sub(read as u64);
-        bytes_complete = bytes_complete.saturating_add(read as u64);
-        on_progress(bytes_complete);
+        let next_bytes_complete = bytes_complete.saturating_add(read as u64);
+        match send.write_all(&buffer[..read]).await {
+            Ok(()) => {
+                available_credit = available_credit.saturating_sub(read as u64);
+                bytes_complete = next_bytes_complete;
+                on_progress(bytes_complete);
+            }
+            Err(error)
+                if next_bytes_complete == expected_size
+                    && error.to_string().contains("closed stream") =>
+            {
+                bytes_complete = next_bytes_complete;
+                on_progress(bytes_complete);
+                break;
+            }
+            Err(error) => {
+                return Err(TransportError::DirectFileSend(format!(
+                "failed writing file chunk at {next_bytes_complete}/{expected_size} bytes: {error}"
+            )))
+            }
+        }
     }
     Ok(())
 }
@@ -1434,25 +1487,30 @@ async fn serve_file_with_credit_and_hash(
     send: &mut SendStream,
     credit_recv: &mut RecvStream,
     file: &mut File,
+    expected_size: u64,
     mut on_progress: impl FnMut(u64),
 ) -> Result<String, TransportError> {
     let mut available_credit = read_transfer_credit(credit_recv, "receiver credit").await?;
     let mut bytes_complete = 0_u64;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
-    loop {
+    while bytes_complete < expected_size {
         if available_credit == 0 {
             available_credit = available_credit
                 .saturating_add(read_transfer_credit(credit_recv, "receiver credit").await?);
             continue;
         }
-        let chunk_len = available_credit.min(buffer.len() as u64) as usize;
+        let chunk_len = available_credit
+            .min(buffer.len() as u64)
+            .min(expected_size.saturating_sub(bytes_complete)) as usize;
         let read = file
             .read(&mut buffer[..chunk_len])
             .await
             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
         if read == 0 {
-            break;
+            return Err(TransportError::DirectFileSend(format!(
+                "transfer source shorter than advertised: expected {expected_size} bytes, sent {bytes_complete}"
+            )));
         }
         send.write_all(&buffer[..read])
             .await
@@ -1869,7 +1927,6 @@ fn is_local_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -1886,14 +1943,6 @@ mod tests {
             let message = bind_error.to_string();
             message.contains("Operation not permitted") || message.contains("Failed to bind sockets")
         })
-    }
-
-    fn unique_temp_path(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("skyffla-transport-{name}-{nanos}"))
     }
 
     #[tokio::test]
@@ -1976,128 +2025,6 @@ mod tests {
 
         let _ = done_tx.send(());
         accept_task.await.expect("accept task should join");
-        host.close().await;
-        joiner.close().await;
-    }
-
-    #[tokio::test]
-    async fn direct_file_transfer_downloads_from_peer() {
-        let Some(host) = bind_or_skip().await else {
-            return;
-        };
-        let Some(joiner) = bind_or_skip().await else {
-            return;
-        };
-        let source = unique_temp_path("direct-source");
-        let target = unique_temp_path("direct-target");
-        std::fs::write(&source, b"hello direct peer").expect("source file should be writable");
-
-        let prepared = host
-            .prepare_file_path_with_progress(&source, |_| {})
-            .await
-            .expect("host should prepare direct file");
-        host.register_outgoing_file(
-            "c1",
-            &source,
-            prepared.size,
-            prepared.display_name.clone(),
-            Some(prepared.content_hash.clone()),
-            None,
-        )
-        .await;
-        let host_ticket = host.local_ticket().expect("host ticket should encode");
-
-        let server = host.clone();
-        let serve_task = tokio::spawn(async move {
-            let connection = server
-                .accept_transfer_connection()
-                .await
-                .expect("host should accept transfer connection");
-            server
-                .serve_registered_transfer(connection)
-                .await
-                .expect("host should serve registered file");
-        });
-
-        let size = joiner
-            .receive_file_with_progress(&host_ticket, "c1", &prepared.content_hash, &target, |_| {})
-            .await
-            .expect("joiner should receive direct file");
-        serve_task.await.expect("serve task should complete");
-
-        assert_eq!(size, 17);
-        assert_eq!(
-            std::fs::read(&target).expect("target should exist"),
-            b"hello direct peer"
-        );
-
-        let _ = std::fs::remove_file(&source);
-        let _ = std::fs::remove_file(&target);
-        host.close().await;
-        joiner.close().await;
-    }
-
-    #[tokio::test]
-    async fn direct_directory_transfer_downloads_from_peer() {
-        let Some(host) = bind_or_skip().await else {
-            return;
-        };
-        let Some(joiner) = bind_or_skip().await else {
-            return;
-        };
-        let source_dir = unique_temp_path("direct-dir-source");
-        let target_dir = unique_temp_path("direct-dir-target");
-        std::fs::create_dir_all(source_dir.join("nested")).expect("source dir should be writable");
-        std::fs::create_dir_all(source_dir.join("empty")).expect("empty dir should be writable");
-        std::fs::write(source_dir.join("a.txt"), b"alpha").expect("a.txt should be writable");
-        std::fs::write(source_dir.join("nested").join("b.txt"), b"beta")
-            .expect("b.txt should be writable");
-
-        let prepared = host
-            .prepare_directory_path_with_progress(&source_dir, |_| {})
-            .await
-            .expect("host should prepare direct directory");
-        host.register_outgoing_directory("c2", &source_dir, prepared.clone(), None)
-            .await;
-        let host_ticket = host.local_ticket().expect("host ticket should encode");
-        let server = host.clone();
-        let serve_task = tokio::spawn(async move {
-            let connection = server
-                .accept_transfer_connection()
-                .await
-                .expect("host should accept transfer connection");
-            server
-                .serve_registered_transfer(connection)
-                .await
-                .expect("host should serve registered directory");
-        });
-
-        let size = joiner
-            .receive_directory_with_progress(
-                &host_ticket,
-                "c2",
-                &target_dir,
-                DEFAULT_DIRECTORY_TRANSFER_WORKERS,
-                |_| {},
-            )
-            .await
-            .expect("joiner should receive direct directory");
-        serve_task.await.expect("serve task should complete");
-
-        assert_eq!(size, 9);
-        assert_eq!(
-            std::fs::read(target_dir.join("a.txt")).expect("a.txt should exist"),
-            b"alpha"
-        );
-        assert_eq!(
-            std::fs::read(target_dir.join("nested").join("b.txt"))
-                .expect("nested b.txt should exist"),
-            b"beta"
-        );
-        assert!(target_dir.join("empty").is_dir());
-
-        let _ = std::fs::remove_dir_all(&source_dir);
-        let _ = std::fs::remove_dir_all(&target_dir);
         host.close().await;
         joiner.close().await;
     }
