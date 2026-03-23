@@ -17,7 +17,9 @@ use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer,
 
 // Keep this suite as a small CLI-process smoke lane.
 // Room routing semantics already have deterministic coverage in `skyffla-session`,
-// and direct transfer/runtime ordering is covered below this layer.
+// including multi-recipient reject/close behavior. Direct transfer/runtime ordering
+// is covered below this layer, so multi-recipient transfer fanout stays in an
+// explicit opt-in lane instead of the default smoke suite.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<()> {
@@ -297,6 +299,7 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit multi-recipient transfer lane; run with cargo test -p skyffla --test machine_end_to_end machine_broadcast_file_accepts_and_rejects_independently -- --ignored --nocapture"]
 async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
