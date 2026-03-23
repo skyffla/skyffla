@@ -2,7 +2,7 @@ pub mod room;
 
 use std::fmt;
 
-use skyffla_protocol::{ProtocolVersion, SessionMode};
+use skyffla_protocol::ProtocolVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPeer {
@@ -44,7 +44,6 @@ pub enum SessionState {
     Joining { stream_id: String },
     Connecting { stream_id: String },
     Negotiating { session_id: String },
-    Stdio { session_id: String },
     Machine { session_id: String },
     Closing,
     Closed,
@@ -65,7 +64,6 @@ pub enum SessionEvent {
     },
     Negotiated {
         session_id: String,
-        session_mode: SessionMode,
     },
     CloseRequested,
     Closed,
@@ -110,16 +108,9 @@ impl SessionMachine {
             }
             (
                 SessionState::Negotiating { .. },
-                SessionEvent::Negotiated {
-                    session_id,
-                    session_mode,
-                },
-            ) => match session_mode {
-                SessionMode::Stdio => SessionState::Stdio { session_id },
-                SessionMode::Machine => SessionState::Machine { session_id },
-            },
-            (SessionState::Stdio { .. }, SessionEvent::CloseRequested)
-            | (SessionState::Machine { .. }, SessionEvent::CloseRequested)
+                SessionEvent::Negotiated { session_id },
+            ) => SessionState::Machine { session_id },
+            (SessionState::Machine { .. }, SessionEvent::CloseRequested)
             | (SessionState::Hosting { .. }, SessionEvent::CloseRequested)
             | (SessionState::Joining { .. }, SessionEvent::CloseRequested)
             | (SessionState::Connecting { .. }, SessionEvent::CloseRequested)
@@ -199,44 +190,12 @@ mod tests {
         machine
             .transition(SessionEvent::Negotiated {
                 session_id: "s1".into(),
-                session_mode: SessionMode::Machine,
             })
             .expect("machine negotiation should be accepted");
 
         assert_eq!(
             machine.state(),
             &SessionState::Machine {
-                session_id: "s1".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn state_machine_supports_stdio_flow() {
-        let mut machine = SessionMachine::new();
-        machine
-            .transition(SessionEvent::JoinRequested {
-                stream_id: "demo".into(),
-            })
-            .expect("join should be accepted");
-        machine
-            .transition(SessionEvent::TransportConnecting)
-            .expect("connecting should be accepted");
-        machine
-            .transition(SessionEvent::PeerConnected {
-                session_id: "s1".into(),
-            })
-            .expect("peer connection should be accepted");
-        machine
-            .transition(SessionEvent::Negotiated {
-                session_id: "s1".into(),
-                session_mode: SessionMode::Stdio,
-            })
-            .expect("stdio negotiation should be accepted");
-
-        assert_eq!(
-            machine.state(),
-            &SessionState::Stdio {
                 session_id: "s1".into(),
             }
         );

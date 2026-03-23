@@ -41,6 +41,10 @@ Current constant:
 
 Compatibility is checked during the peer handshake. Peers must share the same wire major version.
 
+The current wire major is `2.x`. It removed the legacy stdio/session-mode split
+from the peer hello and keeps the handshake focused on room-native machine
+sessions plus file-transfer capability advertisement.
+
 File-transfer compatibility is negotiated separately inside the hello payload
 via `FILE_TRANSFER_PROTOCOL_VERSION`. Peers may still connect on the same wire
 major version while refusing `send_path` when the advertised file-transfer

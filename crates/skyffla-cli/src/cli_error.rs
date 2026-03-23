@@ -10,8 +10,6 @@ pub(crate) enum CliExitCode {
     Rendezvous = 10,
     Transport = 11,
     Protocol = 12,
-    TransferCancelled = 21,
-    PeerError = 22,
     LocalIo = 23,
 }
 
@@ -43,18 +41,6 @@ impl CliError {
 
     pub(crate) fn protocol(message: impl Into<String>) -> Self {
         Self::new(CliExitCode::Protocol, "protocol_error", message)
-    }
-
-    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
-        Self::new(
-            CliExitCode::TransferCancelled,
-            "transfer_cancelled",
-            message,
-        )
-    }
-
-    pub(crate) fn peer(message: impl Into<String>) -> Self {
-        Self::new(CliExitCode::PeerError, "peer_error", message)
     }
 
     pub(crate) fn local_io(message: impl Into<String>) -> Self {

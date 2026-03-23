@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use skyffla_protocol::SessionMode;
 
 #[cfg(test)]
 use crate::accept_policy::AutoAcceptPolicy;
@@ -44,8 +43,6 @@ pub(crate) struct SessionArgs {
     #[arg(long)]
     pub(crate) name: Option<String>,
     #[arg(long)]
-    pub(crate) stdio: bool,
-    #[arg(long)]
     pub(crate) json: bool,
     #[arg(long)]
     pub(crate) local: bool,
@@ -73,7 +70,6 @@ pub(crate) struct SessionConfig {
     pub(crate) rendezvous_server: String,
     pub(crate) download_dir: PathBuf,
     pub(crate) peer_name: String,
-    pub(crate) stdio: bool,
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
@@ -96,19 +92,10 @@ impl SessionConfig {
                 std::env::var("USER").ok(),
                 std::env::var("USERNAME").ok(),
             ),
-            stdio: args.stdio,
             machine: matches!(args.surface, Some(ClientSurface::Machine)),
             json_events: args.json,
             local_mode: args.local,
         })
-    }
-
-    pub(crate) fn session_mode(&self) -> SessionMode {
-        if self.machine {
-            SessionMode::Machine
-        } else {
-            SessionMode::Stdio
-        }
     }
 }
 

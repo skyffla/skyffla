@@ -11,7 +11,6 @@ use crate::config::SessionConfig;
 use crate::local_state::local_state_file_path;
 use crate::runtime::handshake::exchange_hello;
 use crate::runtime::machine::run_machine_join_session;
-use crate::runtime::stdio::run_stdio_session;
 
 pub(crate) async fn run_connected_session(
     config: &SessionConfig,
@@ -69,7 +68,6 @@ pub(crate) async fn run_connected_session(
         session
             .transition(SessionEvent::Negotiated {
                 session_id: session_id.clone(),
-                session_mode: config.session_mode(),
             })
             .context("failed to record negotiated state")
             .map_err(|error| CliError::runtime(error.to_string()))?,
@@ -88,36 +86,25 @@ pub(crate) async fn run_connected_session(
         mode: connection_status.mode.to_string(),
         remote_addr: connection_status.remote_addr.clone(),
     });
-    if config.machine {
-        debug_assert!(!is_host, "machine host path should use run_machine_host");
-        run_machine_join_session(
-            config,
-            sink,
-            transport,
-            &connection,
-            &mut send,
-            &mut recv,
-            &peer,
-            Some(identity.fingerprint.clone()),
-            local_ticket.encoded,
-            peer.peer_ticket.clone(),
-        )
-        .await?;
-    } else if config.stdio {
-        run_stdio_session(
-            sink,
-            &session_id,
-            &connection,
-            &mut send,
-            &mut recv,
-            is_host,
-        )
-        .await?;
-    } else {
+    if !config.machine {
         return Err(CliError::runtime(
             "interactive sessions should use the room TUI adapter",
         ));
     }
+    debug_assert!(!is_host, "machine host path should use run_machine_host");
+    run_machine_join_session(
+        config,
+        sink,
+        transport,
+        &connection,
+        &mut send,
+        &mut recv,
+        &peer,
+        Some(identity.fingerprint.clone()),
+        local_ticket.encoded,
+        peer.peer_ticket.clone(),
+    )
+    .await?;
 
     sink.emit_runtime_event(state_changed_event(
         session

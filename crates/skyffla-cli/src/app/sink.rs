@@ -5,14 +5,12 @@ use crate::config::SessionConfig;
 
 #[derive(Clone, Copy)]
 pub(crate) struct EventSink {
-    stdio: bool,
     json: bool,
 }
 
 impl EventSink {
     pub(crate) fn from_config(config: &SessionConfig) -> Self {
         Self {
-            stdio: config.stdio,
             json: config.json_events,
         }
     }
@@ -62,13 +60,7 @@ impl EventSink {
                 ),
             },
             RuntimeEvent::ChatSent { text } => eprintln!("sent: {}", text),
-            RuntimeEvent::ChatReceived { text } => {
-                if self.stdio {
-                    eprintln!("received: {}", text);
-                } else {
-                    println!("{}", text);
-                }
-            }
+            RuntimeEvent::ChatReceived { text } => println!("{}", text),
         }
     }
 

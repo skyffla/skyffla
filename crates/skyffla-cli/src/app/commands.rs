@@ -118,7 +118,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
 }
 
 fn should_use_room_tui(config: &SessionConfig) -> bool {
-    !config.machine && !config.stdio
+    !config.machine
 }
 
 async fn connect_to_registered_peer(
@@ -260,21 +260,7 @@ async fn wait_for_incoming_peer(
         );
     }
 
-    if config.machine {
-        let result = run_machine_host(config, sink, session, &transport).await;
-        let delete_result = delete_room(client, config)
-            .await
-            .map_err(|error| CliError::rendezvous(error.to_string()));
-        transport.close().await;
-        delete_result?;
-        return result;
-    }
-
-    let connection = transport
-        .accept_connection()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let result = run_connected_session(config, sink, session, &transport, connection, true).await;
+    let result = run_machine_host(config, sink, session, &transport).await;
     let delete_result = delete_room(client, config)
         .await
         .map_err(|error| CliError::rendezvous(error.to_string()));
@@ -316,17 +302,7 @@ async fn wait_for_incoming_peer_local(
         );
     }
 
-    if config.machine {
-        let result = run_machine_host(config, sink, session, &transport).await;
-        transport.close().await;
-        return result;
-    }
-
-    let connection = transport
-        .accept_connection()
-        .await
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let result = run_connected_session(config, sink, session, &transport, connection, true).await;
+    let result = run_machine_host(config, sink, session, &transport).await;
     transport.close().await;
     result
 }

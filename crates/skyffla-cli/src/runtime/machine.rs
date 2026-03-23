@@ -1206,7 +1206,6 @@ fn enter_machine_state(
         session
             .transition(SessionEvent::Negotiated {
                 session_id: session_id.to_string(),
-                session_mode: skyffla_protocol::SessionMode::Machine,
             })
             .context("failed to record negotiated state")
             .map_err(|error| CliError::runtime(error.to_string()))?,

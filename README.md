@@ -24,9 +24,6 @@ The primary room surfaces are:
 - a room-native Terminal UI (TUI) for people
 - a framed `machine` protocol for wrappers and automation
 
-It also includes raw full-duplex `--stdio` for 1:1 byte streams when you do not
-want room semantics.
-
 Use it when you want direct peer-to-peer communication without building your own
 room control, peer introduction, file transfer, and terminal UX stack first.
 
@@ -131,37 +128,6 @@ Both the default TUI and `machine` are room-native:
 - they see the same room/member/channel concepts
 - they differ only in presentation and automation surface
 
-## Raw Duplex `--stdio`
-
-Use `--stdio` when you want a raw full-duplex 1:1 byte pipe instead of room
-chat or the room-native `machine` API.
-
-`--stdio` is useful for:
-
-- shell pipelines
-- agent-to-agent byte streams
-- custom framed protocols such as NDJSON
-
-It is not the multiparty room API.
-
-Terminal A:
-
-```sh
-cat | skyffla host copper-731 --stdio
-```
-
-Terminal B:
-
-```sh
-cat | skyffla join copper-731 --stdio
-```
-
-Type in either terminal to send bytes to the other. `Ctrl-D` closes only your
-send side.
-
-If you want wrappers or automation to participate in rooms, use `machine`, not
-`--stdio`.
-
 ### `--local`
 
 Use `--local` on one LAN when you do not want rendezvous:
@@ -206,7 +172,6 @@ that you control.
 - [`docs/room-architecture.md`](docs/room-architecture.md): room-native architecture and design boundaries
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
 - [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
-- [`docs/stdio-duplex-spec.md`](docs/stdio-duplex-spec.md): raw duplex `--stdio` design note
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
 
 ## Local Development

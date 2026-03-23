@@ -176,7 +176,6 @@ mod tests {
             rendezvous_server: format!("{DEFAULT_RENDEZVOUS_URL}/"),
             download_dir: PathBuf::from("."),
             peer_name: "peer".into(),
-            stdio: false,
             machine: false,
             json_events: false,
             local_mode: false,

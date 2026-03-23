@@ -32,9 +32,6 @@ This room-first architecture applies to:
 - the `machine` API
 - future language wrappers built on `machine`
 
-It does not mean every CLI mode is room-native. `--stdio` remains a separate
-raw 1:1 duplex byte-stream mode.
-
 One host process hosts one room.
 
 ## Current Status
@@ -681,18 +678,6 @@ The important routing rule is:
 - broadcast is sender fanout to all current members in the roster
 
 ## What Should Be Removed or Reworked
-
-### Rework `SessionMode`
-
-`SessionMode` currently pushes the implementation toward separate runtime worlds.
-
-In the room-native design:
-
-- room semantics are primary
-- TUI and machine are adapters
-- channel kind carries payload semantics
-
-If a mode concept remains, it should describe the client surface, not the room model.
 
 ### Rework the 1:1-centric protocol taxonomy
 
