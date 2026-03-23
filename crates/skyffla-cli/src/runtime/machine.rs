@@ -2444,7 +2444,8 @@ impl JoinState {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use skyffla_protocol::room::{ChannelKind, TransferDigest};
+    use skyffla_protocol::room::{ChannelKind, Route, TransferDigest};
+    use skyffla_session::room::RoomEngine;
 
     use super::*;
     use crate::runtime::machine_state::JoinChannelState;
@@ -2488,6 +2489,57 @@ mod tests {
         }
     }
 
+    fn host_room_with_pending_file(
+        channel_id: &ChannelId,
+        transfer: TransferOffer,
+    ) -> (
+        RoomEngine,
+        HostState,
+        BTreeMap<MemberId, PeerHandle>,
+        MemberId,
+    ) {
+        let mut room = RoomEngine::new(RoomId::new("demo-room").unwrap(), "alpha", None).unwrap();
+        let beta = room.join("beta", None).unwrap();
+        let host_member = room.host_member().clone();
+        room.open_channel(
+            &beta.member.member_id,
+            channel_id.clone(),
+            ChannelKind::File,
+            Route::Member {
+                member_id: host_member.clone(),
+            },
+            Some("report.txt".into()),
+            Some(11),
+            None,
+            Some(transfer),
+        )
+        .unwrap();
+
+        let (authority_sender, _authority_rx) = mpsc::unbounded_channel();
+        let mut peers = BTreeMap::new();
+        peers.insert(
+            beta.member.member_id.clone(),
+            PeerHandle {
+                authority_sender,
+                peer_sender: None,
+                member: beta.member,
+                ticket: Some("provider-ticket".into()),
+                file_transfer_version: None,
+                pending_events: Vec::new(),
+            },
+        );
+
+        (
+            room,
+            HostState {
+                pending_accepted_files: BTreeSet::from([channel_id.clone()]),
+                pending_received_files: BTreeMap::new(),
+            },
+            peers,
+            host_member,
+        )
+    }
+
     #[tokio::test]
     async fn provisional_file_accept_stays_pending_until_integrity_is_available() {
         let host_member = MemberId::new("m1").unwrap();
@@ -2523,6 +2575,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisional_host_file_accept_stays_pending_until_integrity_is_available() {
+        let channel_id = ChannelId::new("file-1").unwrap();
+        let transfer = TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: None,
+        };
+        let (room, mut host_state, peers, host_member) =
+            host_room_with_pending_file(&channel_id, transfer);
+        let transport = IrohTransport::bind().await.unwrap();
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
+
+        maybe_start_host_pending_receive(
+            &room,
+            &peers,
+            &mut host_state,
+            &host_member,
+            &channel_id,
+            Path::new("."),
+            &transport,
+            &host_tx,
+        )
+        .unwrap();
+
+        assert!(host_state.pending_accepted_files.contains(&channel_id));
+        assert!(host_state.pending_received_files.is_empty());
+        assert!(host_rx.try_recv().is_err());
+
+        transport.close().await;
+    }
+
+    #[tokio::test]
     async fn finalized_file_accept_starts_receive_and_clears_pending_flag() {
         let host_member = MemberId::new("m1").unwrap();
         let self_member = MemberId::new("m2").unwrap();
@@ -2553,6 +2636,43 @@ mod tests {
         .unwrap();
 
         assert!(!state.pending_accepted_files.contains(&channel_id));
+
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn finalized_host_file_accept_starts_receive_and_clears_pending_flag() {
+        let channel_id = ChannelId::new("file-1").unwrap();
+        let transfer = TransferOffer {
+            item_kind: TransferItemKind::File,
+            integrity: Some(TransferDigest {
+                algorithm: "blake3".into(),
+                value: "feedbeef".into(),
+            }),
+        };
+        let (mut room, mut host_state, peers, host_member) = host_room_with_pending_file(
+            &channel_id,
+            provisional_transfer_offer(TransferItemKind::File),
+        );
+        let beta_member = MemberId::new("m2").unwrap();
+        room.update_channel_transfer(&beta_member, &channel_id, Some(11), transfer)
+            .unwrap();
+        let transport = IrohTransport::bind().await.unwrap();
+        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+
+        maybe_start_host_pending_receive(
+            &room,
+            &peers,
+            &mut host_state,
+            &host_member,
+            &channel_id,
+            Path::new("."),
+            &transport,
+            &host_tx,
+        )
+        .unwrap();
+
+        assert!(!host_state.pending_accepted_files.contains(&channel_id));
 
         transport.close().await;
     }

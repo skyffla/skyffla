@@ -1805,6 +1805,29 @@ mod tests {
     }
 
     #[test]
+    fn auto_save_collision_appends_suffix() {
+        let dir = std::env::temp_dir().join(format!(
+            "skyffla-room-tui-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.txt"), b"existing").unwrap();
+        std::fs::write(dir.join("report (1).txt"), b"existing").unwrap();
+
+        let candidate = unique_path_in_dir(&dir, "report.txt");
+
+        assert_eq!(
+            candidate.file_name().and_then(|name| name.to_str()),
+            Some("report (2).txt")
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn interactive_tui_keeps_transfer_progress_out_of_event_log() {
         let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();

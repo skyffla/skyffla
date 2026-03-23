@@ -15,6 +15,12 @@ mod support;
 
 use support::{fresh_test_dir, unique_room_name, wait_for_room_ready, TestServer, PROCESS_TIMEOUT};
 
+// Keep this suite as a small CLI-process smoke lane.
+// Room routing semantics already have deterministic coverage in `skyffla-session`,
+// including multi-recipient reject/close behavior. Direct transfer/runtime ordering
+// is covered below this layer, so multi-recipient transfer fanout stays in an
+// explicit opt-in lane instead of the default smoke suite.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
@@ -40,10 +46,8 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
             && member_count(event) == Some(2)
     })
     .await?;
-    host.expect_stderr_contains("\"member_name\":\"join\"")
-        .await?;
-    join.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
+    expect_room_link_connected(&mut host, "join").await?;
+    expect_room_link_connected(&mut join, "host").await?;
 
     host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello machine room"}"#)
         .await?;
@@ -56,64 +60,6 @@ async fn machine_host_to_join_delivers_room_events_and_direct_chat() -> Result<(
 
     host.shutdown().await?;
     join.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_host_accepts_two_joiners_and_broadcasts_to_both() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
-    for home in [&host_home, &beta_home, &gamma_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
-
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"host\"")
-        .await?;
-
-    host.send(r#"{"type":"send_chat","to":{"type":"all"},"text":"hello everyone"}"#)
-        .await?;
-    beta.expect_event("broadcast chat", |event| {
-        event.get("type") == Some(&Value::String("chat".into()))
-            && event.get("from_name") == Some(&Value::String("host".into()))
-            && event.get("text") == Some(&Value::String("hello everyone".into()))
-    })
-    .await?;
-    gamma
-        .expect_event("broadcast chat", |event| {
-            event.get("type") == Some(&Value::String("chat".into()))
-                && event.get("from_name") == Some(&Value::String("host".into()))
-                && event.get("text") == Some(&Value::String("hello everyone".into()))
-        })
-        .await?;
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    gamma.shutdown().await?;
     server.abort();
     Ok(())
 }
@@ -138,15 +84,10 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut host, "gamma").await?;
+    expect_room_link_connected(&mut beta, "gamma").await?;
+    expect_room_link_connected(&mut gamma, "beta").await?;
     let beta_stderr = beta.stderr_lines().await;
     let beta_events = beta.events().await;
     let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
@@ -195,193 +136,6 @@ async fn machine_joiner_can_chat_directly_to_another_joiner() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_joiner_can_chat_directly_to_host_member() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    for home in [&host_home, &beta_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-
-    host.expect_event("beta joined", |event| {
-        event.get("type") == Some(&Value::String("member_joined".into()))
-            && event.pointer("/member/name") == Some(&Value::String("beta".into()))
-    })
-    .await?;
-    host.expect_stderr_contains(
-        "\"event\":\"room_link_connected\",\"member_id\":\"m2\",\"member_name\":\"beta\"",
-    )
-    .await?;
-    beta.expect_stderr_contains(
-        "\"event\":\"room_link_connected\",\"member_id\":\"m1\",\"member_name\":\"host\"",
-    )
-    .await?;
-
-    beta.send(r#"{"type":"send_chat","to":{"type":"member","member_id":"m1"},"text":"hi host"}"#)
-        .await?;
-    host.expect_event("beta->host chat", |event| {
-        event.get("type") == Some(&Value::String("chat".into()))
-            && event.get("from_name") == Some(&Value::String("beta".into()))
-            && event.get("text") == Some(&Value::String("hi host".into()))
-    })
-    .await?;
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_joiner_channel_data_flows_directly_to_another_joiner() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
-    for home in [&host_home, &beta_home, &gamma_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
-
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    let beta_stderr = beta.stderr_lines().await;
-    let beta_events = beta.events().await;
-    let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
-        .or_else(|| member_id_named(&beta_events, "gamma"))
-        .context("beta did not learn gamma member id")?;
-
-    beta.send(
-        &format!(
-            r#"{{"type":"open_channel","channel_id":"c1","kind":"machine","to":{{"type":"member","member_id":"{gamma_id}"}}}}"#
-        ),
-    )
-    .await?;
-    gamma
-        .expect_event("channel_opened", |event| {
-            event.get("type") == Some(&Value::String("channel_opened".into()))
-                && event.get("channel_id") == Some(&Value::String("c1".into()))
-        })
-        .await?;
-
-    gamma
-        .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"sketch line"}"#)
-        .await?;
-    beta.expect_event("channel_data", |event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("sketch line".into()))
-    })
-    .await?;
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let host_events = host.events().await;
-    assert!(
-        !host_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_data".into()))
-                && event.get("body") == Some(&Value::String("sketch line".into()))
-        }),
-        "host unexpectedly saw direct beta<->gamma channel data:\n{}",
-        host.debug_dump().await
-    );
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    gamma.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_file_channel_requires_transfer_metadata_and_rejects_inline_data() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    for home in [&host_home, &beta_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-
-    host.expect_stderr_contains(
-        "\"event\":\"room_link_connected\",\"member_id\":\"m2\",\"member_name\":\"beta\"",
-    )
-    .await?;
-    beta.expect_stderr_contains(
-        "\"event\":\"room_link_connected\",\"member_id\":\"m1\",\"member_name\":\"host\"",
-    )
-    .await?;
-
-    host.send(
-        r#"{"type":"open_channel","channel_id":"c1","kind":"file","to":{"type":"member","member_id":"m2"},"name":"report.pdf","size":1234,"mime":"application/pdf","transfer":{"item_kind":"file","integrity":{"algorithm":"blake3","value":"feedbeef"}}}"#,
-    )
-    .await?;
-    beta.expect_event("file channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-            && event.pointer("/transfer/item_kind") == Some(&Value::String("file".into()))
-    })
-    .await?;
-
-    host.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"raw bytes"}"#)
-        .await?;
-    host.expect_event("file inline-data rejected", |event| {
-        event.get("type") == Some(&Value::String("error".into()))
-            && event.get("code") == Some(&Value::String("command_failed".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let beta_events = beta.events().await;
-    assert!(
-        !beta_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_data".into()))
-                && event.get("body") == Some(&Value::String("raw bytes".into()))
-        }),
-        "beta unexpectedly saw inline file channel data:\n{}",
-        beta.debug_dump().await
-    );
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -403,8 +157,8 @@ async fn machine_send_file_downloads_and_saves_on_accept() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut beta, "m1", "host").await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut beta, "host").await?;
 
     host.send(r#"/send --channel f1 --to m2 --path "~/report.txt""#)
         .await?;
@@ -479,8 +233,8 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut beta, "m1", "host").await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut beta, "host").await?;
 
     host.send(r#"/send --channel folder1 --to m2 --path "~/artpack""#)
         .await?;
@@ -545,6 +299,7 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit multi-recipient transfer lane; run with cargo test -p skyffla --test machine_end_to_end machine_broadcast_file_accepts_and_rejects_independently -- --ignored --nocapture"]
 async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -573,10 +328,10 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
     let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
 
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut host, "m3", "gamma").await?;
-    expect_room_link_connected(&mut beta, "m3", "gamma").await?;
-    expect_room_link_connected(&mut gamma, "m2", "beta").await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut host, "gamma").await?;
+    expect_room_link_connected(&mut beta, "gamma").await?;
+    expect_room_link_connected(&mut gamma, "beta").await?;
 
     host.send(&format!(
         r#"/send --channel f-all --to all --path "{}""#,
@@ -652,218 +407,6 @@ async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_rejected_channel_emits_error_for_late_sender_data() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
-    for home in [&host_home, &beta_home, &gamma_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
-
-    host.expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    host.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-    let beta_stderr = beta.stderr_lines().await;
-    let beta_events = beta.events().await;
-    let gamma_id = linked_member_id_named(&beta_stderr, "gamma")
-        .or_else(|| member_id_named(&beta_events, "gamma"))
-        .context("beta did not learn gamma member id")?;
-
-    beta.send(
-        &format!(
-            r#"{{"type":"open_channel","channel_id":"c1","kind":"machine","to":{{"type":"member","member_id":"{gamma_id}"}}}}"#
-        ),
-    )
-    .await?;
-    gamma
-        .expect_event("channel_opened", |event| {
-            event.get("type") == Some(&Value::String("channel_opened".into()))
-                && event.get("channel_id") == Some(&Value::String("c1".into()))
-        })
-        .await?;
-
-    gamma
-        .send(r#"{"type":"reject_channel","channel_id":"c1","reason":"busy"}"#)
-        .await?;
-    beta.expect_event("channel_rejected", |event| {
-        event.get("type") == Some(&Value::String("channel_rejected".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    beta.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"too late"}"#)
-        .await?;
-    beta.expect_event("late sender error", |event| {
-        event.get("type") == Some(&Value::String("error".into()))
-            && event.get("code") == Some(&Value::String("command_failed".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let gamma_events = gamma.events().await;
-    assert!(
-        !gamma_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_data".into()))
-                && event.get("body") == Some(&Value::String("too late".into()))
-        }),
-        "gamma unexpectedly saw late channel data after rejection:\n{}",
-        gamma.debug_dump().await
-    );
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    gamma.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_broadcast_channel_data_reaches_host_and_other_joiners() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    let gamma_home = fresh_test_dir("skyffla-cli-machine-gamma");
-    for home in [&host_home, &beta_home, &gamma_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-    let mut gamma = MachineProc::spawn("join", &room, &server.url, "gamma", &gamma_home).await?;
-
-    beta.expect_stderr_contains("\"member_name\":\"gamma\"")
-        .await?;
-    gamma
-        .expect_stderr_contains("\"member_name\":\"beta\"")
-        .await?;
-
-    beta.send(r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"all"}}"#)
-        .await?;
-    host.expect_event("broadcast channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-    gamma
-        .expect_event("broadcast channel_opened", |event| {
-            event.get("type") == Some(&Value::String("channel_opened".into()))
-                && event.get("channel_id") == Some(&Value::String("c1".into()))
-        })
-        .await?;
-
-    gamma
-        .send(r#"{"type":"send_channel_data","channel_id":"c1","body":"fanout line"}"#)
-        .await?;
-    beta.expect_event("broadcast channel_data", |event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("fanout line".into()))
-    })
-    .await?;
-    host.expect_event("broadcast channel_data", |event| {
-        event.get("type") == Some(&Value::String("channel_data".into()))
-            && event.get("from_name") == Some(&Value::String("gamma".into()))
-            && event.get("body") == Some(&Value::String("fanout line".into()))
-    })
-    .await?;
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    gamma.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn machine_closed_channel_emits_error_for_late_host_data() -> Result<()> {
-    let Some(server) = TestServer::spawn().await? else {
-        return Ok(());
-    };
-
-    let host_home = fresh_test_dir("skyffla-cli-machine-host");
-    let beta_home = fresh_test_dir("skyffla-cli-machine-beta");
-    for home in [&host_home, &beta_home] {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create {}", home.display()))?;
-    }
-
-    let room = unique_room_name();
-    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
-    wait_for_room_ready(&server.url, &room).await?;
-    let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
-
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut beta, "m1", "host").await?;
-
-    host.send(
-        r#"{"type":"open_channel","channel_id":"c1","kind":"machine","to":{"type":"member","member_id":"m2"}}"#,
-    )
-    .await?;
-    beta.expect_event("channel_opened", |event| {
-        event.get("type") == Some(&Value::String("channel_opened".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    beta.send(r#"{"type":"close_channel","channel_id":"c1","reason":"done"}"#)
-        .await?;
-    host.expect_event("channel_closed", |event| {
-        event.get("type") == Some(&Value::String("channel_closed".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    host.send(r#"{"type":"send_channel_data","channel_id":"c1","body":"after close"}"#)
-        .await?;
-    host.expect_event("late host-data error", |event| {
-        event.get("type") == Some(&Value::String("error".into()))
-            && event.get("code") == Some(&Value::String("command_failed".into()))
-            && event.get("channel_id") == Some(&Value::String("c1".into()))
-    })
-    .await?;
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let beta_events = beta.events().await;
-    assert!(
-        !beta_events.iter().any(|event| {
-            event.get("type") == Some(&Value::String("channel_data".into()))
-                && event.get("body") == Some(&Value::String("after close".into()))
-        }),
-        "beta unexpectedly saw late host channel data after close:\n{}",
-        beta.debug_dump().await
-    );
-
-    host.shutdown().await?;
-    beta.shutdown().await?;
-    server.abort();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual performance baseline; run with --ignored --nocapture and optionally SKYFFLA_PERF_FILE_MIB=2048"]
 async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
@@ -895,8 +438,8 @@ async fn machine_native_file_transfer_reports_baseline() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut beta, "m1", "host").await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut beta, "host").await?;
 
     let command = serde_json::json!({
         "type": "send_path",
@@ -1028,8 +571,8 @@ async fn machine_native_folder_transfer_reports_baseline() -> Result<()> {
     wait_for_room_ready(&server.url, &room).await?;
     let mut beta = MachineProc::spawn("join", &room, &server.url, "beta", &beta_home).await?;
 
-    expect_room_link_connected(&mut host, "m2", "beta").await?;
-    expect_room_link_connected(&mut beta, "m1", "host").await?;
+    expect_room_link_connected(&mut host, "beta").await?;
+    expect_room_link_connected(&mut beta, "host").await?;
 
     let command = serde_json::json!({
         "type": "send_path",
@@ -1280,48 +823,6 @@ impl MachineProc {
         }
     }
 
-    async fn expect_stderr_contains(&mut self, needle: &str) -> Result<()> {
-        let deadline = Instant::now() + PROCESS_TIMEOUT;
-        loop {
-            if self
-                .stderr_seen
-                .lock()
-                .await
-                .iter()
-                .any(|line| line.contains(needle))
-            {
-                return Ok(());
-            }
-
-            let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-                bail!(
-                    "timed out waiting for stderr containing {:?} on {}\n{}",
-                    needle,
-                    self.label,
-                    self.debug_dump().await
-                );
-            };
-
-            match tokio::time::timeout(timeout, self.stderr_rx.recv()).await {
-                Ok(Some(_)) => {}
-                Ok(None) => bail!(
-                    "stderr closed while waiting for {:?} on {}\n{}",
-                    needle,
-                    self.label,
-                    self.debug_dump().await
-                ),
-                Err(_) => {
-                    bail!(
-                        "timed out waiting for stderr containing {:?} on {}\n{}",
-                        needle,
-                        self.label,
-                        self.debug_dump().await
-                    )
-                }
-            }
-        }
-    }
-
     async fn events(&self) -> Vec<Value> {
         self.stdout_seen
             .lock()
@@ -1463,15 +964,51 @@ fn linked_member_id_named(lines: &[String], name: &str) -> Option<String> {
     None
 }
 
-async fn expect_room_link_connected(
-    proc: &mut MachineProc,
-    member_id: &str,
-    member_name: &str,
-) -> Result<()> {
-    proc.expect_stderr_contains(&format!(
-        "\"event\":\"room_link_connected\",\"member_id\":\"{member_id}\",\"member_name\":\"{member_name}\"",
-    ))
-    .await
+async fn expect_room_link_connected(proc: &mut MachineProc, member_name: &str) -> Result<()> {
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    loop {
+        if proc
+            .stderr_seen
+            .lock()
+            .await
+            .iter()
+            .any(|line| stderr_room_link_connected(line, member_name))
+        {
+            return Ok(());
+        }
+
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            bail!(
+                "timed out waiting for room_link_connected({member_name:?}) on {}\n{}",
+                proc.label,
+                proc.debug_dump().await
+            );
+        };
+
+        match tokio::time::timeout(timeout, proc.stderr_rx.recv()).await {
+            Ok(Some(_)) => {}
+            Ok(None) => bail!(
+                "stderr closed while waiting for room_link_connected({member_name:?}) on {}\n{}",
+                proc.label,
+                proc.debug_dump().await
+            ),
+            Err(_) => {
+                bail!(
+                    "timed out waiting for room_link_connected({member_name:?}) on {}\n{}",
+                    proc.label,
+                    proc.debug_dump().await
+                )
+            }
+        }
+    }
+}
+
+fn stderr_room_link_connected(line: &str, member_name: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    value.get("event") == Some(&Value::String("room_link_connected".into()))
+        && value.get("member_name") == Some(&Value::String(member_name.into()))
 }
 
 fn perf_file_size_mib() -> u64 {
