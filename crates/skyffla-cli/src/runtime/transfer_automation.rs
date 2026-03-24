@@ -634,20 +634,21 @@ async fn handle_machine_event(
             size,
         } => {
             if let Some(channel) = state.channels.remove(&channel_id) {
+                let detail = transfer_completion_detail(size, channel.progress.as_ref());
                 match channel.direction {
                     ChannelDirection::Incoming { .. } => log.info(&format!(
                         "saved {} {} to {} ({})",
                         item_kind_label(channel.item_kind),
                         channel.name,
                         display_path(&path),
-                        format_bytes(size)
+                        detail
                     )),
                     ChannelDirection::Outgoing { member_id } => log.info(&format!(
                         "completed {} {} to {} ({})",
                         item_kind_label(channel.item_kind),
                         channel.name,
                         state.display_member(&member_id),
-                        format_bytes(size)
+                        detail
                     )),
                 }
             }
@@ -702,14 +703,19 @@ async fn handle_machine_event(
                             direction: ChannelDirection::Outgoing { member_id },
                             item_kind,
                             name,
+                            progress,
                             ..
                         }) = finished
                         {
                             log.info(&format!(
-                                "completed {} {} to {}",
+                                "completed {} {} to {} ({})",
                                 item_kind_label(item_kind),
                                 name,
-                                state.display_member(&member_id)
+                                state.display_member(&member_id),
+                                transfer_completion_detail(
+                                    effective_total.unwrap_or(effective_complete),
+                                    progress.as_ref()
+                                )
                             ));
                         }
                     }
@@ -983,6 +989,36 @@ fn format_rate(bytes: u64, elapsed: Duration) -> Option<String> {
     ))
 }
 
+fn transfer_completion_detail(size: u64, progress: Option<&ProgressState>) -> String {
+    match progress
+        .and_then(|progress| format_duration_and_rate(size, progress.started_at.elapsed()))
+    {
+        Some(detail) => format!("{} {detail}", format_bytes(size)),
+        None => format_bytes(size),
+    }
+}
+
+fn format_duration_and_rate(bytes: u64, elapsed: Duration) -> Option<String> {
+    let elapsed = if elapsed >= Duration::from_secs(1) {
+        elapsed
+    } else {
+        return None;
+    };
+    let rate = format_rate(bytes, elapsed)?;
+    Some(format!("in {} at {}", format_duration(elapsed), rate))
+}
+
+fn format_duration(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let minutes = seconds / 60;
+    let remaining_seconds = seconds % 60;
+    if minutes > 0 {
+        format!("{minutes}m {remaining_seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn display_path(path: &str) -> String {
     if let Ok(current_dir) = std::env::current_dir() {
         if let Ok(relative) = Path::new(path).strip_prefix(&current_dir) {
@@ -1067,10 +1103,11 @@ fn backend_exit_error(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
     use super::{
-        progress_phase_rank, AutomationState, ChannelDirection, ChannelState, ControllerMode,
-        ProgressState, SendSource,
+        progress_phase_rank, transfer_completion_detail, AutomationState, ChannelDirection,
+        ChannelState, ControllerMode, ProgressState, SendSource,
     };
     use skyffla_protocol::room::{ChannelId, MemberId, TransferItemKind, TransferPhase};
     use std::time::Instant;
@@ -1135,5 +1172,19 @@ mod tests {
         assert_eq!(stale_prepare.phase, TransferPhase::Downloading);
         assert_eq!(stale_prepare.bytes_complete, 80);
         assert_eq!(stale_prepare.bytes_total, Some(100));
+    }
+
+    #[test]
+    fn transfer_completion_detail_includes_speed() {
+        let progress = ProgressState {
+            phase: TransferPhase::Downloading,
+            started_at: Instant::now() - Duration::from_secs(2),
+            bytes_complete: 16,
+            bytes_total: Some(16),
+        };
+        assert_eq!(
+            transfer_completion_detail(16, Some(&progress)),
+            "16B in 2s at 8B/s"
+        );
     }
 }
