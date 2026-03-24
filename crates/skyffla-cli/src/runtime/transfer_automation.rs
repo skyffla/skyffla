@@ -425,6 +425,7 @@ async fn handle_machine_event(
         }
         MachineEvent::RoomClosed { reason } => {
             log.info(&format!("room closed: {reason}"));
+            stdin.take();
         }
         MachineEvent::ChannelOpened {
             channel_id,

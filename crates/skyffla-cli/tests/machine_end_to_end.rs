@@ -424,6 +424,45 @@ async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_receiver_exits_when_host_closes_room() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-auto-host-close");
+    let receiver_home = fresh_test_dir("skyffla-cli-auto-receiver-close");
+    for home in [&host_home, &receiver_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut receiver =
+        AutoProc::spawn_receive(&room, &server.url, "receiver", &receiver_home).await?;
+
+    receiver
+        .expect_stdout_contains("receive mode: staying online")
+        .await?;
+    host.expect_event("member joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("receiver".into()))
+    })
+    .await?;
+
+    host.shutdown().await?;
+
+    receiver
+        .expect_stdout_contains("room closed: host left")
+        .await?;
+    receiver.wait_for_exit().await?;
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit multi-recipient transfer lane; run with cargo test -p skyffla --test machine_end_to_end machine_broadcast_file_accepts_and_rejects_independently -- --ignored --nocapture"]
 async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
@@ -929,6 +968,26 @@ impl AutoProc {
         let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
         while self.stderr_rx.try_recv().is_ok() {}
         Ok(())
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => bail!(
+                "{} exited with status {}\n{}",
+                self.label,
+                status,
+                self.debug_dump().await
+            ),
+            Ok(Err(error)) => {
+                Err(error).with_context(|| format!("failed waiting for {}", self.label))
+            }
+            Err(_) => bail!(
+                "timed out waiting for {} to exit\n{}",
+                self.label,
+                self.debug_dump().await
+            ),
+        }
     }
 }
 
