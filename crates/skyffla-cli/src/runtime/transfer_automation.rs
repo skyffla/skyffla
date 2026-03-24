@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -27,8 +28,9 @@ pub(crate) async fn run_transfer_automation(
     let mut state = AutomationState::new(config, mode)?;
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut last_backend_status = None;
+    let mut log = LogSink::new();
 
-    log_line(&state.startup_line());
+    log.info(&state.startup_line());
 
     loop {
         tokio::select! {
@@ -36,23 +38,26 @@ pub(crate) async fn run_transfer_automation(
                 let Some(event) = maybe_event else {
                     break;
                 };
-                handle_machine_event(&mut state, &mut backend.stdin, event).await?;
+                handle_machine_event(&mut state, &mut backend.stdin, &mut log, event).await?;
             }
             maybe_status = backend.stderr_rx.recv() => {
                 let Some(line) = maybe_status else {
                     continue;
                 };
-                if let Some(message) = status_line(&line) {
+                if let Some(message) = backend_status_line(&line) {
                     last_backend_status = Some(message.clone());
-                    log_line(&message);
+                    log.info(&message);
+                } else if serde_json::from_str::<Value>(&line).is_ok() {
+                    continue;
                 } else if !line.trim().is_empty() {
                     last_backend_status = Some(line.clone());
-                    log_line(&line);
+                    log.info(&line);
                 }
             }
             status = backend.child.wait() => {
                 let status = status.map_err(|error| CliError::runtime(error.to_string()))?;
                 drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+                log.finish_status();
                 if status.success() {
                     return Ok(());
                 }
@@ -67,10 +72,54 @@ pub(crate) async fn run_transfer_automation(
         .await
         .map_err(|error| CliError::runtime(error.to_string()))?;
     drain_backend_status_lines(&mut backend.stderr_rx, &mut last_backend_status);
+    log.finish_status();
     if status.success() {
         Ok(())
     } else {
         Err(backend_exit_error(status, last_backend_status))
+    }
+}
+
+struct LogSink {
+    stdout: io::Stdout,
+    interactive: bool,
+    status_active: bool,
+}
+
+impl LogSink {
+    fn new() -> Self {
+        Self {
+            stdout: io::stdout(),
+            interactive: io::stdout().is_terminal(),
+            status_active: false,
+        }
+    }
+
+    fn info(&mut self, message: &str) {
+        if self.interactive && self.status_active {
+            let _ = write!(self.stdout, "\r\x1b[2K");
+            self.status_active = false;
+        }
+        let _ = writeln!(self.stdout, "{message}");
+        let _ = self.stdout.flush();
+    }
+
+    fn status(&mut self, message: &str) {
+        if !self.interactive {
+            self.info(message);
+            return;
+        }
+        let _ = write!(self.stdout, "\r\x1b[2K{message}");
+        let _ = self.stdout.flush();
+        self.status_active = true;
+    }
+
+    fn finish_status(&mut self) {
+        if self.interactive && self.status_active {
+            let _ = writeln!(self.stdout);
+            let _ = self.stdout.flush();
+            self.status_active = false;
+        }
     }
 }
 
@@ -301,6 +350,7 @@ impl AutomationState {
 async fn handle_machine_event(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
+    log: &mut LogSink,
     event: MachineEvent,
 ) -> Result<(), CliError> {
     match event {
@@ -312,7 +362,7 @@ async fn handle_machine_event(
         } => {
             state.self_member = Some(self_member.clone());
             state.host_member = Some(host_member.clone());
-            log_line(&format!(
+            log.info(&format!(
                 "joined room {} as {} (host {})",
                 room_id.as_str(),
                 self_member.as_str(),
@@ -324,17 +374,17 @@ async fn handle_machine_event(
                 .into_iter()
                 .map(|member| (member.member_id, member.name))
                 .collect();
-            log_line(&format!("members: {}", member_roster_line(state)));
-            maybe_offer_to_known_members(state, stdin).await?;
+            log.info(&format!("members: {}", member_roster_line(state)));
+            maybe_offer_to_known_members(state, stdin, log).await?;
         }
         MachineEvent::MemberJoined { member } => {
             let joined_id = member.member_id.clone();
             state.members.insert(member.member_id, member.name);
-            log_line(&format!(
+            log.info(&format!(
                 "member joined: {}",
                 state.display_member(&joined_id)
             ));
-            maybe_offer_to_member(state, stdin, &joined_id).await?;
+            maybe_offer_to_member(state, stdin, log, &joined_id).await?;
         }
         MachineEvent::MemberLeft { member_id, reason } => {
             let name = state.display_member(&member_id);
@@ -358,10 +408,10 @@ async fn handle_machine_event(
                 .as_deref()
                 .map(|value| format!(" ({value})"))
                 .unwrap_or_default();
-            log_line(&format!("member left: {name}{suffix}"));
+            log.info(&format!("member left: {name}{suffix}"));
         }
         MachineEvent::RoomClosed { reason } => {
-            log_line(&format!("room closed: {reason}"));
+            log.info(&format!("room closed: {reason}"));
         }
         MachineEvent::ChannelOpened {
             channel_id,
@@ -393,7 +443,7 @@ async fn handle_machine_event(
                 .unwrap_or_default();
             match &state.mode {
                 ControllerMode::Receive => {
-                    log_line(&format!(
+                    log.info(&format!(
                         "incoming {} {} from {}{}",
                         item_kind_label(item_kind.clone()),
                         item_name,
@@ -412,7 +462,7 @@ async fn handle_machine_event(
                             progress: None,
                         },
                     );
-                    log_line(&format!(
+                    log.info(&format!(
                         "auto-accepting {} {} from {}",
                         item_kind_label(item_kind),
                         item_name,
@@ -422,7 +472,7 @@ async fn handle_machine_event(
                         .await?;
                 }
                 ControllerMode::Send { .. } => {
-                    log_line(&format!(
+                    log.info(&format!(
                         "incoming {} {} from {}{}; rejecting because this session is in send mode",
                         item_kind_label(item_kind.clone()),
                         item_name,
@@ -459,7 +509,7 @@ async fn handle_machine_event(
         } => {
             if let Some(channel) = state.channels.get(&channel_id) {
                 match &channel.direction {
-                    ChannelDirection::Outgoing { .. } => log_line(&format!(
+                    ChannelDirection::Outgoing { .. } => log.info(&format!(
                         "{} accepted {} {}",
                         member_name,
                         item_kind_label(channel.item_kind.clone()),
@@ -467,13 +517,13 @@ async fn handle_machine_event(
                     )),
                     ChannelDirection::Incoming { auto_accept, .. } => {
                         if *auto_accept {
-                            log_line(&format!(
+                            log.info(&format!(
                                 "accepted {} {}",
                                 item_kind_label(channel.item_kind.clone()),
                                 channel.name
                             ));
                         } else {
-                            log_line(&format!(
+                            log.info(&format!(
                                 "{} accepted {} {}",
                                 member_name,
                                 item_kind_label(channel.item_kind.clone()),
@@ -501,7 +551,7 @@ async fn handle_machine_event(
                     channel.name = channel_id.as_str().to_string();
                 }
                 if let Some(size) = size {
-                    log_line(&format!(
+                    log.info(&format!(
                         "{} {} is ready ({})",
                         match channel.direction {
                             ChannelDirection::Outgoing { .. } => "outgoing",
@@ -520,7 +570,7 @@ async fn handle_machine_event(
             reason,
         } => {
             if let Some(channel) = state.channels.remove(&channel_id) {
-                log_line(&format!(
+                log.info(&format!(
                     "{} rejected {} {}{}",
                     member_name,
                     item_kind_label(channel.item_kind),
@@ -540,7 +590,7 @@ async fn handle_machine_event(
             reason,
         } => {
             if let Some(channel) = state.channels.remove(&channel_id) {
-                log_line(&format!(
+                log.info(&format!(
                     "{} closed {} {}{}",
                     member_name,
                     item_kind_label(channel.item_kind),
@@ -560,14 +610,14 @@ async fn handle_machine_event(
         } => {
             if let Some(channel) = state.channels.remove(&channel_id) {
                 match channel.direction {
-                    ChannelDirection::Incoming { .. } => log_line(&format!(
+                    ChannelDirection::Incoming { .. } => log.info(&format!(
                         "saved {} {} to {} ({})",
                         item_kind_label(channel.item_kind),
                         channel.name,
                         display_path(&path),
                         format_bytes(size)
                     )),
-                    ChannelDirection::Outgoing { member_id } => log_line(&format!(
+                    ChannelDirection::Outgoing { member_id } => log.info(&format!(
                         "completed {} {} to {} ({})",
                         item_kind_label(channel.item_kind),
                         channel.name,
@@ -594,7 +644,7 @@ async fn handle_machine_event(
                         format_progress_with_speed(bytes_complete, bytes_total, elapsed)
                             .unwrap_or_else(|| format_bytes(bytes_complete));
                     match &channel.direction {
-                        ChannelDirection::Outgoing { member_id } => log_line(&format!(
+                        ChannelDirection::Outgoing { member_id } => log.status(&format!(
                             "{} {} {} to {}: {}",
                             progress_verb(&phase, true),
                             item_kind_label(item_kind.clone()),
@@ -602,7 +652,7 @@ async fn handle_machine_event(
                             state.display_member(member_id),
                             progress_text
                         )),
-                        ChannelDirection::Incoming { member_id, .. } => log_line(&format!(
+                        ChannelDirection::Incoming { member_id, .. } => log.status(&format!(
                             "{} {} {} from {}: {}",
                             progress_verb(&phase, false),
                             item_kind_label(item_kind.clone()),
@@ -623,7 +673,7 @@ async fn handle_machine_event(
                             ..
                         }) = finished
                         {
-                            log_line(&format!(
+                            log.info(&format!(
                                 "completed {} {} to {}",
                                 item_kind_label(item_kind),
                                 name,
@@ -641,7 +691,7 @@ async fn handle_machine_event(
         } => {
             if let Some(channel_id) = channel_id.as_ref() {
                 if let Some(channel) = state.channels.remove(channel_id) {
-                    log_line(&format!(
+                    log.info(&format!(
                         "transfer error for {} {}: {} ({})",
                         item_kind_label(channel.item_kind),
                         channel.name,
@@ -649,10 +699,10 @@ async fn handle_machine_event(
                         code
                     ));
                 } else {
-                    log_line(&format!("backend error {code}: {message}"));
+                    log.info(&format!("backend error {code}: {message}"));
                 }
             } else {
-                log_line(&format!("backend error {code}: {message}"));
+                log.info(&format!("backend error {code}: {message}"));
             }
         }
         MachineEvent::Chat { .. } | MachineEvent::ChannelData { .. } => {}
@@ -663,10 +713,11 @@ async fn handle_machine_event(
 async fn maybe_offer_to_known_members(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
+    log: &mut LogSink,
 ) -> Result<(), CliError> {
     let member_ids = state.members.keys().cloned().collect::<Vec<_>>();
     for member_id in member_ids {
-        maybe_offer_to_member(state, stdin, &member_id).await?;
+        maybe_offer_to_member(state, stdin, log, &member_id).await?;
     }
     Ok(())
 }
@@ -674,6 +725,7 @@ async fn maybe_offer_to_known_members(
 async fn maybe_offer_to_member(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
+    log: &mut LogSink,
     member_id: &MemberId,
 ) -> Result<(), CliError> {
     let ControllerMode::Send { source } = &state.mode else {
@@ -706,7 +758,7 @@ async fn maybe_offer_to_member(
             progress: None,
         },
     );
-    log_line(&format!(
+    log.info(&format!(
         "offering {} {} to {}",
         item_kind_label(source.item_kind.clone()),
         source.display_name,
@@ -911,11 +963,7 @@ fn display_path(path: &str) -> String {
     path.strip_prefix("./").unwrap_or(path).to_string()
 }
 
-fn log_line(message: &str) {
-    println!("{message}");
-}
-
-fn status_line(line: &str) -> Option<String> {
+fn backend_status_line(line: &str) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
     let event = value.get("event")?.as_str()?;
     match event {
@@ -960,8 +1008,10 @@ fn drain_backend_status_lines(
     last_backend_status: &mut Option<String>,
 ) {
     while let Ok(line) = stderr_rx.try_recv() {
-        if let Some(message) = status_line(&line) {
+        if let Some(message) = backend_status_line(&line) {
             *last_backend_status = Some(message);
+        } else if serde_json::from_str::<Value>(&line).is_ok() {
+            continue;
         } else if !line.trim().is_empty() {
             *last_backend_status = Some(line);
         }

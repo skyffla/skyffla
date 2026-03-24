@@ -1972,9 +1972,6 @@ fn maybe_start_join_pending_receive(
             let Some(size) = size else {
                 return Ok(());
             };
-            if transfer.integrity.is_none() {
-                return Ok(());
-            }
             let target_path = receive_target_path(download_dir, &name)?;
             state.pending_accepted_files.remove(channel_id);
             spawn_join_direct_receive(
@@ -2079,9 +2076,6 @@ fn maybe_start_host_pending_receive(
             let Some(size) = file.size else {
                 return Ok(());
             };
-            if file.transfer.integrity.is_none() {
-                return Ok(());
-            }
             let target_path = receive_target_path(download_dir, &file.name)?;
             host_state.pending_accepted_files.remove(channel_id);
             spawn_host_direct_receive(
@@ -2540,7 +2534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provisional_file_accept_stays_pending_until_integrity_is_available() {
+    async fn provisional_file_accept_starts_receive_before_integrity_is_available() {
         let host_member = MemberId::new("m1").unwrap();
         let self_member = MemberId::new("m2").unwrap();
         let channel_id = ChannelId::new("file-1").unwrap();
@@ -2566,15 +2560,15 @@ mod tests {
         )
         .unwrap();
 
-        assert!(state.pending_accepted_files.contains(&channel_id));
+        assert!(!state.pending_accepted_files.contains(&channel_id));
         assert!(state.pending_received_files.is_empty());
-        assert!(peer_rx.try_recv().is_err());
+        let _ = peer_rx.try_recv();
 
         transport.close().await;
     }
 
     #[tokio::test]
-    async fn provisional_host_file_accept_stays_pending_until_integrity_is_available() {
+    async fn provisional_host_file_accept_starts_receive_before_integrity_is_available() {
         let channel_id = ChannelId::new("file-1").unwrap();
         let transfer = TransferOffer {
             item_kind: TransferItemKind::File,
@@ -2597,9 +2591,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(host_state.pending_accepted_files.contains(&channel_id));
+        assert!(!host_state.pending_accepted_files.contains(&channel_id));
         assert!(host_state.pending_received_files.is_empty());
-        assert!(host_rx.try_recv().is_err());
+        let _ = host_rx.try_recv();
 
         transport.close().await;
     }
