@@ -16,9 +16,13 @@ use crate::net::rendezvous::{delete_room, register_room, resolve_room, RegisterR
 use crate::runtime::machine::run_machine_host;
 use crate::runtime::room_tui::run_room_tui;
 use crate::runtime::session::run_connected_session;
+use crate::runtime::transfer_automation::run_transfer_automation;
 
 pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
     let config = SessionConfig::from_args(Role::Host, args)?;
+    if config.automation.is_some() {
+        return run_transfer_automation(Role::Host, &config).await;
+    }
     if should_use_room_tui(&config) {
         return run_room_tui(Role::Host, &config).await;
     }
@@ -57,6 +61,9 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
 
 pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     let mut config = SessionConfig::from_args(Role::Join, args)?;
+    if config.automation.is_some() {
+        return run_transfer_automation(Role::Join, &config).await;
+    }
     if should_use_room_tui(&config) {
         return run_room_tui(Role::Join, &config).await;
     }

@@ -28,6 +28,16 @@ pub(crate) struct SessionArgs {
     pub(crate) machine: bool,
     #[arg(
         long,
+        help = "Stay online and send this file or folder to each room member once"
+    )]
+    pub(crate) send: Option<String>,
+    #[arg(
+        long,
+        help = "Stay online and auto-accept incoming file or folder transfers"
+    )]
+    pub(crate) receive: bool,
+    #[arg(
+        long,
         env = "SKYFFLA_RENDEZVOUS_URL",
         default_value = DEFAULT_RENDEZVOUS_URL
     )]
@@ -52,6 +62,12 @@ pub(crate) enum Role {
     Join,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum AutomationMode {
+    Send { path: String },
+    Receive,
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfig {
     pub(crate) role: Role,
@@ -62,10 +78,12 @@ pub(crate) struct SessionConfig {
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
+    pub(crate) automation: Option<AutomationMode>,
 }
 
 impl SessionConfig {
     pub(crate) fn from_args(role: Role, args: SessionArgs) -> Result<Self, CliError> {
+        let automation = resolve_automation_mode(&args)?;
         let room_id = resolve_room_id(args.room_id, std::env::var("SKYFFLA_ROOM_ID").ok())
             .ok_or_else(|| {
                 CliError::usage("missing room id: pass it as an argument or set SKYFFLA_ROOM_ID")
@@ -84,8 +102,43 @@ impl SessionConfig {
             machine: args.machine,
             json_events: args.json,
             local_mode: args.local,
+            automation,
         })
     }
+}
+
+fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>, CliError> {
+    match (&args.send, args.receive) {
+        (Some(_), true) => {
+            return Err(CliError::usage(
+                "--send and --receive are mutually exclusive",
+            ));
+        }
+        (Some(_), false) | (None, true) => {}
+        (None, false) => return Ok(None),
+    }
+
+    if args.machine {
+        return Err(CliError::usage(
+            "--send/--receive already use the machine runtime; do not combine them with --machine",
+        ));
+    }
+    if args.json {
+        return Err(CliError::usage(
+            "--send/--receive provide human-readable CLI logs; do not combine them with --json",
+        ));
+    }
+    if !args.auto_accept.is_empty() || args.reject_all {
+        return Err(CliError::usage(
+            "--send/--receive manage transfer acceptance automatically; do not combine them with --auto-accept or --reject-all",
+        ));
+    }
+
+    Ok(match (&args.send, args.receive) {
+        (Some(path), false) => Some(AutomationMode::Send { path: path.clone() }),
+        (None, true) => Some(AutomationMode::Receive),
+        _ => None,
+    })
 }
 
 fn resolve_room_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
@@ -141,8 +194,27 @@ fn validate_room_id(room_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_auto_accept_policy, resolve_peer_name, resolve_room_id, validate_room_id};
+    use super::{
+        resolve_auto_accept_policy, resolve_automation_mode, resolve_peer_name, resolve_room_id,
+        validate_room_id, AutomationMode, SessionArgs, DEFAULT_RENDEZVOUS_URL,
+    };
     use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+
+    fn session_args() -> SessionArgs {
+        SessionArgs {
+            room_id: Some("room".into()),
+            machine: false,
+            send: None,
+            receive: false,
+            server: DEFAULT_RENDEZVOUS_URL.into(),
+            download_dir: ".".into(),
+            name: None,
+            json: false,
+            local: false,
+            auto_accept: Vec::new(),
+            reject_all: false,
+        }
+    }
 
     #[test]
     fn explicit_room_id_wins_over_environment() {
@@ -215,5 +287,37 @@ mod tests {
 
         assert_eq!(policy, persisted);
         assert_eq!(source, "local state");
+    }
+
+    #[test]
+    fn send_mode_rejects_machine_and_json_flags() {
+        let mut args = session_args();
+        args.send = Some("./report.txt".into());
+        args.machine = true;
+        assert!(resolve_automation_mode(&args).is_err());
+
+        args.machine = false;
+        args.json = true;
+        assert!(resolve_automation_mode(&args).is_err());
+    }
+
+    #[test]
+    fn receive_mode_is_selected() {
+        let mut args = session_args();
+        args.receive = true;
+        assert!(matches!(
+            resolve_automation_mode(&args).unwrap(),
+            Some(AutomationMode::Receive)
+        ));
+    }
+
+    #[test]
+    fn send_mode_preserves_raw_path_text() {
+        let mut args = session_args();
+        args.send = Some("~/report.txt".into());
+        assert!(matches!(
+            resolve_automation_mode(&args).unwrap(),
+            Some(AutomationMode::Send { path }) if path == "~/report.txt"
+        ));
     }
 }
