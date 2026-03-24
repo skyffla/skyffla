@@ -323,6 +323,11 @@ impl AutomationState {
         phase: &TransferPhase,
     ) -> Option<&ProgressState> {
         let channel = self.channels.get_mut(channel_id)?;
+        if channel.progress.as_ref().is_some_and(|progress| {
+            progress_phase_rank(&progress.phase) > progress_phase_rank(phase)
+        }) {
+            return channel.progress.as_ref();
+        }
         let replace = channel
             .progress
             .as_ref()
@@ -344,6 +349,14 @@ impl AutomationState {
         {
             self.pending_offers.remove(member_id);
         }
+    }
+}
+
+fn progress_phase_rank(phase: &TransferPhase) -> u8 {
+    match phase {
+        TransferPhase::Preparing => 0,
+        TransferPhase::Downloading => 1,
+        TransferPhase::Exporting => 2,
     }
 }
 
@@ -1029,5 +1042,23 @@ fn backend_exit_error(
         CliError::runtime("automation backend exited unexpectedly")
     } else {
         CliError::runtime(format!("automation backend exited with status {status}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_phase_rank;
+    use skyffla_protocol::room::TransferPhase;
+
+    #[test]
+    fn progress_phase_rank_is_monotonic_for_status_updates() {
+        assert!(
+            progress_phase_rank(&TransferPhase::Preparing)
+                < progress_phase_rank(&TransferPhase::Downloading)
+        );
+        assert!(
+            progress_phase_rank(&TransferPhase::Downloading)
+                < progress_phase_rank(&TransferPhase::Exporting)
+        );
     }
 }
