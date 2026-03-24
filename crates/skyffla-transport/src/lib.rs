@@ -1512,13 +1512,29 @@ async fn serve_file_with_credit_and_hash(
                 "transfer source shorter than advertised: expected {expected_size} bytes, sent {bytes_complete}"
             )));
         }
-        send.write_all(&buffer[..read])
-            .await
-            .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-        hasher.update(&buffer[..read]);
-        available_credit = available_credit.saturating_sub(read as u64);
-        bytes_complete = bytes_complete.saturating_add(read as u64);
-        on_progress(bytes_complete);
+        let next_bytes_complete = bytes_complete.saturating_add(read as u64);
+        match send.write_all(&buffer[..read]).await {
+            Ok(()) => {
+                hasher.update(&buffer[..read]);
+                available_credit = available_credit.saturating_sub(read as u64);
+                bytes_complete = next_bytes_complete;
+                on_progress(bytes_complete);
+            }
+            Err(error)
+                if next_bytes_complete == expected_size
+                    && error.to_string().contains("closed stream") =>
+            {
+                hasher.update(&buffer[..read]);
+                bytes_complete = next_bytes_complete;
+                on_progress(bytes_complete);
+                break;
+            }
+            Err(error) => {
+                return Err(TransportError::DirectFileSend(format!(
+                    "failed writing file chunk at {next_bytes_complete}/{expected_size} bytes: {error}"
+                )));
+            }
+        }
     }
     Ok(hasher.finalize().to_hex().to_string())
 }

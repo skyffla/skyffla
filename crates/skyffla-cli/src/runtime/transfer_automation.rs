@@ -648,10 +648,10 @@ async fn handle_machine_event(
             bytes_complete,
             bytes_total,
         } => {
-            let elapsed = state
+            let tracked = state
                 .record_progress(&channel_id, &phase)
-                .map(|progress| progress.started_at.elapsed());
-            if let Some(elapsed) = elapsed {
+                .map(|progress| (progress.phase.clone(), progress.started_at.elapsed()));
+            if let Some((effective_phase, elapsed)) = tracked {
                 if let Some(channel) = state.channels.get(&channel_id) {
                     let progress_text =
                         format_progress_with_speed(bytes_complete, bytes_total, elapsed)
@@ -659,7 +659,7 @@ async fn handle_machine_event(
                     match &channel.direction {
                         ChannelDirection::Outgoing { member_id } => log.status(&format!(
                             "{} {} {} to {}: {}",
-                            progress_verb(&phase, true),
+                            progress_verb(&effective_phase, true),
                             item_kind_label(item_kind.clone()),
                             name,
                             state.display_member(member_id),
@@ -667,14 +667,14 @@ async fn handle_machine_event(
                         )),
                         ChannelDirection::Incoming { member_id, .. } => log.status(&format!(
                             "{} {} {} from {}: {}",
-                            progress_verb(&phase, false),
+                            progress_verb(&effective_phase, false),
                             item_kind_label(item_kind.clone()),
                             name,
                             state.display_member(member_id),
                             progress_text
                         )),
                     }
-                    if matches!(phase, TransferPhase::Downloading)
+                    if matches!(effective_phase, TransferPhase::Downloading)
                         && matches!(channel.direction, ChannelDirection::Outgoing { .. })
                         && bytes_total.is_some_and(|total| bytes_complete >= total)
                     {

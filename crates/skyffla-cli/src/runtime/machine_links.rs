@@ -182,6 +182,9 @@ pub(crate) fn spawn_host_transfer_accept_loop(
                 }
             };
             if let Err(error) = transport.serve_registered_transfer(connection).await {
+                if is_benign_transfer_serve_error(&error.to_string()) {
+                    continue;
+                }
                 let _ = host_tx.send(HostInput::PeerProtocolError {
                     message: error.to_string(),
                 });
@@ -206,12 +209,19 @@ pub(crate) fn spawn_join_transfer_accept_loop(
                 }
             };
             if let Err(error) = transport.serve_registered_transfer(connection).await {
+                if is_benign_transfer_serve_error(&error.to_string()) {
+                    continue;
+                }
                 let _ = peer_tx.send(JoinPeerInput::ProtocolError {
                     message: error.to_string(),
                 });
             }
         }
     })
+}
+
+fn is_benign_transfer_serve_error(message: &str) -> bool {
+    message.contains("closed stream")
 }
 
 pub(crate) fn spawn_host_authority_reader(
