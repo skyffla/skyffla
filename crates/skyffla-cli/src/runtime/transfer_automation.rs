@@ -238,6 +238,8 @@ struct ChannelState {
 struct ProgressState {
     phase: TransferPhase,
     started_at: Instant,
+    bytes_complete: u64,
+    bytes_total: Option<u64>,
 }
 
 enum ChannelDirection {
@@ -321,22 +323,31 @@ impl AutomationState {
         &mut self,
         channel_id: &ChannelId,
         phase: &TransferPhase,
+        bytes_complete: u64,
+        bytes_total: Option<u64>,
     ) -> Option<&ProgressState> {
         let channel = self.channels.get_mut(channel_id)?;
-        if channel.progress.as_ref().is_some_and(|progress| {
-            progress_phase_rank(&progress.phase) > progress_phase_rank(phase)
-        }) {
-            return channel.progress.as_ref();
-        }
-        let replace = channel
-            .progress
-            .as_ref()
-            .is_none_or(|progress| progress.phase != *phase);
-        if replace {
-            channel.progress = Some(ProgressState {
-                phase: phase.clone(),
-                started_at: Instant::now(),
-            });
+        match channel.progress.as_mut() {
+            Some(progress) if progress_phase_rank(&progress.phase) > progress_phase_rank(phase) => {
+                return channel.progress.as_ref();
+            }
+            Some(progress) if progress.phase == *phase => {
+                progress.bytes_complete = progress.bytes_complete.max(bytes_complete);
+                progress.bytes_total = match (progress.bytes_total, bytes_total) {
+                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                    (Some(existing), None) => Some(existing),
+                    (None, Some(incoming)) => Some(incoming),
+                    (None, None) => None,
+                };
+            }
+            _ => {
+                channel.progress = Some(ProgressState {
+                    phase: phase.clone(),
+                    started_at: Instant::now(),
+                    bytes_complete,
+                    bytes_total,
+                });
+            }
         }
         channel.progress.as_ref()
     }
@@ -650,13 +661,20 @@ async fn handle_machine_event(
             bytes_total,
         } => {
             let tracked = state
-                .record_progress(&channel_id, &phase)
-                .map(|progress| (progress.phase.clone(), progress.started_at.elapsed()));
-            if let Some((effective_phase, elapsed)) = tracked {
+                .record_progress(&channel_id, &phase, bytes_complete, bytes_total)
+                .map(|progress| {
+                    (
+                        progress.phase.clone(),
+                        progress.started_at.elapsed(),
+                        progress.bytes_complete,
+                        progress.bytes_total,
+                    )
+                });
+            if let Some((effective_phase, elapsed, effective_complete, effective_total)) = tracked {
                 if let Some(channel) = state.channels.get(&channel_id) {
                     let progress_text =
-                        format_progress_with_speed(bytes_complete, bytes_total, elapsed)
-                            .unwrap_or_else(|| format_bytes(bytes_complete));
+                        format_progress_with_speed(effective_complete, effective_total, elapsed)
+                            .unwrap_or_else(|| format_bytes(effective_complete));
                     match &channel.direction {
                         ChannelDirection::Outgoing { member_id } => log.status(&format!(
                             "{} {} {} to {}: {}",
@@ -677,7 +695,7 @@ async fn handle_machine_event(
                     }
                     if matches!(effective_phase, TransferPhase::Downloading)
                         && matches!(channel.direction, ChannelDirection::Outgoing { .. })
-                        && bytes_total.is_some_and(|total| bytes_complete >= total)
+                        && effective_total.is_some_and(|total| effective_complete >= total)
                     {
                         let finished = state.channels.remove(&channel_id);
                         if let Some(ChannelState {
@@ -1048,8 +1066,14 @@ fn backend_exit_error(
 
 #[cfg(test)]
 mod tests {
-    use super::progress_phase_rank;
-    use skyffla_protocol::room::TransferPhase;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        progress_phase_rank, AutomationState, ChannelDirection, ChannelState, ControllerMode,
+        ProgressState, SendSource,
+    };
+    use skyffla_protocol::room::{ChannelId, MemberId, TransferItemKind, TransferPhase};
+    use std::time::Instant;
 
     #[test]
     fn progress_phase_rank_is_monotonic_for_status_updates() {
@@ -1061,5 +1085,55 @@ mod tests {
             progress_phase_rank(&TransferPhase::Downloading)
                 < progress_phase_rank(&TransferPhase::Exporting)
         );
+    }
+
+    #[test]
+    fn tracked_progress_ignores_lower_phase_byte_regressions() {
+        let channel_id = ChannelId::new("auto-1").expect("valid channel id");
+        let member_id = MemberId::new("m2").expect("valid member id");
+        let mut state = AutomationState {
+            room_id: "room".into(),
+            mode: ControllerMode::Send {
+                source: SendSource {
+                    raw_path: "report.txt".into(),
+                    display_name: "report.txt".into(),
+                    item_kind: TransferItemKind::File,
+                },
+            },
+            next_channel_index: 2,
+            self_member: None,
+            host_member: None,
+            members: BTreeMap::new(),
+            sent_members: BTreeSet::new(),
+            pending_offers: BTreeMap::new(),
+            channels: BTreeMap::from([(
+                channel_id.clone(),
+                ChannelState {
+                    item_kind: TransferItemKind::File,
+                    name: "report.txt".into(),
+                    direction: ChannelDirection::Outgoing { member_id },
+                    progress: Some(ProgressState {
+                        phase: TransferPhase::Preparing,
+                        started_at: Instant::now(),
+                        bytes_complete: 40,
+                        bytes_total: Some(100),
+                    }),
+                },
+            )]),
+        };
+
+        let sending = state
+            .record_progress(&channel_id, &TransferPhase::Downloading, 80, Some(100))
+            .expect("progress should exist");
+        assert_eq!(sending.phase, TransferPhase::Downloading);
+        assert_eq!(sending.bytes_complete, 80);
+        assert_eq!(sending.bytes_total, Some(100));
+
+        let stale_prepare = state
+            .record_progress(&channel_id, &TransferPhase::Preparing, 60, Some(100))
+            .expect("progress should still exist");
+        assert_eq!(stale_prepare.phase, TransferPhase::Downloading);
+        assert_eq!(stale_prepare.bytes_complete, 80);
+        assert_eq!(stale_prepare.bytes_total, Some(100));
     }
 }
