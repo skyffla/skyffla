@@ -218,6 +218,7 @@ mod tests {
             machine: false,
             json_events: false,
             local_mode: false,
+            automation: None,
         };
 
         assert_eq!(

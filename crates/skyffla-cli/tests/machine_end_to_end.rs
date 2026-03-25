@@ -299,6 +299,170 @@ async fn machine_send_file_accepts_directory_paths_as_native_folder_transfers() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_send_stays_online_and_sends_to_late_joiners() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let sender_home = fresh_test_dir("skyffla-cli-auto-send");
+    let beta_home = fresh_test_dir("skyffla-cli-auto-recv-beta");
+    let gamma_home = fresh_test_dir("skyffla-cli-auto-recv-gamma");
+    for home in [&sender_home, &beta_home, &gamma_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(sender_home.join("report.txt"), b"persistent sender payload")?;
+
+    let room = unique_room_name();
+    let mut sender =
+        AutoProc::spawn_send(&room, &server.url, "sender", &sender_home, "./report.txt").await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    sender
+        .expect_stdout_contains("send mode: staying online")
+        .await?;
+
+    let mut beta = AutoProc::spawn_receive(&room, &server.url, "beta", &beta_home).await?;
+    sender.expect_stdout_contains("member joined: beta").await?;
+    beta.expect_stdout_contains("auto-accepting file report.txt")
+        .await?;
+    beta.expect_stdout_contains("saved file report.txt to report.txt")
+        .await?;
+    sender
+        .expect_stdout_contains("completed file report.txt to beta")
+        .await?;
+    assert_eq!(
+        std::fs::read(beta_home.join("report.txt"))?,
+        b"persistent sender payload"
+    );
+
+    let mut gamma = AutoProc::spawn_receive(&room, &server.url, "gamma", &gamma_home).await?;
+    sender
+        .expect_stdout_contains("member joined: gamma")
+        .await?;
+    gamma
+        .expect_stdout_contains("saved file report.txt to report.txt")
+        .await?;
+    sender
+        .expect_stdout_contains("completed file report.txt to gamma")
+        .await?;
+    assert_eq!(
+        std::fs::read(gamma_home.join("report.txt"))?,
+        b"persistent sender payload"
+    );
+
+    sender.shutdown().await?;
+    beta.shutdown().await?;
+    gamma.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-auto-host");
+    let receiver_home = fresh_test_dir("skyffla-cli-auto-receiver");
+    for home in [&host_home, &receiver_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(host_home.join("report.txt"), b"auto receive file payload")?;
+    let artpack = host_home.join("artpack");
+    std::fs::create_dir_all(artpack.join("nested"))?;
+    std::fs::write(artpack.join("a.txt"), b"alpha")?;
+    std::fs::write(artpack.join("nested").join("b.txt"), b"beta")?;
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut receiver =
+        AutoProc::spawn_receive(&room, &server.url, "receiver", &receiver_home).await?;
+
+    host.expect_event("member joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("receiver".into()))
+    })
+    .await?;
+
+    host.send(r#"/send --channel auto-file-1 --to m2 --path "~/report.txt""#)
+        .await?;
+    receiver
+        .expect_stdout_contains("auto-accepting file report.txt")
+        .await?;
+    receiver
+        .expect_stdout_contains("saved file report.txt to report.txt")
+        .await?;
+    assert_eq!(
+        std::fs::read(receiver_home.join("report.txt"))?,
+        b"auto receive file payload"
+    );
+
+    host.send(r#"/send --channel auto-folder-1 --to m2 --path "~/artpack""#)
+        .await?;
+    receiver
+        .expect_stdout_contains("auto-accepting folder artpack")
+        .await?;
+    receiver
+        .expect_stdout_contains("saved folder artpack to artpack")
+        .await?;
+    assert_eq!(
+        std::fs::read(receiver_home.join("artpack").join("a.txt"))?,
+        b"alpha"
+    );
+    assert_eq!(
+        std::fs::read(receiver_home.join("artpack").join("nested").join("b.txt"))?,
+        b"beta"
+    );
+
+    host.shutdown().await?;
+    receiver.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_receiver_exits_when_host_closes_room() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-auto-host-close");
+    let receiver_home = fresh_test_dir("skyffla-cli-auto-receiver-close");
+    for home in [&host_home, &receiver_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut receiver =
+        AutoProc::spawn_receive(&room, &server.url, "receiver", &receiver_home).await?;
+
+    receiver
+        .expect_stdout_contains("receive mode: staying online")
+        .await?;
+    host.expect_event("member joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("receiver".into()))
+    })
+    .await?;
+
+    host.shutdown().await?;
+
+    receiver
+        .expect_stdout_contains("room closed: host left")
+        .await?;
+    receiver.wait_for_exit().await?;
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit multi-recipient transfer lane; run with cargo test -p skyffla --test machine_end_to_end machine_broadcast_file_accepts_and_rejects_independently -- --ignored --nocapture"]
 async fn machine_broadcast_file_accepts_and_rejects_independently() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
@@ -687,6 +851,146 @@ struct MachineProc {
     stderr_seen: Arc<Mutex<Vec<String>>>,
 }
 
+struct AutoProc {
+    label: String,
+    child: Child,
+    stdout_rx: mpsc::UnboundedReceiver<String>,
+    stderr_rx: mpsc::UnboundedReceiver<String>,
+    stdout_seen: Arc<Mutex<Vec<String>>>,
+    stderr_seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl AutoProc {
+    async fn spawn_send(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        path: &str,
+    ) -> Result<Self> {
+        Self::spawn(room, server_url, name, home, "--send", Some(path)).await
+    }
+
+    async fn spawn_receive(room: &str, server_url: &str, name: &str, home: &Path) -> Result<Self> {
+        Self::spawn(room, server_url, name, home, "--receive", None).await
+    }
+
+    async fn spawn(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        mode_flag: &str,
+        mode_value: Option<&str>,
+    ) -> Result<Self> {
+        let bin = env!("CARGO_BIN_EXE_skyffla");
+        let mut command = Command::new(bin);
+        command
+            .arg(room)
+            .arg("--server")
+            .arg(server_url)
+            .arg("--name")
+            .arg(name)
+            .current_dir(home)
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.arg(mode_flag);
+        if let Some(mode_value) = mode_value {
+            command.arg(mode_value);
+        }
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn automation process {name}"))?;
+        let stdout = child.stdout.take().context("child stdout missing")?;
+        let stderr = child.stderr.take().context("child stderr missing")?;
+        let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
+        let (stderr_tx, stderr_rx) = mpsc::unbounded_channel();
+        let stdout_seen = Arc::new(Mutex::new(Vec::new()));
+        let stderr_seen = Arc::new(Mutex::new(Vec::new()));
+        spawn_text_reader(stdout, stdout_tx, stdout_seen.clone());
+        spawn_text_reader(stderr, stderr_tx, stderr_seen.clone());
+
+        Ok(Self {
+            label: format!("auto:{name}"),
+            child,
+            stdout_rx,
+            stderr_rx,
+            stdout_seen,
+            stderr_seen,
+        })
+    }
+
+    async fn expect_stdout_contains(&mut self, needle: &str) -> Result<String> {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            {
+                let seen = self.stdout_seen.lock().await;
+                if let Some(found) = seen.iter().find(|line| line.contains(needle)).cloned() {
+                    return Ok(found);
+                }
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                bail!(
+                    "timed out waiting for {needle} on {}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                );
+            };
+
+            match tokio::time::timeout(remaining, self.stdout_rx.recv()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!(
+                    "{} stdout closed while waiting for {needle}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                ),
+                Err(_) => bail!(
+                    "timed out waiting for {needle} on {}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                ),
+            }
+        }
+    }
+
+    async fn debug_dump(&self) -> String {
+        let stdout = self.stdout_seen.lock().await.join("\n");
+        let stderr = self.stderr_seen.lock().await.join("\n");
+        format!("stdout:\n{stdout}\n\nstderr:\n{stderr}")
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+        while self.stderr_rx.try_recv().is_ok() {}
+        Ok(())
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => bail!(
+                "{} exited with status {}\n{}",
+                self.label,
+                status,
+                self.debug_dump().await
+            ),
+            Ok(Err(error)) => {
+                Err(error).with_context(|| format!("failed waiting for {}", self.label))
+            }
+            Err(_) => bail!(
+                "timed out waiting for {} to exit\n{}",
+                self.label,
+                self.debug_dump().await
+            ),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SeenEvent {
     seen_at: Instant,
@@ -917,6 +1221,21 @@ fn spawn_stderr_reader(
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            seen.lock().await.push(line.clone());
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_text_reader<R>(reader: R, tx: mpsc::UnboundedSender<String>, seen: Arc<Mutex<Vec<String>>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             seen.lock().await.push(line.clone());
             if tx.send(line).is_err() {
