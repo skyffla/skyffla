@@ -3655,7 +3655,7 @@ checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "skyffla"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "skyffla-protocol"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -3690,7 +3690,7 @@ dependencies = [
 
 [[package]]
 name = "skyffla-rendezvous"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "axum",
  "http-body-util",
@@ -3704,14 +3704,14 @@ dependencies = [
 
 [[package]]
 name = "skyffla-session"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "skyffla-protocol",
 ]
 
 [[package]]
 name = "skyffla-transport"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "blake3",
  "iroh",
