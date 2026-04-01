@@ -52,10 +52,11 @@ Implemented so far:
 - rendezvous uses minimal exact room-id host lookup via `/v1/rooms/{room_id}`
 - default TUI now fronts the room engine by spawning the internal `machine` backend and rendering room events / commands as a human UI
 - standalone wrapper-facing `machine` protocol docs now live in `docs/machine-protocol.md`
+- thin Python wrapper over the `machine` API with typed models, a room client,
+  and smoke coverage now lives under `wrappers/python`
 
 Not implemented yet:
 
-- thin Python wrapper over the `machine` API
 - raw `pipe` on top of the room model
 
 ## Naming
