@@ -22,6 +22,7 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v4
         with:
+          # Touching this workflow should keep PR validation available for CI changes.
           filters: |
             rust:
               - "Cargo.toml"
