@@ -38,6 +38,16 @@ pub(crate) struct SessionArgs {
     pub(crate) receive: bool,
     #[arg(
         long,
+        help = "Stay online and send each local clipboard text change to room members"
+    )]
+    pub(crate) send_clipboard: bool,
+    #[arg(
+        long,
+        help = "Stay online and apply incoming clipboard text updates to the local clipboard"
+    )]
+    pub(crate) receive_clipboard: bool,
+    #[arg(
+        long,
         env = "SKYFFLA_RENDEZVOUS_URL",
         default_value = DEFAULT_RENDEZVOUS_URL
     )]
@@ -64,8 +74,10 @@ pub(crate) enum Role {
 
 #[derive(Clone, Debug)]
 pub(crate) enum AutomationMode {
-    Send { path: String },
-    Receive,
+    SendPath { path: String },
+    ReceivePaths,
+    SendClipboard,
+    ReceiveClipboard,
 }
 
 #[derive(Clone)]
@@ -108,37 +120,56 @@ impl SessionConfig {
 }
 
 fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>, CliError> {
-    match (&args.send, args.receive) {
-        (Some(_), true) => {
-            return Err(CliError::usage(
-                "--send and --receive are mutually exclusive",
-            ));
-        }
-        (Some(_), false) | (None, true) => {}
-        (None, false) => return Ok(None),
+    let selected_modes = [
+        args.send.is_some(),
+        args.receive,
+        args.send_clipboard,
+        args.receive_clipboard,
+    ]
+    .into_iter()
+    .filter(|selected| *selected)
+    .count();
+    if selected_modes > 1 {
+        return Err(CliError::usage(
+            "--send, --receive, --send-clipboard, and --receive-clipboard are mutually exclusive",
+        ));
+    }
+    if selected_modes == 0 {
+        return Ok(None);
     }
 
     if args.machine {
         return Err(CliError::usage(
-            "--send/--receive already use the machine runtime; do not combine them with --machine",
+            "--send/--receive/--send-clipboard/--receive-clipboard already use the machine runtime; do not combine them with --machine",
         ));
     }
     if args.json {
         return Err(CliError::usage(
-            "--send/--receive provide human-readable CLI logs; do not combine them with --json",
+            "--send/--receive/--send-clipboard/--receive-clipboard provide human-readable CLI logs; do not combine them with --json",
         ));
     }
     if !args.auto_accept.is_empty() || args.reject_all {
         return Err(CliError::usage(
-            "--send/--receive manage transfer acceptance automatically; do not combine them with --auto-accept or --reject-all",
+            "--send/--receive/--send-clipboard/--receive-clipboard manage transfer acceptance automatically; do not combine them with --auto-accept or --reject-all",
         ));
     }
 
-    Ok(match (&args.send, args.receive) {
-        (Some(path), false) => Some(AutomationMode::Send { path: path.clone() }),
-        (None, true) => Some(AutomationMode::Receive),
-        _ => None,
-    })
+    Ok(
+        match (
+            &args.send,
+            args.receive,
+            args.send_clipboard,
+            args.receive_clipboard,
+        ) {
+            (Some(path), false, false, false) => {
+                Some(AutomationMode::SendPath { path: path.clone() })
+            }
+            (None, true, false, false) => Some(AutomationMode::ReceivePaths),
+            (None, false, true, false) => Some(AutomationMode::SendClipboard),
+            (None, false, false, true) => Some(AutomationMode::ReceiveClipboard),
+            _ => None,
+        },
+    )
 }
 
 fn resolve_room_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
@@ -206,6 +237,8 @@ mod tests {
             machine: false,
             send: None,
             receive: false,
+            send_clipboard: false,
+            receive_clipboard: false,
             server: DEFAULT_RENDEZVOUS_URL.into(),
             download_dir: ".".into(),
             name: None,
@@ -307,7 +340,7 @@ mod tests {
         args.receive = true;
         assert!(matches!(
             resolve_automation_mode(&args).unwrap(),
-            Some(AutomationMode::Receive)
+            Some(AutomationMode::ReceivePaths)
         ));
     }
 
@@ -317,7 +350,38 @@ mod tests {
         args.send = Some("~/report.txt".into());
         assert!(matches!(
             resolve_automation_mode(&args).unwrap(),
-            Some(AutomationMode::Send { path }) if path == "~/report.txt"
+            Some(AutomationMode::SendPath { path }) if path == "~/report.txt"
         ));
+    }
+
+    #[test]
+    fn clipboard_modes_are_selected() {
+        let mut send_args = session_args();
+        send_args.send_clipboard = true;
+        assert!(matches!(
+            resolve_automation_mode(&send_args).unwrap(),
+            Some(AutomationMode::SendClipboard)
+        ));
+
+        let mut receive_args = session_args();
+        receive_args.receive_clipboard = true;
+        assert!(matches!(
+            resolve_automation_mode(&receive_args).unwrap(),
+            Some(AutomationMode::ReceiveClipboard)
+        ));
+    }
+
+    #[test]
+    fn clipboard_modes_are_mutually_exclusive_with_existing_automation() {
+        let mut args = session_args();
+        args.send = Some("./report.txt".into());
+        args.send_clipboard = true;
+        assert!(resolve_automation_mode(&args).is_err());
+
+        args.send = None;
+        args.send_clipboard = false;
+        args.receive = true;
+        args.receive_clipboard = true;
+        assert!(resolve_automation_mode(&args).is_err());
     }
 }

@@ -30,6 +30,7 @@ skyffla-protocol = { path = "../skyffla-protocol" }
 skyffla-rendezvous = { path = "../skyffla-rendezvous" }
 skyffla-session = { path = "../skyffla-session" }
 skyffla-transport = { path = "../skyffla-transport" }
+time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",

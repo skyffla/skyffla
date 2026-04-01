@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::pending;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,12 +11,15 @@ use skyffla_protocol::room::{
     ChannelId, ChannelKind, MachineCommand, MachineEvent, MemberId, Route, TransferItemKind,
     TransferPhase,
 };
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
 use crate::config::{AutomationMode, Role, SessionConfig};
+use crate::runtime::clipboard::{ClipboardBackend, ClipboardEvent, ClipboardMode};
 
 pub(crate) async fn run_transfer_automation(
     role: Role,
@@ -27,6 +31,7 @@ pub(crate) async fn run_transfer_automation(
         .ok_or_else(|| CliError::runtime("transfer automation mode is missing"))?;
     let mut state = AutomationState::new(config, mode)?;
     let mut backend = spawn_machine_backend(role, config).await?;
+    let mut clipboard = spawn_clipboard_backend(&state)?;
     let mut last_backend_status = None;
     let mut log = LogSink::new();
 
@@ -34,11 +39,24 @@ pub(crate) async fn run_transfer_automation(
 
     loop {
         tokio::select! {
+            maybe_clipboard = async {
+                if let Some(backend) = clipboard.as_mut() {
+                    backend.recv_event().await
+                } else {
+                    pending::<Option<ClipboardEvent>>().await
+                }
+            } => {
+                let Some(event) = maybe_clipboard else {
+                    clipboard = None;
+                    continue;
+                };
+                handle_clipboard_event(&mut state, &mut backend.stdin, clipboard.as_ref(), &mut log, event).await?;
+            }
             maybe_event = backend.stdout_rx.recv() => {
                 let Some(event) = maybe_event else {
                     break;
                 };
-                handle_machine_event(&mut state, &mut backend.stdin, &mut log, event).await?;
+                handle_machine_event(&mut state, &mut backend.stdin, clipboard.as_ref(), &mut log, event).await?;
             }
             maybe_status = backend.stderr_rx.recv() => {
                 let Some(line) = maybe_status else {
@@ -96,11 +114,12 @@ impl LogSink {
     }
 
     fn info(&mut self, message: &str) {
+        let line = format!("[{}] {message}", timestamp_now());
         if self.interactive && self.status_active {
             let _ = write!(self.stdout, "\r\x1b[2K");
             self.status_active = false;
         }
-        let _ = writeln!(self.stdout, "{message}");
+        let _ = writeln!(self.stdout, "{line}");
         let _ = self.stdout.flush();
     }
 
@@ -109,7 +128,8 @@ impl LogSink {
             self.info(message);
             return;
         }
-        let _ = write!(self.stdout, "\r\x1b[2K{message}");
+        let line = format!("[{}] {message}", timestamp_now());
+        let _ = write!(self.stdout, "\r\x1b[2K{line}");
         let _ = self.stdout.flush();
         self.status_active = true;
     }
@@ -212,8 +232,16 @@ struct SendSource {
 }
 
 enum ControllerMode {
-    Send { source: SendSource },
-    Receive,
+    SendPath { source: SendSource },
+    ReceivePaths,
+    SendClipboard,
+    ReceiveClipboard,
+}
+
+#[derive(Clone)]
+enum AutomationItemKind {
+    Transfer(TransferItemKind),
+    Clipboard,
 }
 
 struct AutomationState {
@@ -226,13 +254,15 @@ struct AutomationState {
     sent_members: BTreeSet<MemberId>,
     pending_offers: BTreeMap<MemberId, ChannelId>,
     channels: BTreeMap<ChannelId, ChannelState>,
+    latest_clipboard_text: Option<String>,
 }
 
 struct ChannelState {
-    item_kind: TransferItemKind,
+    item_kind: AutomationItemKind,
     name: String,
     direction: ChannelDirection,
     progress: Option<ProgressState>,
+    accepted: bool,
 }
 
 struct ProgressState {
@@ -255,10 +285,12 @@ enum ChannelDirection {
 impl AutomationState {
     fn new(config: &SessionConfig, automation: AutomationMode) -> Result<Self, CliError> {
         let mode = match automation {
-            AutomationMode::Send { path } => ControllerMode::Send {
+            AutomationMode::SendPath { path } => ControllerMode::SendPath {
                 source: resolve_send_source(&path)?,
             },
-            AutomationMode::Receive => ControllerMode::Receive,
+            AutomationMode::ReceivePaths => ControllerMode::ReceivePaths,
+            AutomationMode::SendClipboard => ControllerMode::SendClipboard,
+            AutomationMode::ReceiveClipboard => ControllerMode::ReceiveClipboard,
         };
         Ok(Self {
             room_id: config.room_id.clone(),
@@ -270,19 +302,28 @@ impl AutomationState {
             sent_members: BTreeSet::new(),
             pending_offers: BTreeMap::new(),
             channels: BTreeMap::new(),
+            latest_clipboard_text: None,
         })
     }
 
     fn startup_line(&self) -> String {
         match &self.mode {
-            ControllerMode::Send { source } => format!(
+            ControllerMode::SendPath { source } => format!(
                 "send mode: staying online in room {} and offering {} {} to each member once",
                 self.room_id,
-                item_kind_label(source.item_kind.clone()),
+                transfer_item_kind_label(&source.item_kind),
                 source.display_name
             ),
-            ControllerMode::Receive => format!(
+            ControllerMode::ReceivePaths => format!(
                 "receive mode: staying online in room {} and auto-accepting incoming transfers",
+                self.room_id
+            ),
+            ControllerMode::SendClipboard => format!(
+                "send clipboard mode: staying online in room {} and forwarding local clipboard text to accepted peers",
+                self.room_id
+            ),
+            ControllerMode::ReceiveClipboard => format!(
+                "receive clipboard mode: staying online in room {} and applying incoming clipboard text updates",
                 self.room_id
             ),
         }
@@ -361,6 +402,46 @@ impl AutomationState {
             self.pending_offers.remove(member_id);
         }
     }
+
+    fn allows_incoming_files(&self) -> bool {
+        matches!(self.mode, ControllerMode::ReceivePaths)
+    }
+
+    fn allows_incoming_clipboard(&self) -> bool {
+        matches!(self.mode, ControllerMode::ReceiveClipboard)
+    }
+
+    fn is_send_clipboard_mode(&self) -> bool {
+        matches!(self.mode, ControllerMode::SendClipboard)
+    }
+
+    fn has_outgoing_clipboard_channel(&self, member_id: &MemberId) -> bool {
+        self.channels.values().any(|channel| {
+            matches!(
+                (&channel.item_kind, &channel.direction),
+                (
+                    AutomationItemKind::Clipboard,
+                    ChannelDirection::Outgoing { member_id: peer_id }
+                ) if peer_id == member_id
+            )
+        })
+    }
+
+    fn accepted_clipboard_channels(&self) -> Vec<(ChannelId, MemberId)> {
+        self.channels
+            .iter()
+            .filter_map(
+                |(channel_id, channel)| match (&channel.item_kind, &channel.direction) {
+                    (AutomationItemKind::Clipboard, ChannelDirection::Outgoing { member_id })
+                        if channel.accepted =>
+                    {
+                        Some((channel_id.clone(), member_id.clone()))
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
 }
 
 fn progress_phase_rank(phase: &TransferPhase) -> u8 {
@@ -371,9 +452,57 @@ fn progress_phase_rank(phase: &TransferPhase) -> u8 {
     }
 }
 
+fn spawn_clipboard_backend(state: &AutomationState) -> Result<Option<ClipboardBackend>, CliError> {
+    match &state.mode {
+        ControllerMode::SendClipboard => ClipboardBackend::start(ClipboardMode::Watch).map(Some),
+        ControllerMode::ReceiveClipboard => {
+            ClipboardBackend::start(ClipboardMode::ApplyOnly).map(Some)
+        }
+        ControllerMode::SendPath { .. } | ControllerMode::ReceivePaths => Ok(None),
+    }
+}
+
+async fn handle_clipboard_event(
+    state: &mut AutomationState,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    clipboard: Option<&ClipboardBackend>,
+    log: &mut LogSink,
+    event: ClipboardEvent,
+) -> Result<(), CliError> {
+    match event {
+        ClipboardEvent::LocalTextChanged { text } => {
+            if !state.is_send_clipboard_mode() {
+                return Ok(());
+            }
+            let text_summary = clipboard_text_summary(&text);
+            state.latest_clipboard_text = Some(text.clone());
+            let targets = state.accepted_clipboard_channels();
+            if targets.is_empty() {
+                log.info(&format!(
+                    "local clipboard changed ({text_summary}); waiting for an accepted peer"
+                ));
+                return Ok(());
+            }
+            for (channel_id, member_id) in targets {
+                send_clipboard_payload(state, stdin, log, &channel_id, &member_id, &text).await?;
+            }
+        }
+        ClipboardEvent::Warning { message } => {
+            log.info(&format!("clipboard warning: {message}"));
+            if clipboard.is_none() && state.allows_incoming_clipboard() {
+                return Err(CliError::runtime(
+                    "receive clipboard mode lost access to the local clipboard",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_machine_event(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
+    clipboard: Option<&ClipboardBackend>,
     log: &mut LogSink,
     event: MachineEvent,
 ) -> Result<(), CliError> {
@@ -399,7 +528,7 @@ async fn handle_machine_event(
                 .map(|member| (member.member_id, member.name))
                 .collect();
             log.info(&format!("members: {}", member_roster_line(state)));
-            maybe_offer_to_known_members(state, stdin, log).await?;
+            maybe_prepare_known_members(state, stdin, log).await?;
         }
         MachineEvent::MemberJoined { member } => {
             let joined_id = member.member_id.clone();
@@ -408,7 +537,7 @@ async fn handle_machine_event(
                 "member joined: {}",
                 state.display_member(&joined_id)
             ));
-            maybe_offer_to_member(state, stdin, log, &joined_id).await?;
+            maybe_prepare_member(state, stdin, log, &joined_id).await?;
         }
         MachineEvent::MemberLeft { member_id, reason } => {
             let name = state.display_member(&member_id);
@@ -448,29 +577,33 @@ async fn handle_machine_event(
             transfer,
             ..
         } => {
-            if kind != ChannelKind::File {
-                return Ok(());
-            }
             let Some(self_member) = state.local_member_id().cloned() else {
                 return Ok(());
             };
             if from == self_member {
                 return Ok(());
             }
-            let item_kind = transfer
-                .as_ref()
-                .map(|offer| offer.item_kind.clone())
-                .unwrap_or(TransferItemKind::File);
-            let item_name = name.unwrap_or_else(|| channel_id.as_str().to_string());
-            let size_suffix = size
-                .map(format_bytes)
-                .map(|value| format!(" ({value})"))
-                .unwrap_or_default();
-            match &state.mode {
-                ControllerMode::Receive => {
+            match kind {
+                ChannelKind::File => {
+                    let item_kind = transfer
+                        .as_ref()
+                        .map(|offer| offer.item_kind.clone())
+                        .unwrap_or(TransferItemKind::File);
+                    let item_name = name.unwrap_or_else(|| channel_id.as_str().to_string());
+                    let size_suffix = size
+                        .map(format_bytes)
+                        .map(|value| format!(" ({value})"))
+                        .unwrap_or_default();
+                    let auto_accept = state.allows_incoming_files();
+                    let rejection_reason = match &state.mode {
+                        ControllerMode::SendPath { .. } => "peer is in send mode",
+                        ControllerMode::ReceivePaths => "",
+                        ControllerMode::SendClipboard => "peer is in clipboard send mode",
+                        ControllerMode::ReceiveClipboard => "peer is in clipboard receive mode",
+                    };
                     log.info(&format!(
                         "incoming {} {} from {}{}",
-                        item_kind_label(item_kind.clone()),
+                        transfer_item_kind_label(&item_kind),
                         item_name,
                         from_name,
                         size_suffix
@@ -478,53 +611,82 @@ async fn handle_machine_event(
                     state.channels.insert(
                         channel_id.clone(),
                         ChannelState {
-                            item_kind: item_kind.clone(),
+                            item_kind: AutomationItemKind::Transfer(item_kind.clone()),
                             name: item_name.clone(),
                             direction: ChannelDirection::Incoming {
                                 member_id: from.clone(),
-                                auto_accept: true,
+                                auto_accept,
                             },
                             progress: None,
+                            accepted: false,
                         },
                     );
-                    log.info(&format!(
-                        "auto-accepting {} {} from {}",
-                        item_kind_label(item_kind),
-                        item_name,
-                        from_name
-                    ));
-                    send_machine_command(stdin, &MachineCommand::AcceptChannel { channel_id })
+                    if auto_accept {
+                        log.info(&format!(
+                            "auto-accepting {} {} from {}",
+                            transfer_item_kind_label(&item_kind),
+                            item_name,
+                            from_name
+                        ));
+                        send_machine_command(stdin, &MachineCommand::AcceptChannel { channel_id })
+                            .await?;
+                    } else {
+                        log.info(&format!(
+                            "rejecting {} {} from {} because this session is not in file receive mode",
+                            transfer_item_kind_label(&item_kind),
+                            item_name,
+                            from_name
+                        ));
+                        send_machine_command(
+                            stdin,
+                            &MachineCommand::RejectChannel {
+                                channel_id,
+                                reason: Some(rejection_reason.into()),
+                            },
+                        )
                         .await?;
+                    }
                 }
-                ControllerMode::Send { .. } => {
-                    log.info(&format!(
-                        "incoming {} {} from {}{}; rejecting because this session is in send mode",
-                        item_kind_label(item_kind.clone()),
-                        item_name,
-                        from_name,
-                        size_suffix
-                    ));
+                ChannelKind::Clipboard => {
+                    let channel_name = name.unwrap_or_else(|| "clipboard".into());
+                    let auto_accept = state.allows_incoming_clipboard();
+                    log.info(&format!("incoming clipboard channel from {}", from_name));
                     state.channels.insert(
                         channel_id.clone(),
                         ChannelState {
-                            item_kind,
-                            name: item_name,
+                            item_kind: AutomationItemKind::Clipboard,
+                            name: channel_name.clone(),
                             direction: ChannelDirection::Incoming {
                                 member_id: from.clone(),
-                                auto_accept: false,
+                                auto_accept,
                             },
                             progress: None,
+                            accepted: false,
                         },
                     );
-                    send_machine_command(
-                        stdin,
-                        &MachineCommand::RejectChannel {
-                            channel_id,
-                            reason: Some("peer is in send mode".into()),
-                        },
-                    )
-                    .await?;
+                    if auto_accept {
+                        log.info(&format!(
+                            "auto-accepting clipboard channel from {}",
+                            from_name
+                        ));
+                        send_machine_command(stdin, &MachineCommand::AcceptChannel { channel_id })
+                            .await?;
+                    } else {
+                        log.info(&format!(
+                            "rejecting clipboard channel from {} because this session is not in clipboard receive mode",
+                            from_name
+                        ));
+                        send_machine_command(
+                            stdin,
+                            &MachineCommand::RejectChannel {
+                                channel_id,
+                                reason: Some("peer is not in clipboard receive mode".into()),
+                            },
+                        )
+                        .await?;
+                    }
                 }
+                ChannelKind::Machine => {}
             }
         }
         MachineEvent::ChannelAccepted {
@@ -532,33 +694,53 @@ async fn handle_machine_event(
             member_id,
             member_name,
         } => {
-            if let Some(channel) = state.channels.get(&channel_id) {
+            let mut accepted_clipboard_target = None;
+            if let Some(channel) = state.channels.get_mut(&channel_id) {
+                channel.accepted = true;
                 match &channel.direction {
                     ChannelDirection::Outgoing { .. } => log.info(&format!(
                         "{} accepted {} {}",
                         member_name,
-                        item_kind_label(channel.item_kind.clone()),
+                        automation_item_label(&channel.item_kind),
                         channel.name
                     )),
                     ChannelDirection::Incoming { auto_accept, .. } => {
                         if *auto_accept {
                             log.info(&format!(
                                 "accepted {} {}",
-                                item_kind_label(channel.item_kind.clone()),
+                                automation_item_label(&channel.item_kind),
                                 channel.name
                             ));
                         } else {
                             log.info(&format!(
                                 "{} accepted {} {}",
                                 member_name,
-                                item_kind_label(channel.item_kind.clone()),
+                                automation_item_label(&channel.item_kind),
                                 channel.name
                             ));
                         }
                     }
                 }
+                if matches!(channel.item_kind, AutomationItemKind::Clipboard) {
+                    if let ChannelDirection::Outgoing { member_id } = &channel.direction {
+                        accepted_clipboard_target = Some(member_id.clone());
+                    }
+                }
             }
             state.clear_member_channel(&member_id, &channel_id);
+            if let Some(target_member_id) = accepted_clipboard_target {
+                if let Some(text) = state.latest_clipboard_text.clone() {
+                    send_clipboard_payload(
+                        state,
+                        stdin,
+                        log,
+                        &channel_id,
+                        &target_member_id,
+                        &text,
+                    )
+                    .await?;
+                }
+            }
         }
         MachineEvent::ChannelTransferReady {
             channel_id,
@@ -571,7 +753,7 @@ async fn handle_machine_event(
             transfer,
         } => {
             if let Some(channel) = state.channels.get_mut(&channel_id) {
-                channel.item_kind = transfer.item_kind.clone();
+                channel.item_kind = AutomationItemKind::Transfer(transfer.item_kind.clone());
                 if channel.name.is_empty() {
                     channel.name = channel_id.as_str().to_string();
                 }
@@ -598,7 +780,7 @@ async fn handle_machine_event(
                 log.info(&format!(
                     "{} rejected {} {}{}",
                     member_name,
-                    item_kind_label(channel.item_kind),
+                    automation_item_label(&channel.item_kind),
                     channel.name,
                     reason
                         .as_deref()
@@ -618,7 +800,7 @@ async fn handle_machine_event(
                 log.info(&format!(
                     "{} closed {} {}{}",
                     member_name,
-                    item_kind_label(channel.item_kind),
+                    automation_item_label(&channel.item_kind),
                     channel.name,
                     reason
                         .as_deref()
@@ -638,14 +820,14 @@ async fn handle_machine_event(
                 match channel.direction {
                     ChannelDirection::Incoming { .. } => log.info(&format!(
                         "saved {} {} to {} ({})",
-                        item_kind_label(channel.item_kind),
+                        automation_item_label(&channel.item_kind),
                         channel.name,
                         display_path(&path),
                         detail
                     )),
                     ChannelDirection::Outgoing { member_id } => log.info(&format!(
                         "completed {} {} to {} ({})",
-                        item_kind_label(channel.item_kind),
+                        automation_item_label(&channel.item_kind),
                         channel.name,
                         state.display_member(&member_id),
                         detail
@@ -680,7 +862,7 @@ async fn handle_machine_event(
                         ChannelDirection::Outgoing { member_id } => log.status(&format!(
                             "{} {} {} to {}: {}",
                             progress_verb(&effective_phase, true),
-                            item_kind_label(item_kind.clone()),
+                            transfer_item_kind_label(&item_kind),
                             name,
                             state.display_member(member_id),
                             progress_text
@@ -688,7 +870,7 @@ async fn handle_machine_event(
                         ChannelDirection::Incoming { member_id, .. } => log.status(&format!(
                             "{} {} {} from {}: {}",
                             progress_verb(&effective_phase, false),
-                            item_kind_label(item_kind.clone()),
+                            transfer_item_kind_label(&item_kind),
                             name,
                             state.display_member(member_id),
                             progress_text
@@ -709,7 +891,7 @@ async fn handle_machine_event(
                         {
                             log.info(&format!(
                                 "completed {} {} to {} ({})",
-                                item_kind_label(item_kind),
+                                automation_item_label(&item_kind),
                                 name,
                                 state.display_member(&member_id),
                                 transfer_completion_detail(
@@ -730,8 +912,8 @@ async fn handle_machine_event(
             if let Some(channel_id) = channel_id.as_ref() {
                 if let Some(channel) = state.channels.remove(channel_id) {
                     log.info(&format!(
-                        "transfer error for {} {}: {} ({})",
-                        item_kind_label(channel.item_kind),
+                        "error for {} {}: {} ({})",
+                        automation_item_label(&channel.item_kind),
                         channel.name,
                         message,
                         code
@@ -743,75 +925,146 @@ async fn handle_machine_event(
                 log.info(&format!("backend error {code}: {message}"));
             }
         }
-        MachineEvent::Chat { .. } | MachineEvent::ChannelData { .. } => {}
+        MachineEvent::ChannelData {
+            channel_id,
+            from,
+            from_name,
+            body,
+        } => {
+            let Some(channel) = state.channels.get(&channel_id) else {
+                return Ok(());
+            };
+            if !matches!(channel.item_kind, AutomationItemKind::Clipboard) {
+                return Ok(());
+            }
+            if !matches!(channel.direction, ChannelDirection::Incoming { .. }) {
+                return Ok(());
+            }
+            let Some(clipboard) = clipboard else {
+                return Err(CliError::runtime(
+                    "clipboard backend is not available in clipboard receive mode",
+                ));
+            };
+            let summary = clipboard_text_summary(&body);
+            log.info(&format!(
+                "received clipboard update from {} ({summary}); applying locally",
+                state.display_member(&from)
+            ));
+            clipboard.set_text(body)?;
+            log.info(&format!("applied clipboard update from {}", from_name));
+        }
+        MachineEvent::Chat { .. } => {}
     }
     Ok(())
 }
 
-async fn maybe_offer_to_known_members(
+async fn maybe_prepare_known_members(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
     log: &mut LogSink,
 ) -> Result<(), CliError> {
     let member_ids = state.members.keys().cloned().collect::<Vec<_>>();
     for member_id in member_ids {
-        maybe_offer_to_member(state, stdin, log, &member_id).await?;
+        maybe_prepare_member(state, stdin, log, &member_id).await?;
     }
     Ok(())
 }
 
-async fn maybe_offer_to_member(
+async fn maybe_prepare_member(
     state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
     log: &mut LogSink,
     member_id: &MemberId,
 ) -> Result<(), CliError> {
-    let ControllerMode::Send { source } = &state.mode else {
-        return Ok(());
-    };
-    let source = source.clone();
     if state
         .local_member_id()
         .is_some_and(|self_member| self_member == member_id)
     {
         return Ok(());
     }
-    if state.sent_members.contains(member_id) || state.pending_offers.contains_key(member_id) {
-        return Ok(());
-    }
+    match &state.mode {
+        ControllerMode::SendPath { source } => {
+            let source = source.clone();
+            if state.sent_members.contains(member_id)
+                || state.pending_offers.contains_key(member_id)
+            {
+                return Ok(());
+            }
 
-    let channel_id = state.next_channel_id();
-    state.sent_members.insert(member_id.clone());
-    state
-        .pending_offers
-        .insert(member_id.clone(), channel_id.clone());
-    state.channels.insert(
-        channel_id.clone(),
-        ChannelState {
-            item_kind: source.item_kind.clone(),
-            name: source.display_name.clone(),
-            direction: ChannelDirection::Outgoing {
-                member_id: member_id.clone(),
-            },
-            progress: None,
-        },
-    );
-    log.info(&format!(
-        "offering {} {} to {}",
-        item_kind_label(source.item_kind.clone()),
-        source.display_name,
-        state.display_member(member_id)
-    ));
-    let command = MachineCommand::SendPath {
-        channel_id,
-        to: Route::Member {
-            member_id: member_id.clone(),
-        },
-        path: source.raw_path.clone(),
-        name: None,
-        mime: None,
-    };
-    send_machine_command(stdin, &command).await?;
+            let channel_id = state.next_channel_id();
+            state.sent_members.insert(member_id.clone());
+            state
+                .pending_offers
+                .insert(member_id.clone(), channel_id.clone());
+            state.channels.insert(
+                channel_id.clone(),
+                ChannelState {
+                    item_kind: AutomationItemKind::Transfer(source.item_kind.clone()),
+                    name: source.display_name.clone(),
+                    direction: ChannelDirection::Outgoing {
+                        member_id: member_id.clone(),
+                    },
+                    progress: None,
+                    accepted: false,
+                },
+            );
+            log.info(&format!(
+                "offering {} {} to {}",
+                transfer_item_kind_label(&source.item_kind),
+                source.display_name,
+                state.display_member(member_id)
+            ));
+            let command = MachineCommand::SendPath {
+                channel_id,
+                to: Route::Member {
+                    member_id: member_id.clone(),
+                },
+                path: source.raw_path.clone(),
+                name: None,
+                mime: None,
+            };
+            send_machine_command(stdin, &command).await?;
+        }
+        ControllerMode::SendClipboard => {
+            if state.has_outgoing_clipboard_channel(member_id) {
+                return Ok(());
+            }
+
+            let channel_id = state.next_channel_id();
+            state.channels.insert(
+                channel_id.clone(),
+                ChannelState {
+                    item_kind: AutomationItemKind::Clipboard,
+                    name: "clipboard".into(),
+                    direction: ChannelDirection::Outgoing {
+                        member_id: member_id.clone(),
+                    },
+                    progress: None,
+                    accepted: false,
+                },
+            );
+            log.info(&format!(
+                "opening clipboard channel to {}",
+                state.display_member(member_id)
+            ));
+            send_machine_command(
+                stdin,
+                &MachineCommand::OpenChannel {
+                    channel_id,
+                    kind: ChannelKind::Clipboard,
+                    to: Route::Member {
+                        member_id: member_id.clone(),
+                    },
+                    name: Some("clipboard".into()),
+                    size: None,
+                    mime: Some("text/plain".into()),
+                    transfer: None,
+                },
+            )
+            .await?;
+        }
+        ControllerMode::ReceivePaths | ControllerMode::ReceiveClipboard => {}
+    }
     Ok(())
 }
 
@@ -929,11 +1182,57 @@ fn progress_verb(phase: &TransferPhase, outgoing: bool) -> &'static str {
     }
 }
 
-fn item_kind_label(kind: TransferItemKind) -> &'static str {
+fn transfer_item_kind_label(kind: &TransferItemKind) -> &'static str {
     match kind {
         TransferItemKind::File => "file",
         TransferItemKind::Folder => "folder",
     }
+}
+
+fn automation_item_label(kind: &AutomationItemKind) -> &'static str {
+    match kind {
+        AutomationItemKind::Transfer(kind) => transfer_item_kind_label(kind),
+        AutomationItemKind::Clipboard => "clipboard",
+    }
+}
+
+fn clipboard_text_summary(text: &str) -> String {
+    let chars = text.chars().count();
+    if chars == 1 {
+        "1 char".into()
+    } else {
+        format!("{chars} chars")
+    }
+}
+
+async fn send_clipboard_payload(
+    state: &AutomationState,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    log: &mut LogSink,
+    channel_id: &ChannelId,
+    member_id: &MemberId,
+    text: &str,
+) -> Result<(), CliError> {
+    send_machine_command(
+        stdin,
+        &MachineCommand::SendChannelData {
+            channel_id: channel_id.clone(),
+            body: text.to_string(),
+        },
+    )
+    .await?;
+    log.info(&format!(
+        "sent clipboard update to {} ({})",
+        state.display_member(member_id),
+        clipboard_text_summary(text)
+    ));
+    Ok(())
+}
+
+fn timestamp_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
 fn format_bytes(size: u64) -> String {
@@ -1106,8 +1405,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        progress_phase_rank, transfer_completion_detail, AutomationState, ChannelDirection,
-        ChannelState, ControllerMode, ProgressState, SendSource,
+        progress_phase_rank, transfer_completion_detail, AutomationItemKind, AutomationState,
+        ChannelDirection, ChannelState, ControllerMode, ProgressState, SendSource,
     };
     use skyffla_protocol::room::{ChannelId, MemberId, TransferItemKind, TransferPhase};
     use std::time::Instant;
@@ -1130,7 +1429,7 @@ mod tests {
         let member_id = MemberId::new("m2").expect("valid member id");
         let mut state = AutomationState {
             room_id: "room".into(),
-            mode: ControllerMode::Send {
+            mode: ControllerMode::SendPath {
                 source: SendSource {
                     raw_path: "report.txt".into(),
                     display_name: "report.txt".into(),
@@ -1146,7 +1445,7 @@ mod tests {
             channels: BTreeMap::from([(
                 channel_id.clone(),
                 ChannelState {
-                    item_kind: TransferItemKind::File,
+                    item_kind: AutomationItemKind::Transfer(TransferItemKind::File),
                     name: "report.txt".into(),
                     direction: ChannelDirection::Outgoing { member_id },
                     progress: Some(ProgressState {
@@ -1155,8 +1454,10 @@ mod tests {
                         bytes_complete: 40,
                         bytes_total: Some(100),
                     }),
+                    accepted: false,
                 },
             )]),
+            latest_clipboard_text: None,
         };
 
         let sending = state
