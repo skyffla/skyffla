@@ -48,10 +48,10 @@ class ${FORMULA_CLASS} < Formula
     end
   elsif OS.linux?
     if Hardware::CPU.arm?
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+      url "${ASSET_PREFIX}/skyffla-v${VERSION}-aarch64-unknown-linux-musl.tar.gz"
       sha256 "${LINUX_ARM64_SHA}"
     else
-      url "${ASSET_PREFIX}/skyffla-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+      url "${ASSET_PREFIX}/skyffla-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
       sha256 "${LINUX_X86_64_SHA}"
     end
   end

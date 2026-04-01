@@ -63,6 +63,10 @@ Check the installed CLI version:
 skyffla --version
 ```
 
+Linux release tarballs are published as static `*-unknown-linux-musl` builds so
+they run on a wider range of distros, including older WSL Ubuntu images that do
+not provide the `glibc` version from the GitHub Actions runner.
+
 ## Quick Start
 
 Open two or more terminals and join the same room.
