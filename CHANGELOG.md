@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Add persistent `--send` and `--receive` automation modes so transfer senders and receivers can stay online across late joiners and multiple transfers, with tighter progress and shutdown handling.
+- Add clipboard automation modes alongside the transfer automation flow so room automation can send and receive clipboard payloads without dropping back to the TUI.
+- Make Linux release artifacts portable by building musl targets in the release workflow, updating the Homebrew formula rendering, and adding Linux machine smoke coverage in CI.
+
 ## [2.0.0] - 2026-03-23
 
 - Simplify the public CLI to `skyffla <room-id>` with `--host`, remove the old `host` and `join` commands, and update the TUI backend spawning, wrappers, docs, and examples to match.
