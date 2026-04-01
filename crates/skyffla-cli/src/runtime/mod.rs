@@ -1,3 +1,4 @@
+pub(crate) mod clipboard;
 pub(crate) mod handshake;
 pub(crate) mod machine;
 pub(crate) mod machine_command_line;
