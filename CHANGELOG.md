@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Make `--auto-accept` a no-argument flag that accepts files, folders, and clipboard channels, and wire it into the room TUI so incoming transfers no longer require `/accept`.
+- Add Tab completion for `/send` paths in the room TUI, including folder suffixes, common-prefix completion, escaped spaces, routed sends, and capped match listings.
+
 ## [2.1.0] - 2026-04-01
 
 - Add persistent `--send` and `--receive` automation modes so transfer senders and receivers can stay online across late joiners and multiple transfers, with tighter progress and shutdown handling.
