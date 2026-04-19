@@ -17,6 +17,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration as TokioDuration};
 
+use crate::accept_policy::AutoAcceptPolicy;
 use crate::cli_error::CliError;
 use crate::config::{Role, SessionConfig};
 use crate::runtime::machine_command_line::parse_machine_command_line;
@@ -50,7 +51,11 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         }
     });
 
-    let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
+    let mut state = RoomTuiState::new(
+        &config.peer_name,
+        config.download_dir.clone(),
+        config.auto_accept_policy.clone(),
+    );
     let mut stdout_open = true;
     let mut stderr_open = true;
     let mut last_backend_status = None;
@@ -130,7 +135,11 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
 async fn run_scripted_room_tui(role: Role, config: &SessionConfig) -> Result<(), CliError> {
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut input = BufReader::new(tokio::io::stdin()).lines();
-    let mut state = RoomTuiState::new(&config.peer_name, config.download_dir.clone());
+    let mut state = RoomTuiState::new(
+        &config.peer_name,
+        config.download_dir.clone(),
+        config.auto_accept_policy.clone(),
+    );
     let include_transfer_progress_lines = scripted_progress_lines_enabled();
     let mut stdout_open = true;
     let mut stderr_open = true;
@@ -649,6 +658,7 @@ fn split_shell_words(line: &str) -> Result<Vec<String>, CliError> {
 struct RoomTuiState {
     local_name: String,
     download_dir: PathBuf,
+    auto_accept_policy: AutoAcceptPolicy,
     next_file_channel_index: u64,
     self_member: Option<MemberId>,
     host_member: Option<MemberId>,
@@ -660,10 +670,11 @@ struct RoomTuiState {
 }
 
 impl RoomTuiState {
-    fn new(local_name: &str, download_dir: PathBuf) -> Self {
+    fn new(local_name: &str, download_dir: PathBuf, auto_accept_policy: AutoAcceptPolicy) -> Self {
         Self {
             local_name: local_name.to_string(),
             download_dir,
+            auto_accept_policy,
             next_file_channel_index: 1,
             self_member: None,
             host_member: None,
@@ -717,6 +728,13 @@ impl RoomTuiState {
             file.name,
             size_suffix
         ))
+    }
+
+    fn should_auto_accept(&self, item_kind: &TransferItemKind) -> bool {
+        match item_kind {
+            TransferItemKind::File => self.auto_accept_policy.file,
+            TransferItemKind::Folder => self.auto_accept_policy.folder,
+        }
     }
 
     fn display_member(&self, member_id: &MemberId) -> String {
@@ -1220,17 +1238,24 @@ fn format_room_event_lines(
                     .map(format_bytes)
                     .map(|value| format!(" ({value})"))
                     .unwrap_or_default();
+                let should_auto_accept = is_incoming && state.should_auto_accept(&item_kind);
                 let mut message = format!(
                     "{} wants to send {} {}{}",
                     state.display_member_name_with_fallback(&from_name, &from),
-                    item_kind_label(item_kind),
+                    item_kind_label(item_kind.clone()),
                     display_name,
                     size_suffix
                 );
                 if is_incoming {
-                    message.push_str(" - /accept or /reject");
+                    if should_auto_accept {
+                        message.push_str(" - auto-accepting");
+                    } else {
+                        message.push_str(" - /accept or /reject");
+                    }
                 }
-                return (vec![RoomLine::System(message)], None);
+                let follow_up =
+                    should_auto_accept.then(|| MachineCommand::AcceptChannel { channel_id });
+                return (vec![RoomLine::System(message)], follow_up);
             }
             (
                 vec![RoomLine::System(format!(
@@ -1612,9 +1637,13 @@ mod tests {
 
     use super::*;
 
+    fn test_state() -> RoomTuiState {
+        RoomTuiState::new("alpha", PathBuf::from("."), AutoAcceptPolicy::none())
+    }
+
     #[test]
     fn parses_room_chat_and_dm_commands() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         match parse_room_tui_input("hello room", &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendChat { to, text }) => {
                 assert_eq!(to, Route::All);
@@ -1660,7 +1689,7 @@ mod tests {
 
     #[test]
     fn room_member_resolution_prefers_name_but_accepts_id() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         state.self_member = Some(MemberId::new("m1").unwrap());
         state
             .members
@@ -1681,7 +1710,7 @@ mod tests {
 
     #[test]
     fn room_member_display_hides_ids_until_names_collide() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         state.self_member = Some(MemberId::new("m1").unwrap());
         state.host_member = Some(MemberId::new("m1").unwrap());
         state
@@ -1707,7 +1736,7 @@ mod tests {
 
     #[test]
     fn parses_room_file_commands() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         match parse_room_tui_input(r#"/send all "./folder name""#, &mut state).unwrap() {
             RoomTuiInput::Send(MachineCommand::SendPath {
                 channel_id,
@@ -1772,7 +1801,7 @@ mod tests {
 
     #[test]
     fn room_events_update_roster_and_identity() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
 
         apply_room_event(
@@ -1812,7 +1841,7 @@ mod tests {
 
     #[test]
     fn rejects_legacy_save_command_in_room_tui() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let error = parse_room_tui_input("/save", &mut state).unwrap_err();
         assert!(error
             .to_string()
@@ -1828,7 +1857,7 @@ mod tests {
 
     #[test]
     fn accepting_provisional_file_shows_waiting_message() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
             channel_id.clone(),
@@ -1849,6 +1878,43 @@ mod tests {
         assert_eq!(
             stringify_room_lines(lines),
             vec!["accepted file big.bin 32B; waiting for sender to finish preparing"]
+        );
+    }
+
+    #[test]
+    fn auto_accept_policy_accepts_incoming_folder_offer() {
+        let mut state = RoomTuiState::new("alpha", PathBuf::from("."), AutoAcceptPolicy::all());
+        state.self_member = Some(MemberId::new("m1").unwrap());
+        let channel_id = ChannelId::new("folder1").unwrap();
+
+        let (lines, follow_up) = summarize_room_event(
+            &mut state,
+            MachineEvent::ChannelOpened {
+                channel_id: channel_id.clone(),
+                kind: ChannelKind::File,
+                from: MemberId::new("m2").unwrap(),
+                from_name: "beta".into(),
+                to: Route::Member {
+                    member_id: MemberId::new("m1").unwrap(),
+                },
+                name: Some("artpack".into()),
+                size: None,
+                mime: None,
+                transfer: Some(skyffla_protocol::room::TransferOffer {
+                    item_kind: TransferItemKind::Folder,
+                    integrity: None,
+                }),
+            },
+            false,
+        );
+
+        assert_eq!(
+            lines,
+            vec!["beta wants to send folder artpack - auto-accepting"]
+        );
+        assert_eq!(
+            follow_up,
+            Some(MachineCommand::AcceptChannel { channel_id })
         );
     }
 
@@ -1877,7 +1943,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_keeps_transfer_progress_out_of_event_log() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
 
@@ -1916,7 +1982,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_labels_outgoing_transfer_progress_as_sending() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
@@ -1954,7 +2020,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_shows_preparing_status() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
@@ -1992,7 +2058,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_shows_waiting_for_accept_after_prepare_completes() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
@@ -2026,7 +2092,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_shows_starting_transfer_if_accept_arrived_during_prepare() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
@@ -2063,7 +2129,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_updates_sender_status_immediately_on_accept_during_prepare() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         state
             .members
@@ -2109,7 +2175,7 @@ mod tests {
 
     #[test]
     fn interactive_tui_logs_sender_completion_and_clears_status() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
@@ -2165,7 +2231,7 @@ mod tests {
 
     #[test]
     fn scripted_tui_emits_sender_completion_without_progress_lines() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(
             channel_id.clone(),
@@ -2210,7 +2276,7 @@ mod tests {
 
     #[test]
     fn receive_completion_keeps_speed_summary() {
-        let mut state = RoomTuiState::new("alpha", PathBuf::from("."));
+        let mut state = test_state();
         let mut ui = UiState::new("demo-room", "alpha", "room").unwrap();
         let channel_id = ChannelId::new("f1").unwrap();
         state.file_channels.insert(

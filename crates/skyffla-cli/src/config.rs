@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Args, Parser};
 
-#[cfg(test)]
 use crate::accept_policy::AutoAcceptPolicy;
-use crate::accept_policy::AutoAcceptTarget;
 use crate::cli_error::CliError;
 
 pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
@@ -60,8 +58,8 @@ pub(crate) struct SessionArgs {
     pub(crate) json: bool,
     #[arg(long)]
     pub(crate) local: bool,
-    #[arg(long, value_enum, value_delimiter = ',', conflicts_with = "reject_all")]
-    pub(crate) auto_accept: Vec<AutoAcceptTarget>,
+    #[arg(long, conflicts_with = "reject_all")]
+    pub(crate) auto_accept: bool,
     #[arg(long, conflicts_with = "auto_accept")]
     pub(crate) reject_all: bool,
 }
@@ -90,6 +88,7 @@ pub(crate) struct SessionConfig {
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
     pub(crate) local_mode: bool,
+    pub(crate) auto_accept_policy: AutoAcceptPolicy,
     pub(crate) automation: Option<AutomationMode>,
 }
 
@@ -114,6 +113,7 @@ impl SessionConfig {
             machine: args.machine,
             json_events: args.json,
             local_mode: args.local,
+            auto_accept_policy: resolve_auto_accept_policy(args.auto_accept, args.reject_all).0,
             automation,
         })
     }
@@ -148,7 +148,7 @@ fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>,
             "--send/--receive/--send-clipboard/--receive-clipboard provide human-readable CLI logs; do not combine them with --json",
         ));
     }
-    if !args.auto_accept.is_empty() || args.reject_all {
+    if args.auto_accept || args.reject_all {
         return Err(CliError::usage(
             "--send/--receive/--send-clipboard/--receive-clipboard manage transfer acceptance automatically; do not combine them with --auto-accept or --reject-all",
         ));
@@ -191,20 +191,15 @@ fn resolve_peer_name(
         .unwrap_or_else(|| "skyffla-peer".into())
 }
 
-#[cfg(test)]
 fn resolve_auto_accept_policy(
-    persisted: &AutoAcceptPolicy,
-    cli_targets: &[AutoAcceptTarget],
+    auto_accept: bool,
     reject_all: bool,
 ) -> (AutoAcceptPolicy, &'static str) {
     if reject_all {
         return (AutoAcceptPolicy::none(), "cli override");
     }
-    if !cli_targets.is_empty() {
-        return (AutoAcceptPolicy::from_targets(cli_targets), "cli override");
-    }
-    if !persisted.is_empty() {
-        return (persisted.clone(), "local state");
+    if auto_accept {
+        return (AutoAcceptPolicy::all(), "cli override");
     }
     (AutoAcceptPolicy::none(), "default")
 }
@@ -227,9 +222,9 @@ fn validate_room_id(room_id: &str) -> Result<()> {
 mod tests {
     use super::{
         resolve_auto_accept_policy, resolve_automation_mode, resolve_peer_name, resolve_room_id,
-        validate_room_id, AutomationMode, SessionArgs, DEFAULT_RENDEZVOUS_URL,
+        validate_room_id, AutomationMode, Cli, SessionArgs, DEFAULT_RENDEZVOUS_URL,
     };
-    use crate::accept_policy::{AutoAcceptPolicy, AutoAcceptTarget};
+    use crate::accept_policy::AutoAcceptPolicy;
 
     fn session_args() -> SessionArgs {
         SessionArgs {
@@ -244,7 +239,7 @@ mod tests {
             name: None,
             json: false,
             local: false,
-            auto_accept: Vec::new(),
+            auto_accept: false,
             reject_all: false,
         }
     }
@@ -288,38 +283,42 @@ mod tests {
     }
 
     #[test]
-    fn cli_auto_accept_overrides_persisted_policy() {
-        let persisted = AutoAcceptPolicy::files_and_clipboard();
-        let (policy, source) =
-            resolve_auto_accept_policy(&persisted, &[AutoAcceptTarget::Folder], false);
+    fn cli_auto_accept_accepts_everything() {
+        let (policy, source) = resolve_auto_accept_policy(true, false);
 
-        assert_eq!(
-            policy,
-            AutoAcceptPolicy {
-                file: false,
-                folder: true,
-                clipboard: false,
-            }
-        );
+        assert_eq!(policy, AutoAcceptPolicy::all());
         assert_eq!(source, "cli override");
     }
 
     #[test]
-    fn reject_all_disables_any_persisted_acceptance() {
-        let persisted = AutoAcceptPolicy::files_and_clipboard();
-        let (policy, source) = resolve_auto_accept_policy(&persisted, &[], true);
+    fn auto_accept_flag_takes_no_values() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "--auto-accept"])
+            .expect("--auto-accept should parse as a flag");
+        assert!(cli.session.auto_accept);
+
+        assert!(<Cli as clap::Parser>::try_parse_from([
+            "skyffla",
+            "room",
+            "--auto-accept",
+            "folder"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn reject_all_disables_acceptance() {
+        let (policy, source) = resolve_auto_accept_policy(false, true);
 
         assert_eq!(policy, AutoAcceptPolicy::none());
         assert_eq!(source, "cli override");
     }
 
     #[test]
-    fn persisted_policy_is_used_when_no_cli_override_exists() {
-        let persisted = AutoAcceptPolicy::files_and_clipboard();
-        let (policy, source) = resolve_auto_accept_policy(&persisted, &[], false);
+    fn default_policy_accepts_nothing() {
+        let (policy, source) = resolve_auto_accept_policy(false, false);
 
-        assert_eq!(policy, persisted);
-        assert_eq!(source, "local state");
+        assert_eq!(policy, AutoAcceptPolicy::none());
+        assert_eq!(source, "default");
     }
 
     #[test]

@@ -1,12 +1,4 @@
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum AutoAcceptTarget {
-    File,
-    Folder,
-    Clipboard,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AutoAcceptPolicy {
@@ -31,17 +23,12 @@ impl AutoAcceptPolicy {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_targets(targets: &[AutoAcceptTarget]) -> Self {
-        let mut policy = Self::none();
-        for target in targets {
-            match target {
-                AutoAcceptTarget::File => policy.file = true,
-                AutoAcceptTarget::Folder => policy.folder = true,
-                AutoAcceptTarget::Clipboard => policy.clipboard = true,
-            }
+    pub(crate) fn all() -> Self {
+        Self {
+            file: true,
+            folder: true,
+            clipboard: true,
         }
-        policy
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -51,15 +38,14 @@ impl AutoAcceptPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoAcceptPolicy, AutoAcceptTarget};
+    use super::AutoAcceptPolicy;
 
     #[test]
-    fn policy_from_targets_sets_only_requested_kinds() {
-        let policy =
-            AutoAcceptPolicy::from_targets(&[AutoAcceptTarget::File, AutoAcceptTarget::Clipboard]);
+    fn all_policy_accepts_every_kind() {
+        let policy = AutoAcceptPolicy::all();
 
         assert!(policy.file);
-        assert!(!policy.folder);
+        assert!(policy.folder);
         assert!(policy.clipboard);
     }
 }

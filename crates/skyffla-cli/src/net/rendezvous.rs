@@ -195,6 +195,7 @@ fn parse_rendezvous_error_message(body: Option<&str>) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::accept_policy::AutoAcceptPolicy;
     use crate::config::{Role, SessionConfig, DEFAULT_RENDEZVOUS_URL};
 
     use reqwest::StatusCode;
@@ -218,6 +219,7 @@ mod tests {
             machine: false,
             json_events: false,
             local_mode: false,
+            auto_accept_policy: AutoAcceptPolicy::none(),
             automation: None,
         };
 
