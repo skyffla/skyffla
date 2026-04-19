@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use serde_json::Value;
 use skyffla_protocol::room::{
     ChannelId, ChannelKind, MachineCommand, MachineEvent, MemberId, Route, TransferItemKind,
@@ -67,7 +67,9 @@ pub(crate) async fn run_room_tui(role: Role, config: &SessionConfig) -> Result<(
         tokio::select! {
             maybe_key = input_rx.recv() => {
                 let Some(key) = maybe_key else { break; };
-                if let Some(line) = ui.handle_key_event(key) {
+                if key.code == KeyCode::Tab {
+                    complete_room_tui_input(&mut ui, &state);
+                } else if let Some(line) = ui.handle_key_event(key) {
                     match parse_room_tui_input(&line, &mut state) {
                         Ok(RoomTuiInput::Quit) => {
                             let _ = request_backend_leave(&mut backend).await;
@@ -505,6 +507,330 @@ fn parse_route(value: &str, state: &RoomTuiState) -> Result<Route, CliError> {
     Ok(Route::Member {
         member_id: state.resolve_member(value)?,
     })
+}
+
+const PATH_COMPLETION_DISPLAY_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartialShellToken {
+    value: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionResult {
+    edit: Option<CompletionEdit>,
+    messages: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PathCompletionContext {
+    token: PartialShellToken,
+    needs_leading_space: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PathCompletionMatch {
+    insert_text: String,
+    display_text: String,
+}
+
+fn complete_room_tui_input(ui: &mut UiState, state: &RoomTuiState) {
+    let result = complete_send_path_input(ui.input_line(), ui.cursor_index(), state);
+    let Some(result) = result else {
+        return;
+    };
+    if let Some(edit) = result.edit {
+        ui.replace_input_range(edit.start..edit.end, &edit.replacement);
+    }
+    for message in result.messages {
+        ui.system(message);
+    }
+}
+
+fn complete_send_path_input(
+    input: &str,
+    cursor: usize,
+    state: &RoomTuiState,
+) -> Option<CompletionResult> {
+    complete_send_path_input_with_base(input, cursor, state, Path::new("."))
+}
+
+fn complete_send_path_input_with_base(
+    input: &str,
+    cursor: usize,
+    state: &RoomTuiState,
+    base_dir: &Path,
+) -> Option<CompletionResult> {
+    if cursor > input.len() || !input.is_char_boundary(cursor) {
+        return None;
+    }
+    let prefix = &input[..cursor];
+    let context = send_path_completion_context(prefix, cursor, state)?;
+    let mut matches = path_completion_matches(&context.token.value, base_dir).ok()?;
+    if matches.is_empty() {
+        return Some(CompletionResult {
+            edit: None,
+            messages: vec!["no matching files or folders".to_string()],
+        });
+    }
+    matches.sort_by(|left, right| left.display_text.cmp(&right.display_text));
+
+    let replacement = if matches.len() == 1 {
+        let suffix = if matches[0].insert_text.ends_with('/') {
+            ""
+        } else {
+            " "
+        };
+        Some(format!(
+            "{}{}",
+            escape_shell_token(&matches[0].insert_text),
+            suffix
+        ))
+    } else {
+        let common = common_prefix(
+            matches
+                .iter()
+                .map(|candidate| candidate.insert_text.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+        (common.len() > context.token.value.len()).then(|| escape_shell_token(&common))
+    };
+
+    let edit = replacement.map(|replacement| CompletionEdit {
+        start: context.token.start,
+        end: context.token.end,
+        replacement: if context.needs_leading_space {
+            format!(" {replacement}")
+        } else {
+            replacement
+        },
+    });
+
+    let messages = if matches.len() > 1 {
+        let shown = matches
+            .iter()
+            .take(PATH_COMPLETION_DISPLAY_LIMIT)
+            .map(|candidate| candidate.display_text.as_str())
+            .collect::<Vec<_>>()
+            .join("  ");
+        let prefix = if matches.len() > PATH_COMPLETION_DISPLAY_LIMIT {
+            format!(
+                "path matches (showing first {} of {}): ",
+                PATH_COMPLETION_DISPLAY_LIMIT,
+                matches.len()
+            )
+        } else {
+            "path matches: ".to_string()
+        };
+        vec![format!("{prefix}{shown}")]
+    } else {
+        Vec::new()
+    };
+
+    Some(CompletionResult { edit, messages })
+}
+
+fn send_path_completion_context(
+    prefix: &str,
+    cursor: usize,
+    state: &RoomTuiState,
+) -> Option<PathCompletionContext> {
+    let tokens = partial_shell_tokens(prefix);
+    if tokens.first().map(|token| token.value.as_str()) != Some("/send") {
+        return None;
+    }
+
+    match tokens.len() {
+        1 => Some(PathCompletionContext {
+            token: PartialShellToken {
+                value: String::new(),
+                start: cursor,
+                end: cursor,
+            },
+            needs_leading_space: true,
+        }),
+        2 => Some(PathCompletionContext {
+            token: tokens[1].clone(),
+            needs_leading_space: false,
+        }),
+        _ if is_send_route_token(&tokens[1].value, state) => {
+            tokens.last().cloned().map(|token| PathCompletionContext {
+                token,
+                needs_leading_space: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_send_route_token(value: &str, state: &RoomTuiState) -> bool {
+    value == "all" || state.resolve_member(value).is_ok()
+}
+
+fn partial_shell_tokens(input: &str) -> Vec<PartialShellToken> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut token_start = None;
+    let mut quote = None;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        match quote {
+            Some(active) => match ch {
+                '\\' if active == '"' => {
+                    if let Some((_, next)) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                value if value == active => quote = None,
+                _ => current.push(ch),
+            },
+            None => match ch {
+                value if value.is_whitespace() => {
+                    if let Some(start) = token_start.take() {
+                        tokens.push(PartialShellToken {
+                            value: std::mem::take(&mut current),
+                            start,
+                            end: index,
+                        });
+                    }
+                }
+                '\'' | '"' => {
+                    token_start.get_or_insert(index);
+                    quote = Some(ch);
+                }
+                '\\' => {
+                    token_start.get_or_insert(index);
+                    if let Some((_, next)) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                _ => {
+                    token_start.get_or_insert(index);
+                    current.push(ch);
+                }
+            },
+        }
+    }
+
+    if let Some(start) = token_start {
+        tokens.push(PartialShellToken {
+            value: current,
+            start,
+            end: input.len(),
+        });
+    } else if !tokens.is_empty() && input.chars().last().is_some_and(char::is_whitespace) {
+        tokens.push(PartialShellToken {
+            value: String::new(),
+            start: input.len(),
+            end: input.len(),
+        });
+    }
+
+    tokens
+}
+
+fn path_completion_matches(
+    prefix: &str,
+    base_dir: &Path,
+) -> std::io::Result<Vec<PathCompletionMatch>> {
+    let (display_dir, lookup_dir, name_prefix) = split_completion_path(prefix, base_dir);
+    let include_hidden = name_prefix.starts_with('.');
+    let mut matches = Vec::new();
+
+    for entry in std::fs::read_dir(&lookup_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+        if !name.starts_with(&name_prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = path.is_dir();
+        if !is_dir && !path.is_file() {
+            continue;
+        }
+        let suffix = if is_dir { "/" } else { "" };
+        matches.push(PathCompletionMatch {
+            insert_text: format!("{display_dir}{name}{suffix}"),
+            display_text: format!("{name}{suffix}"),
+        });
+    }
+
+    Ok(matches)
+}
+
+fn split_completion_path(prefix: &str, base_dir: &Path) -> (String, PathBuf, String) {
+    let (display_dir, name_prefix) = match prefix.rfind('/') {
+        Some(index) => (
+            prefix[..=index].to_string(),
+            prefix[index + 1..].to_string(),
+        ),
+        None => (String::new(), prefix.to_string()),
+    };
+    let lookup_dir = expand_completion_dir(&display_dir, base_dir);
+    (display_dir, lookup_dir, name_prefix)
+}
+
+fn expand_completion_dir(display_dir: &str, base_dir: &Path) -> PathBuf {
+    if display_dir.is_empty() {
+        return base_dir.to_path_buf();
+    }
+    if display_dir == "~/" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(display_dir));
+    }
+    if let Some(rest) = display_dir.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = PathBuf::from(display_dir);
+    if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn common_prefix(values: &[&str]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+    let mut prefix = (*first).to_string();
+    for value in &values[1..] {
+        while !value.starts_with(&prefix) {
+            let Some((index, _)) = prefix.char_indices().next_back() else {
+                return String::new();
+            };
+            prefix.truncate(index);
+        }
+    }
+    prefix
+}
+
+fn escape_shell_token(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        if ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn apply_room_lines(ui: &mut UiState, lines: Vec<RoomLine>) {
@@ -1641,6 +1967,17 @@ mod tests {
         RoomTuiState::new("alpha", PathBuf::from("."), AutoAcceptPolicy::none())
     }
 
+    fn temp_completion_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "skyffla-room-completion-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn parses_room_chat_and_dm_commands() {
         let mut state = test_state();
@@ -1797,6 +2134,67 @@ mod tests {
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    #[test]
+    fn send_path_completion_completes_single_folder_match() {
+        let dir = temp_completion_dir("single-folder");
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        std::fs::write(dir.join("report.txt"), b"report").unwrap();
+        let state = test_state();
+        let input = "/send fo";
+
+        let result = complete_send_path_input_with_base(input, input.len(), &state, &dir).unwrap();
+
+        assert_eq!(
+            result.edit,
+            Some(CompletionEdit {
+                start: 6,
+                end: 8,
+                replacement: "folder/".into(),
+            })
+        );
+        assert!(result.messages.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_path_completion_lists_files_and_folders_for_empty_path() {
+        let dir = temp_completion_dir("empty-path");
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        std::fs::write(dir.join("alpha.txt"), b"alpha").unwrap();
+        let state = test_state();
+        let input = "/send";
+
+        let result = complete_send_path_input_with_base(input, input.len(), &state, &dir).unwrap();
+
+        assert_eq!(result.edit, None);
+        assert_eq!(
+            result.messages,
+            vec!["path matches: alpha.txt  folder/".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_path_completion_handles_route_and_escaped_spaces() {
+        let dir = temp_completion_dir("route-spaces");
+        std::fs::create_dir_all(dir.join("folder name")).unwrap();
+        let state = test_state();
+        let input = "/send all folder\\ n";
+
+        let result = complete_send_path_input_with_base(input, input.len(), &state, &dir).unwrap();
+
+        assert_eq!(
+            result.edit,
+            Some(CompletionEdit {
+                start: 10,
+                end: input.len(),
+                replacement: "folder\\ name/".into(),
+            })
+        );
+        assert!(result.messages.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

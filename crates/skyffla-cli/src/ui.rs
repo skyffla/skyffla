@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -275,6 +276,28 @@ impl UiState {
         }
 
         None
+    }
+
+    pub(crate) fn input_line(&self) -> &str {
+        &self.input_buffer
+    }
+
+    pub(crate) fn cursor_index(&self) -> usize {
+        self.cursor_index
+    }
+
+    pub(crate) fn replace_input_range(&mut self, range: Range<usize>, replacement: &str) {
+        if !self.input_buffer.is_char_boundary(range.start)
+            || !self.input_buffer.is_char_boundary(range.end)
+            || range.start > range.end
+            || range.end > self.input_buffer.len()
+        {
+            return;
+        }
+        self.input_buffer.replace_range(range.clone(), replacement);
+        self.cursor_index = range.start + replacement.len();
+        self.history_index = None;
+        self.draft_buffer = None;
     }
 
     fn render_event_lines(&self, width: usize) -> Vec<String> {
