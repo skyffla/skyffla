@@ -102,6 +102,38 @@ In the default TUI:
 Treat the room ID as a short-lived shared secret. Prefer something less obvious
 than `demo`.
 
+## CLI Options
+
+```sh
+skyffla [OPTIONS] [ROOM_ID]
+```
+
+`ROOM_ID` can also come from `SKYFFLA_ROOM_ID`. A room ID passed on the command
+line wins over the environment variable.
+
+| Short | Long | Purpose |
+| --- | --- | --- |
+| `-H` | `--host` | Explicitly host the room instead of join-or-promote |
+| `-m` | `--machine` | Use the machine protocol instead of the default TUI |
+| `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once |
+| `-r` | `--receive` | Stay online and auto-accept incoming file or folder transfers |
+| `-c` | `--send-clipboard` | Stay online and send local clipboard text changes to room members |
+| `-C` | `--receive-clipboard` | Stay online and apply incoming clipboard text updates locally |
+| `-S <url>` | `--server <url>` | Use a rendezvous server instead of the default public server |
+| `-d <path>` | `--download-dir <path>` | Save accepted transfers in this directory |
+| `-n <name>` | `--name <name>` | Set the display name for this peer; overrides `SKYFFLA_NAME` |
+| `-j` | `--json` | Emit machine events as JSON |
+| `-l` | `--local` | Use LAN-only mDNS discovery instead of rendezvous |
+| `-a` | `--auto-accept` | Auto-accept incoming file, folder, and clipboard channels in TUI or machine mode |
+| `-R` | `--reject-all` | Reject incoming channels by default |
+| `-h` | `--help` | Print help |
+| `-V` | `--version` | Print version |
+
+`--send`, `--receive`, `--send-clipboard`, and `--receive-clipboard` are
+automation modes and are mutually exclusive. They already manage the machine
+runtime, logging, and transfer acceptance policy, so do not combine them with
+`--machine`, `--json`, `--auto-accept`, or `--reject-all`.
+
 ## Room Surfaces
 
 ### `machine`
@@ -177,6 +209,7 @@ that you control.
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
 - [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
+- [`docs/environment.md`](docs/environment.md): environment variables for the CLI, rendezvous server, wrappers, tests, and release tooling
 
 ## Local Development
 

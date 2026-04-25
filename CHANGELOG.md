@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Add short CLI aliases for common room and automation options, including `-a` for `--auto-accept`.
+
 ## [2.1.1] - 2026-04-19
 
 - Make `--auto-accept` a no-argument flag that accepts files, folders, and clipboard channels, and wire it into the room TUI so incoming transfers no longer require `/accept`.

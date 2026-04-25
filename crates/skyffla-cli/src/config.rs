@@ -13,7 +13,11 @@ pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8
 #[command(about = "Minimal Skyffla peer CLI", long_about = None)]
 #[command(version, propagate_version = true)]
 pub(crate) struct Cli {
-    #[arg(long, help = "Explicitly host the room instead of join-or-promote")]
+    #[arg(
+        short = 'H',
+        long,
+        help = "Explicitly host the room instead of join-or-promote"
+    )]
     pub(crate) host: bool,
     #[command(flatten)]
     pub(crate) session: SessionArgs,
@@ -21,46 +25,56 @@ pub(crate) struct Cli {
 
 #[derive(Args, Clone)]
 pub(crate) struct SessionArgs {
+    #[arg(env = "SKYFFLA_ROOM_ID")]
     pub(crate) room_id: Option<String>,
-    #[arg(long, help = "Use the machine protocol instead of the default TUI")]
+    #[arg(
+        short = 'm',
+        long,
+        help = "Use the machine protocol instead of the default TUI"
+    )]
     pub(crate) machine: bool,
     #[arg(
+        short = 's',
         long,
         help = "Stay online and send this file or folder to each room member once"
     )]
     pub(crate) send: Option<String>,
     #[arg(
+        short = 'r',
         long,
         help = "Stay online and auto-accept incoming file or folder transfers"
     )]
     pub(crate) receive: bool,
     #[arg(
+        short = 'c',
         long,
         help = "Stay online and send each local clipboard text change to room members"
     )]
     pub(crate) send_clipboard: bool,
     #[arg(
+        short = 'C',
         long,
         help = "Stay online and apply incoming clipboard text updates to the local clipboard"
     )]
     pub(crate) receive_clipboard: bool,
     #[arg(
+        short = 'S',
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
         default_value = DEFAULT_RENDEZVOUS_URL
     )]
     pub(crate) server: String,
-    #[arg(long, default_value = ".")]
+    #[arg(short = 'd', long, default_value = ".")]
     pub(crate) download_dir: PathBuf,
-    #[arg(long)]
+    #[arg(short = 'n', long, env = "SKYFFLA_NAME")]
     pub(crate) name: Option<String>,
-    #[arg(long)]
+    #[arg(short = 'j', long)]
     pub(crate) json: bool,
-    #[arg(long)]
+    #[arg(short = 'l', long)]
     pub(crate) local: bool,
-    #[arg(long, conflicts_with = "reject_all")]
+    #[arg(short = 'a', long, conflicts_with = "reject_all")]
     pub(crate) auto_accept: bool,
-    #[arg(long, conflicts_with = "auto_accept")]
+    #[arg(short = 'R', long, conflicts_with = "auto_accept")]
     pub(crate) reject_all: bool,
 }
 
@@ -107,6 +121,7 @@ impl SessionConfig {
             download_dir: args.download_dir,
             peer_name: resolve_peer_name(
                 args.name,
+                std::env::var("SKYFFLA_NAME").ok(),
                 std::env::var("USER").ok(),
                 std::env::var("USERNAME").ok(),
             ),
@@ -181,13 +196,15 @@ fn resolve_room_id(explicit: Option<String>, env_value: Option<String>) -> Optio
 
 fn resolve_peer_name(
     explicit: Option<String>,
+    skyffla_name_env: Option<String>,
     user_env: Option<String>,
     username_env: Option<String>,
 ) -> String {
-    explicit
-        .or(user_env)
-        .or(username_env)
+    [explicit, skyffla_name_env, user_env, username_env]
+        .into_iter()
+        .flatten()
         .filter(|value| !value.trim().is_empty())
+        .next()
         .unwrap_or_else(|| "skyffla-peer".into())
 }
 
@@ -220,6 +237,8 @@ fn validate_room_id(room_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         resolve_auto_accept_policy, resolve_automation_mode, resolve_peer_name, resolve_room_id,
         validate_room_id, AutomationMode, Cli, SessionArgs, DEFAULT_RENDEZVOUS_URL,
@@ -259,18 +278,37 @@ mod tests {
     #[test]
     fn peer_name_falls_back_through_expected_sources() {
         assert_eq!(
-            resolve_peer_name(Some("cli-name".into()), Some("user-name".into()), None),
+            resolve_peer_name(
+                Some("cli-name".into()),
+                Some("skyffla-name".into()),
+                Some("user-name".into()),
+                None
+            ),
             "cli-name"
         );
         assert_eq!(
-            resolve_peer_name(None, Some("user-name".into()), Some("username-name".into())),
+            resolve_peer_name(
+                None,
+                Some("skyffla-name".into()),
+                Some("user-name".into()),
+                Some("username-name".into())
+            ),
+            "skyffla-name"
+        );
+        assert_eq!(
+            resolve_peer_name(
+                None,
+                Some("   ".into()),
+                Some("user-name".into()),
+                Some("username-name".into())
+            ),
             "user-name"
         );
         assert_eq!(
-            resolve_peer_name(None, None, Some("username-name".into())),
+            resolve_peer_name(None, None, None, Some("username-name".into())),
             "username-name"
         );
-        assert_eq!(resolve_peer_name(None, None, None), "skyffla-peer");
+        assert_eq!(resolve_peer_name(None, None, None, None), "skyffla-peer");
     }
 
     #[test]
@@ -296,6 +334,10 @@ mod tests {
             .expect("--auto-accept should parse as a flag");
         assert!(cli.session.auto_accept);
 
+        let cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-a"])
+            .expect("-a should parse as --auto-accept");
+        assert!(cli.session.auto_accept);
+
         assert!(<Cli as clap::Parser>::try_parse_from([
             "skyffla",
             "room",
@@ -303,6 +345,59 @@ mod tests {
             "folder"
         ])
         .is_err());
+
+        assert!(
+            <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-a", "folder"]).is_err()
+        );
+    }
+
+    #[test]
+    fn short_options_match_long_options() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "skyffla",
+            "room",
+            "-H",
+            "-m",
+            "-j",
+            "-l",
+            "-n",
+            "beta",
+            "-S",
+            "http://127.0.0.1:8080",
+            "-d",
+            "downloads",
+            "-R",
+        ])
+        .expect("short options should parse");
+
+        assert!(cli.host);
+        assert!(cli.session.machine);
+        assert!(cli.session.json);
+        assert!(cli.session.local);
+        assert_eq!(cli.session.name.as_deref(), Some("beta"));
+        assert_eq!(cli.session.server, "http://127.0.0.1:8080");
+        assert_eq!(cli.session.download_dir, PathBuf::from("downloads"));
+        assert!(cli.session.reject_all);
+    }
+
+    #[test]
+    fn automation_short_options_match_long_options() {
+        let send_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-s", "file.txt"])
+            .expect("-s should parse as --send");
+        assert_eq!(send_cli.session.send.as_deref(), Some("file.txt"));
+
+        let receive_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-r"])
+            .expect("-r should parse as --receive");
+        assert!(receive_cli.session.receive);
+
+        let send_clipboard_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-c"])
+            .expect("-c should parse as --send-clipboard");
+        assert!(send_clipboard_cli.session.send_clipboard);
+
+        let receive_clipboard_cli =
+            <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-C"])
+                .expect("-C should parse as --receive-clipboard");
+        assert!(receive_clipboard_cli.session.receive_clipboard);
     }
 
     #[test]

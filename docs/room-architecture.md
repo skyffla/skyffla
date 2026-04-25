@@ -553,6 +553,27 @@ skyffla pipe <room-id> --to <member>
 skyffla send <room-id> <path> --to <member>
 ```
 
+Common top-level options:
+
+`<room-id>` can come from `SKYFFLA_ROOM_ID` when omitted from the command line.
+An explicit command-line room ID takes precedence over the environment variable.
+
+| Short | Long | Meaning |
+| --- | --- | --- |
+| `-H` | `--host` | explicitly host a room |
+| `-m` | `--machine` | use the machine protocol instead of the default TUI |
+| `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member |
+| `-r` | `--receive` | stay online and auto-accept incoming file or folder transfers |
+| `-c` | `--send-clipboard` | stay online and send clipboard text changes |
+| `-C` | `--receive-clipboard` | stay online and apply incoming clipboard text updates |
+| `-S <url>` | `--server <url>` | use a specific rendezvous server |
+| `-d <path>` | `--download-dir <path>` | save accepted transfers in a specific directory |
+| `-n <name>` | `--name <name>` | set the peer display name; overrides `SKYFFLA_NAME` |
+| `-j` | `--json` | emit machine events as JSON |
+| `-l` | `--local` | use LAN-only mDNS discovery instead of rendezvous |
+| `-a` | `--auto-accept` | auto-accept incoming file, folder, and clipboard channels |
+| `-R` | `--reject-all` | reject incoming channels by default |
+
 Not:
 
 ```sh
