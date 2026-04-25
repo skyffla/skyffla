@@ -293,6 +293,7 @@ struct AutomationState {
     latest_clipboard_text: Option<String>,
     stdin_spool_path: Option<PathBuf>,
     one_shot_targets_closed: bool,
+    intentional_leave: bool,
     stdout_receive_completed: bool,
 }
 
@@ -347,6 +348,7 @@ impl AutomationState {
             latest_clipboard_text: None,
             stdin_spool_path,
             one_shot_targets_closed: false,
+            intentional_leave: false,
             stdout_receive_completed: false,
         })
     }
@@ -714,7 +716,11 @@ async fn handle_machine_event(
             maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::RoomClosed { reason } => {
-            log.info(&format!("room closed: {reason}"));
+            if state.intentional_leave {
+                log.info("left room");
+            } else {
+                log.info(&format!("room closed: {reason}"));
+            }
             stdin.take();
         }
         MachineEvent::ChannelOpened {
@@ -976,6 +982,7 @@ async fn handle_machine_event(
                         if state.should_write_receive_to_stdout() {
                             write_received_file_to_stdout(log, &channel, &path)?;
                             state.stdout_receive_completed = true;
+                            state.intentional_leave = true;
                             send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
                             stdin.take();
                         }
@@ -1255,7 +1262,7 @@ async fn send_machine_command(
 }
 
 async fn maybe_finish_one_shot_send(
-    state: &AutomationState,
+    state: &mut AutomationState,
     stdin: &mut Option<tokio::process::ChildStdin>,
     log: &mut LogSink,
 ) -> Result<(), CliError> {
@@ -1264,6 +1271,7 @@ async fn maybe_finish_one_shot_send(
     }
     log.info("stdin send complete; leaving room after receiver finalization grace period");
     tokio::time::sleep(Duration::from_millis(250)).await;
+    state.intentional_leave = true;
     send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
     stdin.take();
     Ok(())
@@ -1726,6 +1734,7 @@ mod tests {
             latest_clipboard_text: None,
             stdin_spool_path: None,
             one_shot_targets_closed: false,
+            intentional_leave: false,
             stdout_receive_completed: false,
         };
 
