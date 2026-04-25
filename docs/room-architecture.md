@@ -529,7 +529,7 @@ skyffla <room-id> --receive --output - > logs.tgz
 That keeps a clean split:
 
 - `machine` = machine control and event API
-- `--send - --as <name>` = finite raw stdin payload into a room file channel
+- `--send - --as <name>` = finite one-shot raw stdin payload into a room file channel
 - `--receive --output -` = write one received file payload to stdout
 
 For files and folders, there should also be a clean split:
@@ -562,7 +562,7 @@ An explicit command-line room ID takes precedence over the environment variable.
 | --- | --- | --- |
 | `-H` | `--host` | explicitly host a room |
 | `-m` | `--machine` | use the machine protocol instead of the default TUI |
-| `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member; use `-` to read a finite file payload from stdin |
+| `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member; use `-` to read a finite one-shot file payload from stdin |
 |  | `--as <name>` | receiver-facing transfer name; required when `--send` is `-` |
 | `-r` | `--receive` | stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
 |  | `--output <path>` | receive output destination; use `-` with `--receive` to write one received file payload to stdout |

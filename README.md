@@ -115,7 +115,7 @@ line wins over the environment variable.
 | --- | --- | --- |
 | `-H` | `--host` | Explicitly host the room instead of join-or-promote |
 | `-m` | `--machine` | Use the machine protocol instead of the default TUI |
-| `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once; use `-` to read a finite file payload from stdin |
+| `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once; use `-` to read a finite one-shot file payload from stdin |
 |  | `--as <name>` | Receiver-facing transfer name; required when `--send` is `-` |
 | `-r` | `--receive` | Stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
 |  | `--output <path>` | Receive output destination; use `-` with `--receive` to write one received file payload to stdout |
@@ -136,7 +136,9 @@ automation modes and are mutually exclusive. They already manage the machine
 runtime, logging, and transfer acceptance policy, so do not combine them with
 `--machine`, `--json`, `--auto-accept`, or `--reject-all`.
 
-Use `--send - --as <name>` when a pipeline produces the payload:
+Use `--send - --as <name>` when a pipeline produces the payload. Stdin sends
+are one-shot: after at least one peer receives or rejects the payload, the sender
+leaves the room instead of staying online for late joiners.
 
 ```sh
 tar -czf - logs/ | skyffla copper-731 --send - --as logs.tgz

@@ -383,7 +383,7 @@ async fn automation_send_stdin_uses_as_name_for_saved_file() -> Result<()> {
     .await?;
     wait_for_room_ready(&server.url, &room).await?;
     sender
-        .expect_stdout_contains("send mode: staying online")
+        .expect_stdout_contains("send stdin mode: waiting for peers")
         .await?;
 
     let mut beta = AutoProc::spawn_receive(&room, &server.url, "beta", &beta_home).await?;
@@ -397,9 +397,12 @@ async fn automation_send_stdin_uses_as_name_for_saved_file() -> Result<()> {
     sender
         .expect_stdout_contains("completed file payload.bin to beta")
         .await?;
+    sender
+        .expect_stdout_contains("stdin send complete; leaving room")
+        .await?;
+    sender.wait_for_exit().await?;
     assert_eq!(std::fs::read(beta_home.join("payload.bin"))?, payload);
 
-    sender.shutdown().await?;
     beta.shutdown().await?;
     server.abort();
     Ok(())

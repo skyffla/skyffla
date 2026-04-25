@@ -37,7 +37,7 @@ pub(crate) struct SessionArgs {
         short = 's',
         long,
         value_name = "PATH",
-        help = "Stay online and send this file or folder to each room member once; use '-' to read a finite file payload from stdin"
+        help = "Stay online and send this file or folder to each room member once; use '-' to read a finite one-shot file payload from stdin"
     )]
     pub(crate) send: Option<String>,
     #[arg(

@@ -258,6 +258,13 @@ struct SendSource {
     raw_path: String,
     display_name: String,
     item_kind: TransferItemKind,
+    kind: SendSourceKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SendSourceKind {
+    Path,
+    Stdin,
 }
 
 enum ControllerMode {
@@ -285,6 +292,7 @@ struct AutomationState {
     channels: BTreeMap<ChannelId, ChannelState>,
     latest_clipboard_text: Option<String>,
     stdin_spool_path: Option<PathBuf>,
+    one_shot_targets_closed: bool,
     stdout_receive_completed: bool,
 }
 
@@ -338,18 +346,30 @@ impl AutomationState {
             channels: BTreeMap::new(),
             latest_clipboard_text: None,
             stdin_spool_path,
+            one_shot_targets_closed: false,
             stdout_receive_completed: false,
         })
     }
 
     fn startup_line(&self) -> String {
         match &self.mode {
-            ControllerMode::SendPath { source } => format!(
-                "send mode: staying online in room {} and offering {} {} to each member once",
-                self.room_id,
-                transfer_item_kind_label(&source.item_kind),
-                source.display_name
-            ),
+            ControllerMode::SendPath { source } => {
+                if source.kind == SendSourceKind::Stdin {
+                    format!(
+                        "send stdin mode: waiting for peers in room {} and offering {} {}",
+                        self.room_id,
+                        transfer_item_kind_label(&source.item_kind),
+                        source.display_name
+                    )
+                } else {
+                    format!(
+                        "send mode: staying online in room {} and offering {} {} to each member once",
+                        self.room_id,
+                        transfer_item_kind_label(&source.item_kind),
+                        source.display_name
+                    )
+                }
+            }
             ControllerMode::ReceivePaths {
                 output: ReceiveOutput::DownloadDir,
             } => format!(
@@ -504,6 +524,35 @@ impl AutomationState {
         )
     }
 
+    fn is_one_shot_send(&self) -> bool {
+        matches!(
+            self.mode,
+            ControllerMode::SendPath {
+                source: SendSource {
+                    kind: SendSourceKind::Stdin,
+                    ..
+                }
+            }
+        )
+    }
+
+    fn close_one_shot_targets_if_started(&mut self) {
+        if self.is_one_shot_send() && !self.sent_members.is_empty() {
+            self.one_shot_targets_closed = true;
+        }
+    }
+
+    fn should_finish_one_shot_send(&self) -> bool {
+        self.is_one_shot_send()
+            && self.one_shot_targets_closed
+            && !self.sent_members.is_empty()
+            && self.pending_offers.is_empty()
+            && !self.channels.values().any(|channel| {
+                matches!(channel.direction, ChannelDirection::Outgoing { .. })
+                    && matches!(channel.item_kind, AutomationItemKind::Transfer(_))
+            })
+    }
+
     fn has_outgoing_clipboard_channel(&self, member_id: &MemberId) -> bool {
         self.channels.values().any(|channel| {
             matches!(
@@ -626,6 +675,7 @@ async fn handle_machine_event(
                 .collect();
             log.info(&format!("members: {}", member_roster_line(state)));
             maybe_prepare_known_members(state, stdin, log).await?;
+            maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::MemberJoined { member } => {
             let joined_id = member.member_id.clone();
@@ -635,6 +685,8 @@ async fn handle_machine_event(
                 state.display_member(&joined_id)
             ));
             maybe_prepare_member(state, stdin, log, &joined_id).await?;
+            state.close_one_shot_targets_if_started();
+            maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::MemberLeft { member_id, reason } => {
             let name = state.display_member(&member_id);
@@ -659,6 +711,7 @@ async fn handle_machine_event(
                 .map(|value| format!(" ({value})"))
                 .unwrap_or_default();
             log.info(&format!("member left: {name}{suffix}"));
+            maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::RoomClosed { reason } => {
             log.info(&format!("room closed: {reason}"));
@@ -881,6 +934,7 @@ async fn handle_machine_event(
                 ));
             }
             state.clear_member_channel(&member_id, &channel_id);
+            maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::ChannelClosed {
             channel_id,
@@ -901,6 +955,7 @@ async fn handle_machine_event(
                 ));
             }
             state.clear_member_channel(&member_id, &channel_id);
+            maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::ChannelPathReceived {
             channel_id,
@@ -933,6 +988,7 @@ async fn handle_machine_event(
                         detail
                     )),
                 }
+                maybe_finish_one_shot_send(state, stdin, log).await?;
             }
         }
         MachineEvent::TransferProgress {
@@ -999,6 +1055,7 @@ async fn handle_machine_event(
                                     progress.as_ref()
                                 )
                             ));
+                            maybe_finish_one_shot_send(state, stdin, log).await?;
                         }
                     }
                 }
@@ -1021,6 +1078,7 @@ async fn handle_machine_event(
                 } else {
                     log.info(&format!("backend error {code}: {message}"));
                 }
+                maybe_finish_one_shot_send(state, stdin, log).await?;
             } else {
                 log.info(&format!("backend error {code}: {message}"));
             }
@@ -1067,6 +1125,7 @@ async fn maybe_prepare_known_members(
     for member_id in member_ids {
         maybe_prepare_member(state, stdin, log, &member_id).await?;
     }
+    state.close_one_shot_targets_if_started();
     Ok(())
 }
 
@@ -1195,6 +1254,21 @@ async fn send_machine_command(
     Ok(())
 }
 
+async fn maybe_finish_one_shot_send(
+    state: &AutomationState,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    log: &mut LogSink,
+) -> Result<(), CliError> {
+    if stdin.is_none() || !state.should_finish_one_shot_send() {
+        return Ok(());
+    }
+    log.info("stdin send complete; leaving room after receiver finalization grace period");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
+    stdin.take();
+    Ok(())
+}
+
 fn write_received_file_to_stdout(
     log: &mut LogSink,
     channel: &ChannelState,
@@ -1236,6 +1310,7 @@ fn resolve_send_source(
                 raw_path: spool_path.display().to_string(),
                 display_name,
                 item_kind: TransferItemKind::File,
+                kind: SendSourceKind::Stdin,
             },
             Some(spool_path),
         ));
@@ -1267,6 +1342,7 @@ fn resolve_send_source(
             raw_path: path.to_string(),
             display_name: display_name.unwrap_or(inferred_display_name),
             item_kind,
+            kind: SendSourceKind::Path,
         },
         None,
     ))
@@ -1595,7 +1671,7 @@ mod tests {
 
     use super::{
         progress_phase_rank, transfer_completion_detail, AutomationItemKind, AutomationState,
-        ChannelDirection, ChannelState, ControllerMode, ProgressState, SendSource,
+        ChannelDirection, ChannelState, ControllerMode, ProgressState, SendSource, SendSourceKind,
     };
     use skyffla_protocol::room::{ChannelId, MemberId, TransferItemKind, TransferPhase};
     use std::time::Instant;
@@ -1623,6 +1699,7 @@ mod tests {
                     raw_path: "report.txt".into(),
                     display_name: "report.txt".into(),
                     item_kind: TransferItemKind::File,
+                    kind: SendSourceKind::Path,
                 },
             },
             next_channel_index: 2,
@@ -1648,6 +1725,7 @@ mod tests {
             )]),
             latest_clipboard_text: None,
             stdin_spool_path: None,
+            one_shot_targets_closed: false,
             stdout_receive_completed: false,
         };
 
