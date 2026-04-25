@@ -400,6 +400,7 @@ async fn automation_send_stdin_uses_as_name_for_saved_file() -> Result<()> {
     sender
         .expect_stdout_contains("stdin send complete; leaving room")
         .await?;
+    sender.expect_stdout_contains("left room").await?;
     sender.wait_for_exit().await?;
     assert_eq!(std::fs::read(beta_home.join("payload.bin"))?, payload);
 

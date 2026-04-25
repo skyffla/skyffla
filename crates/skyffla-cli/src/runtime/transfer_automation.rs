@@ -716,9 +716,7 @@ async fn handle_machine_event(
             maybe_finish_one_shot_send(state, stdin, log).await?;
         }
         MachineEvent::RoomClosed { reason } => {
-            if state.intentional_leave {
-                log.info("left room");
-            } else {
+            if !(state.intentional_leave || (state.is_one_shot_send() && stdin.is_none())) {
                 log.info(&format!("room closed: {reason}"));
             }
             stdin.take();
@@ -984,6 +982,7 @@ async fn handle_machine_event(
                             state.stdout_receive_completed = true;
                             state.intentional_leave = true;
                             send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
+                            log.info("left room");
                             stdin.take();
                         }
                     }
@@ -1270,9 +1269,10 @@ async fn maybe_finish_one_shot_send(
         return Ok(());
     }
     log.info("stdin send complete; leaving room after receiver finalization grace period");
-    tokio::time::sleep(Duration::from_millis(250)).await;
     state.intentional_leave = true;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
+    log.info("left room");
     stdin.take();
     Ok(())
 }
