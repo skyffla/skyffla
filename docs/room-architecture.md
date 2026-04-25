@@ -517,26 +517,25 @@ The Python wrapper should mirror that schema with typed models, not invent a sep
 
 Using `machine` as the framed API does not remove Unix-style piping.
 
-It means raw piping should become a separate surface.
+It means raw piping should stay a focused extension of the automation surface.
 
 Examples:
 
 ```sh
-skyffla pipe <room-id> --to <member> --name report.pdf < report.pdf
-skyffla pipe <room-id> --to all --name report.pdf < report.pdf
+tar -czf - logs/ | skyffla <room-id> --send - --as logs.tgz
+skyffla <room-id> --receive --output - > logs.tgz
 ```
 
 That keeps a clean split:
 
 - `machine` = machine control and event API
-- `pipe` = raw stdin payload into a room channel
+- `--send - --as <name>` = finite raw stdin payload into a room file channel
+- `--receive --output -` = write one received file payload to stdout
 
 For files and folders, there should also be a clean split:
 
-- Skyffla `send`/`pipe` UX and room targeting stay in Skyffla
+- Skyffla `send` UX and room targeting stay in Skyffla
 - the file/folder data plane should use the native Skyffla transfer protocol
-
-This is cleaner than overloading one top-level mode for both jobs.
 
 ## CLI Shape
 
@@ -549,8 +548,9 @@ skyffla <room-id> --host
 skyffla <room-id>
 skyffla <room-id> --host --machine
 skyffla <room-id> --machine
-skyffla pipe <room-id> --to <member>
-skyffla send <room-id> <path> --to <member>
+skyffla <room-id> --send <path>
+skyffla <room-id> --send - --as <name>
+skyffla <room-id> --receive --output -
 ```
 
 Common top-level options:
@@ -562,8 +562,10 @@ An explicit command-line room ID takes precedence over the environment variable.
 | --- | --- | --- |
 | `-H` | `--host` | explicitly host a room |
 | `-m` | `--machine` | use the machine protocol instead of the default TUI |
-| `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member |
-| `-r` | `--receive` | stay online and auto-accept incoming file or folder transfers |
+| `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member; use `-` to read a finite file payload from stdin |
+|  | `--as <name>` | receiver-facing transfer name; required when `--send` is `-` |
+| `-r` | `--receive` | stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
+|  | `--output <path>` | receive output destination; use `-` with `--receive` to write one received file payload to stdout |
 | `-c` | `--send-clipboard` | stay online and send clipboard text changes |
 | `-C` | `--receive-clipboard` | stay online and apply incoming clipboard text updates |
 | `-S <url>` | `--server <url>` | use a specific rendezvous server |

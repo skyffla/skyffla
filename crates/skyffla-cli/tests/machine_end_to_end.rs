@@ -358,6 +358,54 @@ async fn automation_send_stays_online_and_sends_to_late_joiners() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_send_stdin_uses_as_name_for_saved_file() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let sender_home = fresh_test_dir("skyffla-cli-auto-stdin-send");
+    let beta_home = fresh_test_dir("skyffla-cli-auto-stdin-recv");
+    for home in [&sender_home, &beta_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let payload = b"stdin transfer payload";
+    let mut sender = AutoProc::spawn_send_stdin(
+        &room,
+        &server.url,
+        "sender",
+        &sender_home,
+        "payload.bin",
+        payload,
+    )
+    .await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    sender
+        .expect_stdout_contains("send mode: staying online")
+        .await?;
+
+    let mut beta = AutoProc::spawn_receive(&room, &server.url, "beta", &beta_home).await?;
+    sender
+        .expect_stdout_contains("offering file payload.bin")
+        .await?;
+    beta.expect_stdout_contains("auto-accepting file payload.bin")
+        .await?;
+    beta.expect_stdout_contains("saved file payload.bin to payload.bin")
+        .await?;
+    sender
+        .expect_stdout_contains("completed file payload.bin to beta")
+        .await?;
+    assert_eq!(std::fs::read(beta_home.join("payload.bin"))?, payload);
+
+    sender.shutdown().await?;
+    beta.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
@@ -419,6 +467,55 @@ async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
 
     host.shutdown().await?;
     receiver.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_receive_stdout_writes_one_file_to_stdout() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let host_home = fresh_test_dir("skyffla-cli-auto-stdout-host");
+    let receiver_home = fresh_test_dir("skyffla-cli-auto-stdout-receiver");
+    for home in [&host_home, &receiver_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+    std::fs::write(host_home.join("report.txt"), b"stdout receive payload\n")?;
+
+    let room = unique_room_name();
+    let mut host = MachineProc::spawn("host", &room, &server.url, "host", &host_home).await?;
+    wait_for_room_ready(&server.url, &room).await?;
+    let mut receiver =
+        AutoProc::spawn_receive_stdout(&room, &server.url, "receiver", &receiver_home).await?;
+    receiver
+        .expect_stderr_contains("receive stdout mode: staying online")
+        .await?;
+
+    host.expect_event("member joined", |event| {
+        event.get("type") == Some(&Value::String("member_joined".into()))
+            && event.pointer("/member/name") == Some(&Value::String("receiver".into()))
+    })
+    .await?;
+
+    host.send(r#"/send --channel stdout-file-1 --to m2 --path "~/report.txt""#)
+        .await?;
+    receiver
+        .expect_stderr_contains("writing file report.txt to stdout")
+        .await?;
+    receiver.wait_for_exit().await?;
+
+    let stdout = receiver.stdout_seen.lock().await.join("\n");
+    assert_eq!(stdout, "stdout receive payload");
+    let stderr = receiver.stderr_seen.lock().await.join("\n");
+    assert!(
+        stderr.contains("saved file report.txt to report.txt"),
+        "receiver stderr:\n{stderr}"
+    );
+
+    host.shutdown().await?;
     server.abort();
     Ok(())
 }
@@ -871,8 +968,44 @@ impl AutoProc {
         Self::spawn(room, server_url, name, home, "--send", Some(path)).await
     }
 
+    async fn spawn_send_stdin(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        payload_name: &str,
+        payload: &[u8],
+    ) -> Result<Self> {
+        Self::spawn_args(
+            room,
+            server_url,
+            name,
+            home,
+            &["--send", "-", "--as", payload_name],
+            Some(payload),
+        )
+        .await
+    }
+
     async fn spawn_receive(room: &str, server_url: &str, name: &str, home: &Path) -> Result<Self> {
         Self::spawn(room, server_url, name, home, "--receive", None).await
+    }
+
+    async fn spawn_receive_stdout(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+    ) -> Result<Self> {
+        Self::spawn_args(
+            room,
+            server_url,
+            name,
+            home,
+            &["--receive", "--output", "-"],
+            None,
+        )
+        .await
     }
 
     async fn spawn(
@@ -882,6 +1015,21 @@ impl AutoProc {
         home: &Path,
         mode_flag: &str,
         mode_value: Option<&str>,
+    ) -> Result<Self> {
+        let mut args = vec![mode_flag];
+        if let Some(mode_value) = mode_value {
+            args.push(mode_value);
+        }
+        Self::spawn_args(room, server_url, name, home, &args, None).await
+    }
+
+    async fn spawn_args(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        args: &[&str],
+        stdin_payload: Option<&[u8]>,
     ) -> Result<Self> {
         let bin = env!("CARGO_BIN_EXE_skyffla");
         let mut command = Command::new(bin);
@@ -893,17 +1041,29 @@ impl AutoProc {
             .arg(name)
             .current_dir(home)
             .env("HOME", home)
-            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        command.arg(mode_flag);
-        if let Some(mode_value) = mode_value {
-            command.arg(mode_value);
+        if stdin_payload.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
         }
+        command.args(args);
 
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn automation process {name}"))?;
+        if let Some(payload) = stdin_payload {
+            let mut stdin = child.stdin.take().context("child stdin missing")?;
+            stdin
+                .write_all(payload)
+                .await
+                .with_context(|| format!("failed to write stdin payload for {name}"))?;
+            stdin
+                .shutdown()
+                .await
+                .with_context(|| format!("failed to close stdin payload for {name}"))?;
+        }
         let stdout = child.stdout.take().context("child stdout missing")?;
         let stderr = child.stderr.take().context("child stderr missing")?;
         let (stdout_tx, stdout_rx) = mpsc::unbounded_channel();
@@ -945,6 +1105,40 @@ impl AutoProc {
                 Ok(Some(_)) => {}
                 Ok(None) => bail!(
                     "{} stdout closed while waiting for {needle}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                ),
+                Err(_) => bail!(
+                    "timed out waiting for {needle} on {}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                ),
+            }
+        }
+    }
+
+    async fn expect_stderr_contains(&mut self, needle: &str) -> Result<String> {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            {
+                let seen = self.stderr_seen.lock().await;
+                if let Some(found) = seen.iter().find(|line| line.contains(needle)).cloned() {
+                    return Ok(found);
+                }
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                bail!(
+                    "timed out waiting for {needle} on {}\n{}",
+                    self.label,
+                    self.debug_dump().await
+                );
+            };
+
+            match tokio::time::timeout(remaining, self.stderr_rx.recv()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!(
+                    "{} stderr closed while waiting for {needle}\n{}",
                     self.label,
                     self.debug_dump().await
                 ),

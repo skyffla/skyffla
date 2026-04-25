@@ -115,8 +115,10 @@ line wins over the environment variable.
 | --- | --- | --- |
 | `-H` | `--host` | Explicitly host the room instead of join-or-promote |
 | `-m` | `--machine` | Use the machine protocol instead of the default TUI |
-| `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once |
-| `-r` | `--receive` | Stay online and auto-accept incoming file or folder transfers |
+| `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once; use `-` to read a finite file payload from stdin |
+|  | `--as <name>` | Receiver-facing transfer name; required when `--send` is `-` |
+| `-r` | `--receive` | Stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
+|  | `--output <path>` | Receive output destination; use `-` with `--receive` to write one received file payload to stdout |
 | `-c` | `--send-clipboard` | Stay online and send local clipboard text changes to room members |
 | `-C` | `--receive-clipboard` | Stay online and apply incoming clipboard text updates locally |
 | `-S <url>` | `--server <url>` | Use a rendezvous server instead of the default public server |
@@ -133,6 +135,19 @@ line wins over the environment variable.
 automation modes and are mutually exclusive. They already manage the machine
 runtime, logging, and transfer acceptance policy, so do not combine them with
 `--machine`, `--json`, `--auto-accept`, or `--reject-all`.
+
+Use `--send - --as <name>` when a pipeline produces the payload:
+
+```sh
+tar -czf - logs/ | skyffla copper-731 --send - --as logs.tgz
+```
+
+Use `--receive --output -` to write one incoming file payload to stdout. Status
+logs go to stderr in this mode.
+
+```sh
+skyffla copper-731 --receive --output - > logs.tgz
+```
 
 ## Room Surfaces
 

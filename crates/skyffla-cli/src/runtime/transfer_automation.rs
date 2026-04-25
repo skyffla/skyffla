@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
 use std::future::pending;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
 
 use crate::cli_error::CliError;
-use crate::config::{AutomationMode, Role, SessionConfig};
+use crate::config::{AutomationMode, ReceiveOutput, Role, SessionConfig};
 use crate::runtime::clipboard::{ClipboardBackend, ClipboardEvent, ClipboardMode};
 
 pub(crate) async fn run_transfer_automation(
@@ -33,7 +34,7 @@ pub(crate) async fn run_transfer_automation(
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut clipboard = spawn_clipboard_backend(&state)?;
     let mut last_backend_status = None;
-    let mut log = LogSink::new();
+    let mut log = LogSink::new(state.logs_to_stderr());
 
     log.info(&state.startup_line());
 
@@ -98,16 +99,44 @@ pub(crate) async fn run_transfer_automation(
     }
 }
 
+enum LogTarget {
+    Stdout(io::Stdout),
+    Stderr(io::Stderr),
+}
+
+impl LogTarget {
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+        match self {
+            Self::Stdout(stdout) => stdout.write_fmt(args),
+            Self::Stderr(stderr) => stderr.write_fmt(args),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Stdout(stdout) => stdout.flush(),
+            Self::Stderr(stderr) => stderr.flush(),
+        }
+    }
+}
+
 struct LogSink {
-    stdout: io::Stdout,
+    target: LogTarget,
     interactive: bool,
     status_active: bool,
 }
 
 impl LogSink {
-    fn new() -> Self {
+    fn new(stderr: bool) -> Self {
+        if stderr {
+            return Self {
+                target: LogTarget::Stderr(io::stderr()),
+                interactive: io::stderr().is_terminal(),
+                status_active: false,
+            };
+        }
         Self {
-            stdout: io::stdout(),
+            target: LogTarget::Stdout(io::stdout()),
             interactive: io::stdout().is_terminal(),
             status_active: false,
         }
@@ -116,11 +145,11 @@ impl LogSink {
     fn info(&mut self, message: &str) {
         let line = format!("[{}] {message}", timestamp_now());
         if self.interactive && self.status_active {
-            let _ = write!(self.stdout, "\r\x1b[2K");
+            let _ = self.target.write_fmt(format_args!("\r\x1b[2K"));
             self.status_active = false;
         }
-        let _ = writeln!(self.stdout, "{line}");
-        let _ = self.stdout.flush();
+        let _ = self.target.write_fmt(format_args!("{line}\n"));
+        let _ = self.target.flush();
     }
 
     fn status(&mut self, message: &str) {
@@ -129,15 +158,15 @@ impl LogSink {
             return;
         }
         let line = format!("[{}] {message}", timestamp_now());
-        let _ = write!(self.stdout, "\r\x1b[2K{line}");
-        let _ = self.stdout.flush();
+        let _ = self.target.write_fmt(format_args!("\r\x1b[2K{line}"));
+        let _ = self.target.flush();
         self.status_active = true;
     }
 
     fn finish_status(&mut self) {
         if self.interactive && self.status_active {
-            let _ = writeln!(self.stdout);
-            let _ = self.stdout.flush();
+            let _ = self.target.write_fmt(format_args!("\n"));
+            let _ = self.target.flush();
             self.status_active = false;
         }
     }
@@ -233,7 +262,7 @@ struct SendSource {
 
 enum ControllerMode {
     SendPath { source: SendSource },
-    ReceivePaths,
+    ReceivePaths { output: ReceiveOutput },
     SendClipboard,
     ReceiveClipboard,
 }
@@ -255,6 +284,8 @@ struct AutomationState {
     pending_offers: BTreeMap<MemberId, ChannelId>,
     channels: BTreeMap<ChannelId, ChannelState>,
     latest_clipboard_text: Option<String>,
+    stdin_spool_path: Option<PathBuf>,
+    stdout_receive_completed: bool,
 }
 
 struct ChannelState {
@@ -284,11 +315,14 @@ enum ChannelDirection {
 
 impl AutomationState {
     fn new(config: &SessionConfig, automation: AutomationMode) -> Result<Self, CliError> {
+        let mut stdin_spool_path = None;
         let mode = match automation {
-            AutomationMode::SendPath { path } => ControllerMode::SendPath {
-                source: resolve_send_source(&path)?,
-            },
-            AutomationMode::ReceivePaths => ControllerMode::ReceivePaths,
+            AutomationMode::SendPath { path, display_name } => {
+                let (source, spool_path) = resolve_send_source(&path, display_name)?;
+                stdin_spool_path = spool_path;
+                ControllerMode::SendPath { source }
+            }
+            AutomationMode::ReceivePaths { output } => ControllerMode::ReceivePaths { output },
             AutomationMode::SendClipboard => ControllerMode::SendClipboard,
             AutomationMode::ReceiveClipboard => ControllerMode::ReceiveClipboard,
         };
@@ -303,6 +337,8 @@ impl AutomationState {
             pending_offers: BTreeMap::new(),
             channels: BTreeMap::new(),
             latest_clipboard_text: None,
+            stdin_spool_path,
+            stdout_receive_completed: false,
         })
     }
 
@@ -314,8 +350,16 @@ impl AutomationState {
                 transfer_item_kind_label(&source.item_kind),
                 source.display_name
             ),
-            ControllerMode::ReceivePaths => format!(
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::DownloadDir,
+            } => format!(
                 "receive mode: staying online in room {} and auto-accepting incoming transfers",
+                self.room_id
+            ),
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout,
+            } => format!(
+                "receive stdout mode: staying online in room {} and writing one incoming file to stdout",
                 self.room_id
             ),
             ControllerMode::SendClipboard => format!(
@@ -403,16 +447,61 @@ impl AutomationState {
         }
     }
 
-    fn allows_incoming_files(&self) -> bool {
-        matches!(self.mode, ControllerMode::ReceivePaths)
-    }
-
     fn allows_incoming_clipboard(&self) -> bool {
         matches!(self.mode, ControllerMode::ReceiveClipboard)
     }
 
     fn is_send_clipboard_mode(&self) -> bool {
         matches!(self.mode, ControllerMode::SendClipboard)
+    }
+
+    fn logs_to_stderr(&self) -> bool {
+        matches!(
+            self.mode,
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout
+            }
+        )
+    }
+
+    fn should_auto_accept_transfer(&self, item_kind: &TransferItemKind) -> bool {
+        match &self.mode {
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::DownloadDir,
+            } => true,
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout,
+            } => matches!(item_kind, TransferItemKind::File) && !self.stdout_receive_completed,
+            _ => false,
+        }
+    }
+
+    fn transfer_rejection_reason(&self, item_kind: &TransferItemKind) -> &'static str {
+        match &self.mode {
+            ControllerMode::SendPath { .. } => "peer is in send mode",
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::DownloadDir,
+            } => "",
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout,
+            } if matches!(item_kind, TransferItemKind::Folder) => {
+                "stdout receive mode only accepts file transfers"
+            }
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout,
+            } => "stdout receive mode already received one file",
+            ControllerMode::SendClipboard => "peer is in clipboard send mode",
+            ControllerMode::ReceiveClipboard => "peer is in clipboard receive mode",
+        }
+    }
+
+    fn should_write_receive_to_stdout(&self) -> bool {
+        matches!(
+            self.mode,
+            ControllerMode::ReceivePaths {
+                output: ReceiveOutput::Stdout
+            }
+        )
     }
 
     fn has_outgoing_clipboard_channel(&self, member_id: &MemberId) -> bool {
@@ -444,6 +533,14 @@ impl AutomationState {
     }
 }
 
+impl Drop for AutomationState {
+    fn drop(&mut self) {
+        if let Some(path) = &self.stdin_spool_path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn progress_phase_rank(phase: &TransferPhase) -> u8 {
     match phase {
         TransferPhase::Preparing => 0,
@@ -458,7 +555,7 @@ fn spawn_clipboard_backend(state: &AutomationState) -> Result<Option<ClipboardBa
         ControllerMode::ReceiveClipboard => {
             ClipboardBackend::start(ClipboardMode::ApplyOnly).map(Some)
         }
-        ControllerMode::SendPath { .. } | ControllerMode::ReceivePaths => Ok(None),
+        ControllerMode::SendPath { .. } | ControllerMode::ReceivePaths { .. } => Ok(None),
     }
 }
 
@@ -594,13 +691,8 @@ async fn handle_machine_event(
                         .map(format_bytes)
                         .map(|value| format!(" ({value})"))
                         .unwrap_or_default();
-                    let auto_accept = state.allows_incoming_files();
-                    let rejection_reason = match &state.mode {
-                        ControllerMode::SendPath { .. } => "peer is in send mode",
-                        ControllerMode::ReceivePaths => "",
-                        ControllerMode::SendClipboard => "peer is in clipboard send mode",
-                        ControllerMode::ReceiveClipboard => "peer is in clipboard receive mode",
-                    };
+                    let auto_accept = state.should_auto_accept_transfer(&item_kind);
+                    let rejection_reason = state.transfer_rejection_reason(&item_kind);
                     log.info(&format!(
                         "incoming {} {} from {}{}",
                         transfer_item_kind_label(&item_kind),
@@ -818,13 +910,21 @@ async fn handle_machine_event(
             if let Some(channel) = state.channels.remove(&channel_id) {
                 let detail = transfer_completion_detail(size, channel.progress.as_ref());
                 match channel.direction {
-                    ChannelDirection::Incoming { .. } => log.info(&format!(
-                        "saved {} {} to {} ({})",
-                        automation_item_label(&channel.item_kind),
-                        channel.name,
-                        display_path(&path),
-                        detail
-                    )),
+                    ChannelDirection::Incoming { .. } => {
+                        log.info(&format!(
+                            "saved {} {} to {} ({})",
+                            automation_item_label(&channel.item_kind),
+                            channel.name,
+                            display_path(&path),
+                            detail
+                        ));
+                        if state.should_write_receive_to_stdout() {
+                            write_received_file_to_stdout(log, &channel, &path)?;
+                            state.stdout_receive_completed = true;
+                            send_machine_command(stdin, &MachineCommand::LeaveRoom).await?;
+                            stdin.take();
+                        }
+                    }
                     ChannelDirection::Outgoing { member_id } => log.info(&format!(
                         "completed {} {} to {} ({})",
                         automation_item_label(&channel.item_kind),
@@ -1020,7 +1120,7 @@ async fn maybe_prepare_member(
                     member_id: member_id.clone(),
                 },
                 path: source.raw_path.clone(),
-                name: None,
+                name: Some(source.display_name.clone()),
                 mime: None,
             };
             send_machine_command(stdin, &command).await?;
@@ -1063,7 +1163,7 @@ async fn maybe_prepare_member(
             )
             .await?;
         }
-        ControllerMode::ReceivePaths | ControllerMode::ReceiveClipboard => {}
+        ControllerMode::ReceivePaths { .. } | ControllerMode::ReceiveClipboard => {}
     }
     Ok(())
 }
@@ -1095,9 +1195,54 @@ async fn send_machine_command(
     Ok(())
 }
 
-fn resolve_send_source(path: &str) -> Result<SendSource, CliError> {
+fn write_received_file_to_stdout(
+    log: &mut LogSink,
+    channel: &ChannelState,
+    path: &str,
+) -> Result<(), CliError> {
+    if !matches!(
+        channel.item_kind,
+        AutomationItemKind::Transfer(TransferItemKind::File)
+    ) {
+        return Err(CliError::usage(
+            "--output - only supports received file transfers",
+        ));
+    }
+    log.finish_status();
+    log.info(&format!("writing file {} to stdout", channel.name));
+    let mut file = fs::File::open(path).map_err(|error| {
+        CliError::local_io(format!("failed to open received file {path}: {error}"))
+    })?;
+    let mut stdout = io::stdout().lock();
+    io::copy(&mut file, &mut stdout).map_err(|error| {
+        CliError::local_io(format!("failed to write received file to stdout: {error}"))
+    })?;
+    stdout
+        .flush()
+        .map_err(|error| CliError::local_io(format!("failed to flush stdout: {error}")))?;
+    Ok(())
+}
+
+fn resolve_send_source(
+    path: &str,
+    display_name: Option<String>,
+) -> Result<(SendSource, Option<PathBuf>), CliError> {
+    if path == "-" {
+        let display_name = display_name
+            .ok_or_else(|| CliError::usage("--send - reads from stdin and requires --as <name>"))?;
+        let spool_path = spool_stdin_to_temp_file(&display_name)?;
+        return Ok((
+            SendSource {
+                raw_path: spool_path.display().to_string(),
+                display_name,
+                item_kind: TransferItemKind::File,
+            },
+            Some(spool_path),
+        ));
+    }
+
     let expanded_path = expand_user_path(path);
-    let display_name = expanded_path
+    let inferred_display_name = expanded_path
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| expanded_path.display().to_string());
@@ -1117,11 +1262,55 @@ fn resolve_send_source(path: &str) -> Result<SendSource, CliError> {
             expanded_path.display()
         )));
     };
-    Ok(SendSource {
-        raw_path: path.to_string(),
-        display_name,
-        item_kind,
-    })
+    Ok((
+        SendSource {
+            raw_path: path.to_string(),
+            display_name: display_name.unwrap_or(inferred_display_name),
+            item_kind,
+        },
+        None,
+    ))
+}
+
+fn spool_stdin_to_temp_file(display_name: &str) -> Result<PathBuf, CliError> {
+    let temp_dir = std::env::temp_dir();
+    let sanitized_name = Path::new(display_name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("stdin.bin");
+    for attempt in 0..100_u32 {
+        let path = temp_dir.join(format!(
+            "skyffla-stdin-{}-{attempt}-{sanitized_name}",
+            std::process::id()
+        ));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(CliError::local_io(format!(
+                    "failed to create stdin spool file {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        io::copy(&mut io::stdin().lock(), &mut file).map_err(|error| {
+            CliError::local_io(format!(
+                "failed to read stdin into {}: {error}",
+                path.display()
+            ))
+        })?;
+        file.flush().map_err(|error| {
+            CliError::local_io(format!(
+                "failed to flush stdin spool file {}: {error}",
+                path.display()
+            ))
+        })?;
+        return Ok(path);
+    }
+    Err(CliError::local_io(
+        "failed to create a unique stdin spool file",
+    ))
 }
 
 fn expand_user_path(path: &str) -> PathBuf {
@@ -1458,6 +1647,8 @@ mod tests {
                 },
             )]),
             latest_clipboard_text: None,
+            stdin_spool_path: None,
+            stdout_receive_completed: false,
         };
 
         let sending = state

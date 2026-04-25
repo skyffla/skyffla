@@ -1483,7 +1483,8 @@ async fn send_path_from_join(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let resolved = resolve_send_path(&path)?;
-    let name = name.or(Some(resolved.display_name.clone()));
+    let display_name = name.unwrap_or_else(|| resolved.display_name.clone());
+    let channel_name = Some(display_name.clone());
     if matches!(resolved.item_kind, TransferItemKind::File) {
         let size = resolved.provisional_size.ok_or_else(|| {
             CliError::runtime("single-file transfer is missing a provisional size")
@@ -1493,7 +1494,7 @@ async fn send_path_from_join(
                 channel_id.as_str().to_string(),
                 &resolved.expanded_path,
                 size,
-                resolved.display_name.clone(),
+                display_name.clone(),
                 None,
                 Some(spawn_join_transfer_progress_forwarder(peer_tx.clone())),
             )
@@ -1506,7 +1507,7 @@ async fn send_path_from_join(
         from: self_member,
         from_name: state.local_name.clone(),
         to: to.clone(),
-        name: name.clone(),
+        name: channel_name.clone(),
         size: resolved.provisional_size,
         mime: mime.clone(),
         transfer: Some(provisional_transfer.clone()),
@@ -1517,7 +1518,7 @@ async fn send_path_from_join(
             channel_id: channel_id.clone(),
             kind: ChannelKind::File,
             to,
-            name,
+            name: channel_name,
             size: resolved.provisional_size,
             mime,
             transfer: Some(provisional_transfer),
@@ -1539,7 +1540,7 @@ async fn send_path_from_join(
         channel_id,
         resolved.expanded_path,
         resolved.item_kind,
-        resolved.display_name,
+        display_name,
     );
     Ok(())
 }
@@ -1693,7 +1694,8 @@ async fn send_path_from_host(
     mime: Option<String>,
 ) -> Result<(), CliError> {
     let resolved = resolve_send_path(&path)?;
-    let open_name = name.or(Some(resolved.display_name.clone()));
+    let display_name = name.unwrap_or_else(|| resolved.display_name.clone());
+    let open_name = Some(display_name.clone());
     if matches!(resolved.item_kind, TransferItemKind::File) {
         let size = resolved.provisional_size.ok_or_else(|| {
             CliError::runtime("single-file transfer is missing a provisional size")
@@ -1703,7 +1705,7 @@ async fn send_path_from_host(
                 channel_id.as_str().to_string(),
                 &resolved.expanded_path,
                 size,
-                resolved.display_name.clone(),
+                display_name.clone(),
                 None,
                 Some(spawn_host_transfer_progress_forwarder(host_tx.clone())),
             )
@@ -1747,7 +1749,7 @@ async fn send_path_from_host(
         channel_id,
         resolved.expanded_path,
         resolved.item_kind,
-        resolved.display_name,
+        display_name,
     );
     Ok(())
 }

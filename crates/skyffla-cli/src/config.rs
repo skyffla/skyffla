@@ -36,15 +36,28 @@ pub(crate) struct SessionArgs {
     #[arg(
         short = 's',
         long,
-        help = "Stay online and send this file or folder to each room member once"
+        value_name = "PATH",
+        help = "Stay online and send this file or folder to each room member once; use '-' to read a finite file payload from stdin"
     )]
     pub(crate) send: Option<String>,
     #[arg(
+        long = "as",
+        value_name = "NAME",
+        help = "Receiver-facing transfer name; required when --send is '-'"
+    )]
+    pub(crate) as_name: Option<String>,
+    #[arg(
         short = 'r',
         long,
-        help = "Stay online and auto-accept incoming file or folder transfers"
+        help = "Stay online and auto-accept incoming file or folder transfers, saving them to --download-dir unless --output is set"
     )]
     pub(crate) receive: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Receive output destination; use '-' with --receive to write one received file payload to stdout"
+    )]
+    pub(crate) output: Option<String>,
     #[arg(
         short = 'c',
         long,
@@ -66,7 +79,12 @@ pub(crate) struct SessionArgs {
     pub(crate) server: String,
     #[arg(short = 'd', long, default_value = ".")]
     pub(crate) download_dir: PathBuf,
-    #[arg(short = 'n', long, env = "SKYFFLA_NAME")]
+    #[arg(
+        short = 'n',
+        long,
+        env = "SKYFFLA_NAME",
+        help = "Set the display name for this peer; overrides SKYFFLA_NAME"
+    )]
     pub(crate) name: Option<String>,
     #[arg(short = 'j', long)]
     pub(crate) json: bool,
@@ -86,10 +104,21 @@ pub(crate) enum Role {
 
 #[derive(Clone, Debug)]
 pub(crate) enum AutomationMode {
-    SendPath { path: String },
-    ReceivePaths,
+    SendPath {
+        path: String,
+        display_name: Option<String>,
+    },
+    ReceivePaths {
+        output: ReceiveOutput,
+    },
     SendClipboard,
     ReceiveClipboard,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiveOutput {
+    DownloadDir,
+    Stdout,
 }
 
 #[derive(Clone)]
@@ -135,6 +164,13 @@ impl SessionConfig {
 }
 
 fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>, CliError> {
+    if args.as_name.is_some() && args.send.is_none() {
+        return Err(CliError::usage("--as can only be used with --send"));
+    }
+    if args.output.is_some() && !args.receive {
+        return Err(CliError::usage("--output can only be used with --receive"));
+    }
+
     let selected_modes = [
         args.send.is_some(),
         args.receive,
@@ -176,15 +212,44 @@ fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>,
             args.send_clipboard,
             args.receive_clipboard,
         ) {
-            (Some(path), false, false, false) => {
-                Some(AutomationMode::SendPath { path: path.clone() })
-            }
-            (None, true, false, false) => Some(AutomationMode::ReceivePaths),
+            (Some(path), false, false, false) => Some(AutomationMode::SendPath {
+                path: path.clone(),
+                display_name: resolve_send_display_name(path, args.as_name.as_deref())?,
+            }),
+            (None, true, false, false) => Some(AutomationMode::ReceivePaths {
+                output: resolve_receive_output(args.output.as_deref())?,
+            }),
             (None, false, true, false) => Some(AutomationMode::SendClipboard),
             (None, false, false, true) => Some(AutomationMode::ReceiveClipboard),
             _ => None,
         },
     )
+}
+
+fn resolve_send_display_name(
+    path: &str,
+    as_name: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    let as_name = as_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if path == "-" && as_name.is_none() {
+        return Err(CliError::usage(
+            "--send - reads from stdin and requires --as <name>",
+        ));
+    }
+    Ok(as_name)
+}
+
+fn resolve_receive_output(output: Option<&str>) -> Result<ReceiveOutput, CliError> {
+    match output.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(ReceiveOutput::DownloadDir),
+        Some("-") => Ok(ReceiveOutput::Stdout),
+        Some(value) => Err(CliError::usage(format!(
+            "--output currently only supports '-' with --receive, got {value:?}"
+        ))),
+    }
 }
 
 fn resolve_room_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
@@ -241,16 +306,19 @@ mod tests {
 
     use super::{
         resolve_auto_accept_policy, resolve_automation_mode, resolve_peer_name, resolve_room_id,
-        validate_room_id, AutomationMode, Cli, SessionArgs, DEFAULT_RENDEZVOUS_URL,
+        validate_room_id, AutomationMode, Cli, ReceiveOutput, SessionArgs, DEFAULT_RENDEZVOUS_URL,
     };
     use crate::accept_policy::AutoAcceptPolicy;
+    use clap::CommandFactory;
 
     fn session_args() -> SessionArgs {
         SessionArgs {
             room_id: Some("room".into()),
             machine: false,
             send: None,
+            as_name: None,
             receive: false,
+            output: None,
             send_clipboard: false,
             receive_clipboard: false,
             server: DEFAULT_RENDEZVOUS_URL.into(),
@@ -434,8 +502,34 @@ mod tests {
         args.receive = true;
         assert!(matches!(
             resolve_automation_mode(&args).unwrap(),
-            Some(AutomationMode::ReceivePaths)
+            Some(AutomationMode::ReceivePaths {
+                output: ReceiveOutput::DownloadDir
+            })
         ));
+    }
+
+    #[test]
+    fn receive_stdout_mode_is_selected() {
+        let mut args = session_args();
+        args.receive = true;
+        args.output = Some("-".into());
+        assert!(matches!(
+            resolve_automation_mode(&args).unwrap(),
+            Some(AutomationMode::ReceivePaths {
+                output: ReceiveOutput::Stdout
+            })
+        ));
+    }
+
+    #[test]
+    fn receive_output_requires_receive_mode() {
+        let mut args = session_args();
+        args.output = Some("-".into());
+        assert!(resolve_automation_mode(&args).is_err());
+
+        args.receive = true;
+        args.output = Some("payload.bin".into());
+        assert!(resolve_automation_mode(&args).is_err());
     }
 
     #[test]
@@ -444,8 +538,40 @@ mod tests {
         args.send = Some("~/report.txt".into());
         assert!(matches!(
             resolve_automation_mode(&args).unwrap(),
-            Some(AutomationMode::SendPath { path }) if path == "~/report.txt"
+            Some(AutomationMode::SendPath { path, display_name }) if path == "~/report.txt" && display_name.is_none()
         ));
+    }
+
+    #[test]
+    fn send_stdin_requires_as_name() {
+        let mut args = session_args();
+        args.send = Some("-".into());
+        assert!(resolve_automation_mode(&args).is_err());
+
+        args.as_name = Some("payload.bin".into());
+        assert!(matches!(
+            resolve_automation_mode(&args).unwrap(),
+            Some(AutomationMode::SendPath { path, display_name })
+                if path == "-" && display_name.as_deref() == Some("payload.bin")
+        ));
+    }
+
+    #[test]
+    fn as_name_requires_send_mode() {
+        let mut args = session_args();
+        args.as_name = Some("payload.bin".into());
+        assert!(resolve_automation_mode(&args).is_err());
+    }
+
+    #[test]
+    fn long_help_documents_pipe_style_transfer_options() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("--as <NAME>"));
+        assert!(help.contains("--output <PATH>"));
+        assert!(help.contains("stdin"));
+        assert!(help.contains("stdout"));
+        assert!(help.contains("display name for this peer"));
     }
 
     #[test]
