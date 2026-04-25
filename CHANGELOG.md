@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-04-25
+
 - Add short CLI aliases for common room and automation options, including `-a` for `--auto-accept`.
 
 ## [2.1.1] - 2026-04-19
