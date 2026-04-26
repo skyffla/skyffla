@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-04-26
+
 - Add stdin and stdout one-shot transfer automation for finite payloads, including `--send -`, `--as`, and `--receive --output -`.
 - Add native room pipe streaming with `--pipe`, `--pipe-send`, `--pipe-receive`, `--quiet`, live late-joining receivers, and lossless backpressure across active receivers.
 - Clarify pipe-mode help and docs, including sender-first buffering behavior for the first receiver and no replay for later receivers.
