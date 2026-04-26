@@ -78,6 +78,7 @@ pub(crate) async fn run_pipe_host(
     let (pipe_tx, mut pipe_rx) = mpsc::unbounded_channel();
     let pipe_accept_handle = matches!(direction, PipeDirection::Send)
         .then(|| spawn_pipe_accept_loop(transport.clone(), pipe_tx));
+    let (local_receive_tx, mut local_receive_rx) = mpsc::unbounded_channel();
 
     let mut peers = BTreeMap::<MemberId, PeerHandle>::new();
     let mut sender = PipeSenderState::default();
@@ -96,6 +97,7 @@ pub(crate) async fn run_pipe_host(
                     &mut room,
                     &host_member,
                     &host_tx,
+                    &local_receive_tx,
                     &mut peers,
                     &mut machine_state_entered,
                     &mut sender,
@@ -104,6 +106,11 @@ pub(crate) async fn run_pipe_host(
                 ).await? {
                     break;
                 }
+            }
+            local_receive = local_receive_rx.recv(), if matches!(direction, PipeDirection::Receive) => {
+                let Some(local_receive) = local_receive else { break; };
+                local_receive?;
+                break;
             }
             accepted = pipe_rx.recv(), if matches!(direction, PipeDirection::Send) => {
                 let Some(accepted) = accepted else { break; };
@@ -212,6 +219,7 @@ async fn handle_host_pipe_input(
     room: &mut RoomEngine,
     host_member: &MemberId,
     host_tx: &mpsc::UnboundedSender<HostInput>,
+    local_receive_tx: &mpsc::UnboundedSender<Result<(), CliError>>,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
     machine_state_entered: &mut bool,
     sender: &mut PipeSenderState,
@@ -246,6 +254,7 @@ async fn handle_host_pipe_input(
                 peers,
                 sender,
                 direction,
+                local_receive_tx,
                 member_id,
                 command,
             )
@@ -386,6 +395,7 @@ async fn handle_host_peer_command(
     peers: &mut BTreeMap<MemberId, PeerHandle>,
     sender: &mut PipeSenderState,
     direction: PipeDirection,
+    local_receive_tx: &mpsc::UnboundedSender<Result<(), CliError>>,
     member_id: MemberId,
     command: MachineCommand,
 ) -> Result<bool, CliError> {
@@ -447,6 +457,7 @@ async fn handle_host_peer_command(
                     host_member,
                     peers,
                     direction,
+                    local_receive_tx,
                     event,
                 )
                 .await?;
@@ -549,6 +560,7 @@ async fn handle_host_local_pipe_event(
     host_member: &MemberId,
     peers: &mut BTreeMap<MemberId, PeerHandle>,
     direction: PipeDirection,
+    local_receive_tx: &mpsc::UnboundedSender<Result<(), CliError>>,
     event: MachineEvent,
 ) -> Result<bool, CliError> {
     if let MachineEvent::ChannelOpened {
@@ -581,19 +593,30 @@ async fn handle_host_local_pipe_event(
             .accept_channel(&host_member, &channel_id)
             .map_err(room_error)?;
         deliver_authority_events(&host_member, routed, peers, |_| Ok(false))?;
-        let mut stdout = tokio::io::stdout();
-        transport
-            .receive_pipe_stream_to_writer(
-                &PeerTicket {
-                    encoded: provider_ticket,
-                },
-                channel_id.as_str(),
-                host_member.as_str(),
-                &mut stdout,
-            )
-            .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
-        return Ok(true);
+        let transport = transport.clone();
+        let local_receive_tx = local_receive_tx.clone();
+        let channel_id = channel_id.as_str().to_string();
+        let host_member = host_member.as_str().to_string();
+        tokio::spawn(async move {
+            let result = async {
+                let mut stdout = tokio::io::stdout();
+                transport
+                    .receive_pipe_stream_to_writer(
+                        &PeerTicket {
+                            encoded: provider_ticket,
+                        },
+                        &channel_id,
+                        &host_member,
+                        &mut stdout,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| CliError::transport(error.to_string()))
+            }
+            .await;
+            let _ = local_receive_tx.send(result);
+        });
+        return Ok(false);
     }
     Ok(false)
 }
@@ -889,14 +912,14 @@ async fn maybe_run_join_sender_stream(
     log.info("all receivers accepted pipe stream; streaming stdin");
     broadcast_stdin_to_pipe_receivers(log, sender).await?;
     if let Some(channel_id) = sender.channel_id.clone() {
-        send_authority_command(
+        let _ = send_authority_command(
             authority_send,
             MachineCommand::CloseChannel {
                 channel_id,
                 reason: Some("done".into()),
             },
         )
-        .await?;
+        .await;
     }
     if !config.quiet {
         log.info("pipe stream complete");
@@ -1179,7 +1202,6 @@ struct PipeSenderState {
 impl PipeSenderState {
     fn ready(&self) -> bool {
         !self.target_members.is_empty()
-            && self.accepted_members.len() == self.target_members.len()
             && self.streams.len() == self.target_members.len()
             && !self.completed
     }

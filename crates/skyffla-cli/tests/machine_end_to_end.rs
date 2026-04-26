@@ -452,6 +452,63 @@ async fn native_pipe_streams_stdin_to_receiver_stdout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pipe_streams_stdin_to_multiple_receivers() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let receiver1_home = fresh_test_dir("skyffla-cli-pipe-receiver1");
+    let receiver2_home = fresh_test_dir("skyffla-cli-pipe-receiver2");
+    let sender_home = fresh_test_dir("skyffla-cli-pipe-sender-multi");
+    for home in [&receiver1_home, &receiver2_home, &sender_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut receiver1 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver1",
+        &receiver1_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    wait_for_room_ready(&server.url, &room).await?;
+
+    let mut receiver2 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver2",
+        &receiver2_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    receiver1.expect_stderr_contains("connected to receiver2").await?;
+    receiver2.expect_stderr_contains("connected to receiver1").await?;
+
+    let mut sender = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "sender",
+        &sender_home,
+        &["--pipe-send"],
+        Some(b"voff\n"),
+    )
+    .await?;
+
+    receiver1.expect_stdout_contains("voff").await?;
+    receiver2.expect_stdout_contains("voff").await?;
+    receiver1.wait_for_exit().await?;
+    receiver2.wait_for_exit().await?;
+    sender.wait_for_exit().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());
