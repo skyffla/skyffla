@@ -195,7 +195,11 @@ impl IncomingPipeStream {
         self.send
             .finish()
             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-        let _ = time::timeout(Duration::from_millis(250), self.request_recv.read_to_end(1024)).await;
+        let _ = time::timeout(
+            Duration::from_millis(250),
+            self.request_recv.read_to_end(1024),
+        )
+        .await;
         Ok(())
     }
 }

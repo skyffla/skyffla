@@ -585,7 +585,11 @@ async fn maybe_open_host_late_pipe_receiver(
     };
     ensure_pipe_supported(peer.pipe_stream_version, &peer.member.name, "remote peer")?;
     let channel_id = sender.next_late_channel_id(member_id)?;
-    sender.add_target(member_id.clone(), peer.member.name.clone(), channel_id.clone());
+    sender.add_target(
+        member_id.clone(),
+        peer.member.name.clone(),
+        channel_id.clone(),
+    );
     let routed = room
         .open_channel(
             host_member,
@@ -867,10 +871,13 @@ async fn handle_join_machine_event(
             let _ = send_authority_command(authority_send, MachineCommand::LeaveRoom).await;
             Ok(true)
         }
-        MachineEvent::ChannelAccepted { channel_id, member_id, .. }
-            if sender.channel_matches_member(&channel_id, &member_id) =>
-        {
-            maybe_start_join_sender_stream(_config.quiet, log, sender, broadcast_done_tx.clone()).await
+        MachineEvent::ChannelAccepted {
+            channel_id,
+            member_id,
+            ..
+        } if sender.channel_matches_member(&channel_id, &member_id) => {
+            maybe_start_join_sender_stream(_config.quiet, log, sender, broadcast_done_tx.clone())
+                .await
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -1150,11 +1157,7 @@ async fn run_pipe_broadcast(
         }
     }
     for receiver in receivers.values_mut() {
-        receiver
-            .stream
-            .finish()
-            .await
-            .ok();
+        receiver.stream.finish().await.ok();
     }
     Ok(())
 }
@@ -1383,7 +1386,9 @@ impl PipeSenderState {
     }
 
     fn channel_contains(&self, channel_id: &ChannelId) -> bool {
-        self.member_channels.values().any(|value| value == channel_id)
+        self.member_channels
+            .values()
+            .any(|value| value == channel_id)
     }
 
     fn channel_contains_str(&self, channel_id: &str) -> bool {

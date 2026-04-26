@@ -486,8 +486,12 @@ async fn native_pipe_streams_stdin_to_multiple_receivers() -> Result<()> {
         None,
     )
     .await?;
-    receiver1.expect_stderr_contains("connected to receiver2").await?;
-    receiver2.expect_stderr_contains("connected to receiver1").await?;
+    receiver1
+        .expect_stderr_contains("connected to receiver2")
+        .await?;
+    receiver2
+        .expect_stderr_contains("connected to receiver1")
+        .await?;
 
     let mut sender = AutoProc::spawn_args(
         &room,
@@ -616,8 +620,12 @@ async fn native_pipe_continues_after_receiver_disconnect() -> Result<()> {
         None,
     )
     .await?;
-    receiver1.expect_stderr_contains("connected to receiver2").await?;
-    receiver2.expect_stderr_contains("connected to receiver1").await?;
+    receiver1
+        .expect_stderr_contains("connected to receiver2")
+        .await?;
+    receiver2
+        .expect_stderr_contains("connected to receiver1")
+        .await?;
 
     let mut sender = AutoProc::spawn_args_live_stdin(
         &room,
