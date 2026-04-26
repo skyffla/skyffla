@@ -12,7 +12,7 @@ use skyffla_protocol::TransportCapability;
 use tokio::sync::{mpsc, Mutex};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
 };
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
@@ -167,25 +167,87 @@ pub struct TransferRuntimeProgress {
     pub bytes_total: Option<u64>,
 }
 
+#[derive(Debug)]
+pub struct IncomingPipeStream {
+    pub channel_id: String,
+    pub member_id: String,
+    _connection: IrohConnection,
+    send: SendStream,
+    request_recv: RecvStream,
+    credit_recv: RecvStream,
+}
+
+impl IncomingPipeStream {
+    pub async fn read_credit(&mut self) -> Result<u64, TransportError> {
+        read_transfer_credit(&mut self.credit_recv, "pipe receiver credit").await
+    }
+
+    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        self.send
+            .write_all(bytes)
+            .await
+            .map_err(|error| TransportError::DirectFileSend(error.to_string()))
+    }
+
+    pub async fn finish(&mut self) -> Result<(), TransportError> {
+        self.send
+            .finish()
+            .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
+        let _ = self.request_recv.read_to_end(1024).await;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TransferRequestKind {
+    Manifest,
+    Entry,
+    Pipe,
+}
+
+impl Default for TransferRequestKind {
+    fn default() -> Self {
+        Self::Manifest
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct TransferRequest {
+    #[serde(default)]
+    kind: TransferRequestKind,
     channel_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     entry_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    member_id: Option<String>,
 }
 
 impl TransferRequest {
     fn manifest(channel_id: &str) -> Self {
         Self {
+            kind: TransferRequestKind::Manifest,
             channel_id: channel_id.to_string(),
             entry_path: None,
+            member_id: None,
         }
     }
 
     fn entry(channel_id: String, entry_path: String) -> Self {
         Self {
+            kind: TransferRequestKind::Entry,
             channel_id,
             entry_path: Some(entry_path),
+            member_id: None,
+        }
+    }
+
+    fn pipe(channel_id: &str, member_id: &str) -> Self {
+        Self {
+            kind: TransferRequestKind::Pipe,
+            channel_id: channel_id.to_string(),
+            entry_path: None,
+            member_id: Some(member_id.to_string()),
         }
     }
 }
@@ -202,6 +264,7 @@ enum TransferResponse {
         total_size: u64,
         entries: Vec<PreparedDirectoryEntry>,
     },
+    ReadyPipe,
     FinalizedFile {
         content_hash: String,
     },
@@ -613,6 +676,123 @@ impl IrohTransport {
         Ok(total_size)
     }
 
+    pub async fn receive_pipe_stream_to_writer<W>(
+        &self,
+        provider: &PeerTicket,
+        channel_id: &str,
+        member_id: &str,
+        writer: &mut W,
+    ) -> Result<u64, TransportError>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let (_connection, mut send, mut recv) = request_transfer_connection(
+            self,
+            provider,
+            TransferRequest::pipe(channel_id, member_id),
+        )
+        .await?;
+        match read_transfer_response_required(&mut recv).await? {
+            TransferResponse::ReadyPipe => {}
+            TransferResponse::Error { message } => {
+                return Err(TransportError::DirectFileReceive(message));
+            }
+            other => {
+                return Err(TransportError::DirectFileReceive(format!(
+                    "transfer channel {channel_id} returned unexpected pipe response {other:?}"
+                )));
+            }
+        }
+
+        let (mut credit_send, _) = _connection.open_data_stream().await?;
+        let mut bytes_complete = 0_u64;
+        let mut credit_pending = 0_u64;
+        let mut credit_stream_open = true;
+        let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
+        write_transfer_credit(
+            &mut credit_send,
+            TRANSFER_WINDOW_BYTES,
+            "pipe receiver credit",
+        )
+        .await?;
+        loop {
+            let read = match tokio::io::AsyncReadExt::read(&mut recv, &mut buffer).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    return Err(TransportError::DirectFileReceive(error.to_string()));
+                }
+            };
+            writer
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+            writer
+                .flush()
+                .await
+                .map_err(|error| TransportError::DirectFileReceive(error.to_string()))?;
+            bytes_complete = bytes_complete.saturating_add(read as u64);
+            credit_pending = credit_pending.saturating_add(read as u64);
+            if credit_stream_open && credit_pending >= TRANSFER_CREDIT_GRANT_BYTES {
+                if write_transfer_credit(&mut credit_send, credit_pending, "pipe receiver credit")
+                    .await
+                    .is_ok()
+                {
+                    credit_pending = 0;
+                } else {
+                    credit_stream_open = false;
+                }
+            }
+        }
+        if credit_stream_open && credit_pending > 0 {
+            let _ = write_transfer_credit(&mut credit_send, credit_pending, "pipe receiver credit")
+                .await;
+        }
+        let _ = credit_send.finish();
+        let _ = send.finish();
+        Ok(bytes_complete)
+    }
+
+    pub async fn accept_pipe_stream(
+        &self,
+        connection: IrohConnection,
+    ) -> Result<IncomingPipeStream, TransportError> {
+        let (mut send, mut recv) = connection.accept_data_stream().await?;
+        let request: Option<TransferRequest> =
+            read_transfer_message(&mut recv, "pipe request").await?;
+        let Some(request) = request else {
+            return Err(TransportError::DirectFileSend(
+                "pipe connection closed before request".into(),
+            ));
+        };
+        if request.kind != TransferRequestKind::Pipe {
+            write_transfer_error_response(&mut send, "expected pipe stream request".into()).await?;
+            return Err(TransportError::DirectFileSend(
+                "expected pipe stream request".into(),
+            ));
+        }
+        let Some(member_id) = request.member_id.clone() else {
+            write_transfer_error_response(
+                &mut send,
+                "pipe stream request missing member id".into(),
+            )
+            .await?;
+            return Err(TransportError::DirectFileSend(
+                "pipe stream request missing member id".into(),
+            ));
+        };
+        write_transfer_message(&mut send, &TransferResponse::ReadyPipe, "pipe response").await?;
+        let (_, credit_recv) = connection.accept_data_stream().await?;
+        Ok(IncomingPipeStream {
+            channel_id: request.channel_id,
+            member_id,
+            _connection: connection,
+            send,
+            request_recv: recv,
+            credit_recv,
+        })
+    }
+
     pub async fn serve_registered_transfer(
         &self,
         connection: IrohConnection,
@@ -623,6 +803,17 @@ impl IrohTransport {
         let Some(request) = request else {
             return Ok(());
         };
+        if request.kind == TransferRequestKind::Pipe {
+            write_transfer_error_response(
+                &mut send,
+                format!(
+                    "pipe stream channel {} is not served by file transfer runtime",
+                    request.channel_id
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
         let registered = self
             .inner
             .outgoing_transfers
@@ -984,6 +1175,9 @@ fn expect_ready_file_response(
         TransferResponse::ReadyDirectory { .. } => Err(TransportError::DirectFileReceive(format!(
             "transfer channel {channel_id} is a directory, not a file"
         ))),
+        TransferResponse::ReadyPipe => Err(TransportError::DirectFileReceive(format!(
+            "transfer channel {channel_id} is a pipe stream, not a file"
+        ))),
         TransferResponse::FinalizedFile { .. } => Err(TransportError::DirectFileReceive(format!(
             "transfer channel {channel_id} sent file finalization before file metadata"
         ))),
@@ -1003,6 +1197,9 @@ fn expect_ready_directory_response(
         TransferResponse::Error { message } => Err(TransportError::DirectFileReceive(message)),
         TransferResponse::ReadyFile { .. } => Err(TransportError::DirectFileReceive(format!(
             "transfer channel {channel_id} is a file, not a directory"
+        ))),
+        TransferResponse::ReadyPipe => Err(TransportError::DirectFileReceive(format!(
+            "transfer channel {channel_id} is a pipe stream, not a directory"
         ))),
         TransferResponse::FinalizedFile { .. } => Err(TransportError::DirectFileReceive(format!(
             "transfer channel {channel_id} sent file finalization where directory metadata was expected"
@@ -2043,6 +2240,64 @@ mod tests {
         accept_task.await.expect("accept task should join");
         host.close().await;
         joiner.close().await;
+    }
+
+    #[tokio::test]
+    async fn pipe_stream_transfers_exact_bytes() {
+        let Some(sender) = bind_or_skip().await else {
+            return;
+        };
+        let Some(receiver) = bind_or_skip().await else {
+            return;
+        };
+        let sender_ticket = sender.local_ticket().expect("sender ticket should encode");
+        let sender_server = sender.clone();
+
+        let accept_task = tokio::spawn(async move {
+            let connection = sender_server
+                .accept_transfer_connection()
+                .await
+                .expect("sender should accept pipe connection");
+            let mut stream = sender_server
+                .accept_pipe_stream(connection)
+                .await
+                .expect("sender should accept pipe request");
+            assert_eq!(stream.channel_id, "pipe1");
+            assert_eq!(stream.member_id, "m2");
+            let credit = stream
+                .read_credit()
+                .await
+                .expect("receiver should grant credit");
+            assert!(credit >= 12);
+            stream
+                .write_all(b"pipe payload")
+                .await
+                .expect("sender should write pipe bytes");
+            stream
+                .finish()
+                .await
+                .expect("sender should finish pipe stream");
+        });
+
+        let (mut read_end, mut write_end) = tokio::io::duplex(1024);
+        let receive_task = tokio::spawn(async move {
+            receiver
+                .receive_pipe_stream_to_writer(&sender_ticket, "pipe1", "m2", &mut write_end)
+                .await
+                .expect("receiver should complete pipe stream");
+            receiver.close().await;
+        });
+
+        let mut received = Vec::new();
+        read_end
+            .read_to_end(&mut received)
+            .await
+            .expect("reader should receive pipe bytes");
+        assert_eq!(received, b"pipe payload");
+
+        accept_task.await.expect("accept task should join");
+        receive_task.await.expect("receive task should join");
+        sender.close().await;
     }
 
     #[tokio::test]

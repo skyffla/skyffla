@@ -410,6 +410,48 @@ async fn automation_send_stdin_uses_as_name_for_saved_file() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pipe_streams_stdin_to_receiver_stdout() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let receiver_home = fresh_test_dir("skyffla-cli-pipe-receiver");
+    let sender_home = fresh_test_dir("skyffla-cli-pipe-sender");
+    for home in [&receiver_home, &sender_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut receiver = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver",
+        &receiver_home,
+        &["--pipe-receive", "--quiet"],
+        None,
+    )
+    .await?;
+    wait_for_room_ready(&server.url, &room).await?;
+
+    let mut sender = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "sender",
+        &sender_home,
+        &["--pipe-send", "--quiet"],
+        Some(b"voff\n"),
+    )
+    .await?;
+
+    receiver.expect_stdout_contains("voff").await?;
+    receiver.wait_for_exit().await?;
+    sender.wait_for_exit().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automation_receive_auto_accepts_multiple_transfers() -> Result<()> {
     let Some(server) = TestServer::spawn().await? else {
         return Ok(());

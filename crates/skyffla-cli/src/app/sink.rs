@@ -6,16 +6,21 @@ use crate::config::SessionConfig;
 #[derive(Clone, Copy)]
 pub(crate) struct EventSink {
     json: bool,
+    quiet: bool,
 }
 
 impl EventSink {
     pub(crate) fn from_config(config: &SessionConfig) -> Self {
         Self {
             json: config.json_events,
+            quiet: config.quiet,
         }
     }
 
     pub(crate) fn emit_runtime_event(&self, event: RuntimeEvent) {
+        if self.quiet {
+            return;
+        }
         if self.json {
             self.emit_json_event(runtime_event_json(event));
             return;
@@ -65,6 +70,9 @@ impl EventSink {
     }
 
     pub(crate) fn emit_json_event(&self, value: serde_json::Value) {
+        if self.quiet {
+            return;
+        }
         eprintln!("{}", value);
     }
 }
@@ -179,6 +187,7 @@ mod tests {
                 peer_fingerprint: Some("fp".into()),
                 peer_ticket: None,
                 file_transfer_version: None,
+                pipe_stream_version: None,
             },
         };
 

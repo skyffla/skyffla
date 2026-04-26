@@ -796,6 +796,7 @@ async fn handle_host_peer_connected(
         member,
         ticket,
         file_transfer_version: connected.peer.file_transfer_version.clone(),
+        pipe_stream_version: connected.peer.pipe_stream_version,
         pending_events: Vec::new(),
     };
     introduce_member_to_existing_peers(&peer_handle, peers)?;
@@ -2520,6 +2521,7 @@ mod tests {
                 member: beta.member,
                 ticket: Some("provider-ticket".into()),
                 file_transfer_version: None,
+                pipe_stream_version: None,
                 pending_events: Vec::new(),
             },
         );

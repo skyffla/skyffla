@@ -531,11 +531,21 @@ That keeps a clean split:
 - `machine` = machine control and event API
 - `--send - --as <name>` = finite one-shot raw stdin payload into a room file channel
 - `--receive --output -` = write one received file payload to stdout
+- `--pipe` / `--pipe-send` / `--pipe-receive` = native raw byte stream with no file metadata
 
 For files and folders, there should also be a clean split:
 
 - Skyffla `send` UX and room targeting stay in Skyffla
 - the file/folder data plane should use the native Skyffla transfer protocol
+
+Native pipe mode is intentionally stream-oriented instead of file-oriented:
+
+- no filename, size, temp file, or digest metadata
+- sender exits when stdin reaches EOF and all active receiver streams close
+- receiver exits when the stream closes
+- the receiver set is fixed when the pipe channel opens
+- broadcast is lossless; the slowest active receiver applies backpressure
+- sender warning logs identify receivers that block the stream for more than 5 seconds
 
 ## CLI Shape
 
@@ -551,6 +561,8 @@ skyffla <room-id> --machine
 skyffla <room-id> --send <path>
 skyffla <room-id> --send - --as <name>
 skyffla <room-id> --receive --output -
+producer | skyffla <room-id> --pipe
+skyffla <room-id> --pipe > output.bin
 ```
 
 Common top-level options:
@@ -568,10 +580,14 @@ An explicit command-line room ID takes precedence over the environment variable.
 |  | `--output <path>` | receive output destination; use `-` with `--receive` to write one received file payload to stdout |
 | `-c` | `--send-clipboard` | stay online and send clipboard text changes |
 | `-C` | `--receive-clipboard` | stay online and apply incoming clipboard text updates |
+|  | `--pipe` | stream raw bytes through the room, inferring send/receive from stdin/stdout redirection |
+|  | `--pipe-send` | stream raw stdin bytes to all current room members |
+|  | `--pipe-receive` | receive one raw pipe stream and write it to stdout |
 | `-S <url>` | `--server <url>` | use a specific rendezvous server |
 | `-d <path>` | `--download-dir <path>` | save accepted transfers in a specific directory |
 | `-n <name>` | `--name <name>` | set the peer display name; overrides `SKYFFLA_NAME` |
 | `-j` | `--json` | emit machine events as JSON |
+| `-q` | `--quiet` | suppress human status and warning logs in automation and pipe modes |
 | `-l` | `--local` | use LAN-only mDNS discovery instead of rendezvous |
 | `-a` | `--auto-accept` | auto-accept incoming file, folder, and clipboard channels |
 | `-R` | `--reject-all` | reject incoming channels by default |

@@ -489,7 +489,9 @@ impl RoomEngine {
                 .ok_or_else(|| RoomEngineError::UnknownChannel {
                     channel_id: channel_id.clone(),
                 })?;
-        if matches!(event, MachineEvent::ChannelData { .. }) && channel.kind == ChannelKind::File {
+        if matches!(event, MachineEvent::ChannelData { .. })
+            && matches!(channel.kind, ChannelKind::File | ChannelKind::Pipe)
+        {
             return Err(RoomEngineError::ChannelDataUnsupported {
                 channel_id: channel_id.clone(),
                 kind: channel.kind.clone(),
@@ -1186,6 +1188,35 @@ mod tests {
         let err = room
             .send_channel_data(&host_member, &channel_id("c1"), "raw bytes".into())
             .expect_err("file channels should not accept inline data");
+        assert!(matches!(
+            err,
+            RoomEngineError::ChannelDataUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn pipe_channels_reject_inline_data() {
+        let mut room = RoomEngine::new(room_id("warehouse"), "alpha", None).expect("room");
+        let beta = room.join("beta", None).expect("beta joins");
+        let host_member = room.host_member().clone();
+
+        room.open_channel(
+            &host_member,
+            channel_id("pipe1"),
+            ChannelKind::Pipe,
+            Route::Member {
+                member_id: beta.member.member_id.clone(),
+            },
+            Some("pipe".into()),
+            None,
+            None,
+            None,
+        )
+        .expect("pipe channel opens");
+
+        let err = room
+            .send_channel_data(&host_member, &channel_id("pipe1"), "raw bytes".into())
+            .expect_err("pipe channels should not accept inline data");
         assert!(matches!(
             err,
             RoomEngineError::ChannelDataUnsupported { .. }

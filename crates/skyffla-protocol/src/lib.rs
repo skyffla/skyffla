@@ -10,8 +10,9 @@ pub use framing::{
     decode_frame, encode_frame, read_frame, write_frame, FrameError, MAX_FRAME_SIZE,
 };
 
-pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+pub const WIRE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
 pub const FILE_TRANSFER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+pub const PIPE_STREAM_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtocolVersion {
@@ -152,6 +153,8 @@ pub struct Hello {
     pub protocol_version: ProtocolVersion,
     #[serde(default)]
     pub file_transfer_version: Option<ProtocolVersion>,
+    #[serde(default)]
+    pub pipe_stream_version: Option<ProtocolVersion>,
     pub session_id: String,
     pub peer_name: String,
     pub peer_fingerprint: Option<String>,
@@ -317,6 +320,30 @@ mod tests {
     #[test]
     fn frame_round_trip_via_buffer() {
         let envelope = sample_envelope();
+        let encoded = encode_frame(&envelope).expect("encoding should succeed");
+        let decoded: Envelope = decode_frame(&encoded).expect("decoding should succeed");
+
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn hello_round_trips_pipe_stream_version() {
+        let envelope = Envelope::new(
+            "demo-session",
+            "m1",
+            ControlMessage::Hello(Hello {
+                protocol_version: WIRE_PROTOCOL_VERSION,
+                file_transfer_version: Some(FILE_TRANSFER_PROTOCOL_VERSION),
+                pipe_stream_version: Some(PIPE_STREAM_PROTOCOL_VERSION),
+                session_id: "demo-session".into(),
+                peer_name: "alpha".into(),
+                peer_fingerprint: None,
+                peer_ticket: Some("ticket".into()),
+                capabilities: Capabilities::default(),
+                transport_capabilities: vec![TransportCapability::NativeDirect],
+            }),
+        );
+
         let encoded = encode_frame(&envelope).expect("encoding should succeed");
         let decoded: Envelope = decode_frame(&encoded).expect("decoding should succeed");
 

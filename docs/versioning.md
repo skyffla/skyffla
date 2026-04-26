@@ -54,6 +54,13 @@ single-file overlap where receivers may download before the sender publishes
 the final whole-file digest, and lightweight-plan folder overlap where
 per-file verification happens inside bounded transfer workers.
 
+Native pipe-stream compatibility is negotiated separately in the hello payload
+via `PIPE_STREAM_PROTOCOL_VERSION`. Peers may still connect on the same wire
+major version while refusing pipe channels when the advertised pipe-stream major
+version is missing or incompatible. The current `1.x` pipe-stream major covers
+raw byte streams over the transfer ALPN with explicit receiver credit and no
+file metadata.
+
 ### Machine protocol
 
 Defined in:
@@ -76,8 +83,9 @@ blob-required metadata to explicit transfer metadata. It also includes
 provisional transfer opens, the distinct `channel_transfer_finalized` event for
 single-file transfers, and the lightweight folder-plan behavior where
 `channel_transfer_ready` means the native directory receive path may begin
-without an upfront whole-transfer digest. Wrappers speaking the older `1.x`
-file-channel shape should be treated as incompatible with `2.x`.
+without an upfront whole-transfer digest. The current minor adds the `pipe`
+channel kind for native raw stream coordination. Wrappers speaking the older
+`1.x` file-channel shape should be treated as incompatible with `2.x`.
 
 ### Rendezvous HTTP API
 

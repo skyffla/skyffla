@@ -4,6 +4,7 @@ pub(crate) mod machine;
 pub(crate) mod machine_command_line;
 pub(crate) mod machine_links;
 pub(crate) mod machine_state;
+pub(crate) mod pipe;
 pub(crate) mod room_tui;
 pub(crate) mod session;
 pub(crate) mod transfer_automation;

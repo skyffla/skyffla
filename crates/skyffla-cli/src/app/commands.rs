@@ -14,13 +14,14 @@ use crate::net::local_discovery::{
 };
 use crate::net::rendezvous::{delete_room, register_room, resolve_room, RegisterRoomError};
 use crate::runtime::machine::run_machine_host;
+use crate::runtime::pipe::run_pipe_host;
 use crate::runtime::room_tui::run_room_tui;
 use crate::runtime::session::run_connected_session;
 use crate::runtime::transfer_automation::run_transfer_automation;
 
 pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
     let config = SessionConfig::from_args(Role::Host, args)?;
-    if config.automation.is_some() {
+    if !config.is_pipe_mode() && config.automation.is_some() {
         return run_transfer_automation(Role::Host, &config).await;
     }
     if should_use_room_tui(&config) {
@@ -61,7 +62,7 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
 
 pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
     let mut config = SessionConfig::from_args(Role::Join, args)?;
-    if config.automation.is_some() {
+    if !config.is_pipe_mode() && config.automation.is_some() {
         return run_transfer_automation(Role::Join, &config).await;
     }
     if should_use_room_tui(&config) {
@@ -125,7 +126,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
 }
 
 fn should_use_room_tui(config: &SessionConfig) -> bool {
-    !config.machine
+    !config.machine && config.automation.is_none()
 }
 
 async fn connect_to_registered_peer(
@@ -248,7 +249,8 @@ async fn wait_for_incoming_peer(
             .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
 
-    if config.json_events {
+    if config.quiet {
+    } else if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
             "room_id": config.room_id,
@@ -267,7 +269,7 @@ async fn wait_for_incoming_peer(
         );
     }
 
-    let run_host = run_machine_host(config, sink, session, &transport);
+    let run_host = run_room_host_runtime(config, sink, session, &transport);
     tokio::pin!(run_host);
     let result = tokio::select! {
         result = &mut run_host => result,
@@ -299,6 +301,19 @@ async fn wait_for_incoming_peer(
     result
 }
 
+async fn run_room_host_runtime(
+    config: &SessionConfig,
+    sink: &EventSink,
+    session: &mut SessionMachine,
+    transport: &IrohTransport,
+) -> Result<(), CliError> {
+    if config.is_pipe_mode() {
+        run_pipe_host(config, sink, session, transport).await
+    } else {
+        run_machine_host(config, sink, session, transport).await
+    }
+}
+
 async fn wait_for_incoming_peer_local(
     config: &SessionConfig,
     sink: &EventSink,
@@ -313,7 +328,8 @@ async fn wait_for_incoming_peer_local(
             .map_err(|error| CliError::runtime(error.to_string()))?,
     ));
 
-    if config.json_events {
+    if config.quiet {
+    } else if config.json_events {
         sink.emit_json_event(json!({
             "event": "waiting",
             "room_id": config.room_id,
@@ -332,7 +348,7 @@ async fn wait_for_incoming_peer_local(
         );
     }
 
-    let run_host = run_machine_host(config, sink, session, &transport);
+    let run_host = run_room_host_runtime(config, sink, session, &transport);
     tokio::pin!(run_host);
     let result = tokio::select! {
         result = &mut run_host => result,

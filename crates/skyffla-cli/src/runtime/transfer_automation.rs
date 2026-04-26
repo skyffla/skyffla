@@ -34,7 +34,7 @@ pub(crate) async fn run_transfer_automation(
     let mut backend = spawn_machine_backend(role, config).await?;
     let mut clipboard = spawn_clipboard_backend(&state)?;
     let mut last_backend_status = None;
-    let mut log = LogSink::new(state.logs_to_stderr());
+    let mut log = LogSink::new(state.logs_to_stderr(), config.quiet);
 
     log.info(&state.startup_line());
 
@@ -124,25 +124,31 @@ struct LogSink {
     target: LogTarget,
     interactive: bool,
     status_active: bool,
+    quiet: bool,
 }
 
 impl LogSink {
-    fn new(stderr: bool) -> Self {
+    fn new(stderr: bool, quiet: bool) -> Self {
         if stderr {
             return Self {
                 target: LogTarget::Stderr(io::stderr()),
                 interactive: io::stderr().is_terminal(),
                 status_active: false,
+                quiet,
             };
         }
         Self {
             target: LogTarget::Stdout(io::stdout()),
             interactive: io::stdout().is_terminal(),
             status_active: false,
+            quiet,
         }
     }
 
     fn info(&mut self, message: &str) {
+        if self.quiet {
+            return;
+        }
         let line = format!("[{}] {message}", timestamp_now());
         if self.interactive && self.status_active {
             let _ = self.target.write_fmt(format_args!("\r\x1b[2K"));
@@ -153,6 +159,9 @@ impl LogSink {
     }
 
     fn status(&mut self, message: &str) {
+        if self.quiet {
+            return;
+        }
         if !self.interactive {
             self.info(message);
             return;
@@ -164,6 +173,9 @@ impl LogSink {
     }
 
     fn finish_status(&mut self) {
+        if self.quiet {
+            return;
+        }
         if self.interactive && self.status_active {
             let _ = self.target.write_fmt(format_args!("\n"));
             let _ = self.target.flush();
@@ -334,6 +346,9 @@ impl AutomationState {
             AutomationMode::ReceivePaths { output } => ControllerMode::ReceivePaths { output },
             AutomationMode::SendClipboard => ControllerMode::SendClipboard,
             AutomationMode::ReceiveClipboard => ControllerMode::ReceiveClipboard,
+            AutomationMode::Pipe { .. } => {
+                return Err(CliError::runtime("pipe mode uses the native pipe runtime"));
+            }
         };
         Ok(Self {
             room_id: config.room_id.clone(),
@@ -835,7 +850,7 @@ async fn handle_machine_event(
                         .await?;
                     }
                 }
-                ChannelKind::Machine => {}
+                ChannelKind::Machine | ChannelKind::Pipe => {}
             }
         }
         MachineEvent::ChannelAccepted {

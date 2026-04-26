@@ -11,6 +11,7 @@ use crate::config::SessionConfig;
 use crate::local_state::local_state_file_path;
 use crate::runtime::handshake::exchange_hello;
 use crate::runtime::machine::run_machine_join_session;
+use crate::runtime::pipe::run_pipe_join_session;
 
 pub(crate) async fn run_connected_session(
     config: &SessionConfig,
@@ -86,25 +87,40 @@ pub(crate) async fn run_connected_session(
         mode: connection_status.mode.to_string(),
         remote_addr: connection_status.remote_addr.clone(),
     });
-    if !config.machine {
+    if config.is_pipe_mode() {
+        run_pipe_join_session(
+            config,
+            sink,
+            transport,
+            &connection,
+            &mut send,
+            &mut recv,
+            &peer,
+            Some(identity.fingerprint.clone()),
+            local_ticket.encoded,
+            peer.peer_ticket.clone(),
+        )
+        .await?;
+    } else if !config.machine {
         return Err(CliError::runtime(
             "interactive sessions should use the room TUI adapter",
         ));
+    } else {
+        debug_assert!(!is_host, "machine host path should use run_machine_host");
+        run_machine_join_session(
+            config,
+            sink,
+            transport,
+            &connection,
+            &mut send,
+            &mut recv,
+            &peer,
+            Some(identity.fingerprint.clone()),
+            local_ticket.encoded,
+            peer.peer_ticket.clone(),
+        )
+        .await?;
     }
-    debug_assert!(!is_host, "machine host path should use run_machine_host");
-    run_machine_join_session(
-        config,
-        sink,
-        transport,
-        &connection,
-        &mut send,
-        &mut recv,
-        &peer,
-        Some(identity.fingerprint.clone()),
-        local_ticket.encoded,
-        peer.peer_ticket.clone(),
-    )
-    .await?;
 
     sink.emit_runtime_event(state_changed_event(
         session

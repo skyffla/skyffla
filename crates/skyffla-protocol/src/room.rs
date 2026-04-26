@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolVersion;
 
-pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+pub const MACHINE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomProtocolError {
@@ -131,6 +131,7 @@ pub enum ChannelKind {
     Machine,
     File,
     Clipboard,
+    Pipe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -643,7 +644,7 @@ fn validate_channel_transfer(
             transfer.validate()?;
             Ok(())
         }
-        ChannelKind::Machine | ChannelKind::Clipboard => {
+        ChannelKind::Machine | ChannelKind::Clipboard | ChannelKind::Pipe => {
             if transfer.is_some() {
                 return Err(RoomProtocolError::UnexpectedTransferOffer);
             }
@@ -1036,6 +1037,27 @@ mod tests {
         assert_eq!(
             command.validate(),
             Err(RoomProtocolError::MissingTransferOffer)
+        );
+    }
+
+    #[test]
+    fn pipe_channel_rejects_transfer_offer() {
+        let command = MachineCommand::OpenChannel {
+            channel_id: ChannelId::new("pipe1").expect("valid channel id"),
+            kind: ChannelKind::Pipe,
+            to: Route::All,
+            name: Some("pipe".into()),
+            size: None,
+            mime: None,
+            transfer: Some(TransferOffer {
+                item_kind: TransferItemKind::File,
+                integrity: None,
+            }),
+        };
+
+        assert_eq!(
+            command.validate(),
+            Err(RoomProtocolError::UnexpectedTransferOffer)
         );
     }
 

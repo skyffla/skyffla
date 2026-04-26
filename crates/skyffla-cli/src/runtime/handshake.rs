@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use iroh::endpoint::{RecvStream, SendStream};
 use skyffla_protocol::{
     Capabilities, ControlMessage, Envelope, Hello, HelloAck, TransportCapability,
-    FILE_TRANSFER_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION,
+    FILE_TRANSFER_PROTOCOL_VERSION, PIPE_STREAM_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION,
 };
 use skyffla_session::SessionPeer;
 
@@ -22,6 +22,7 @@ pub(crate) async fn exchange_hello(
         ControlMessage::Hello(Hello {
             protocol_version: WIRE_PROTOCOL_VERSION,
             file_transfer_version: Some(FILE_TRANSFER_PROTOCOL_VERSION),
+            pipe_stream_version: Some(PIPE_STREAM_PROTOCOL_VERSION),
             session_id: session_id.to_string(),
             peer_name: config.peer_name.clone(),
             peer_fingerprint: local_fingerprint.map(ToOwned::to_owned),
@@ -44,6 +45,7 @@ pub(crate) async fn exchange_hello(
                 peer_fingerprint: hello.peer_fingerprint,
                 peer_ticket: hello.peer_ticket,
                 file_transfer_version: hello.file_transfer_version,
+                pipe_stream_version: hello.pipe_stream_version,
             }
         }
         other => bail!("expected hello from peer, got {:?}", other),
@@ -105,6 +107,6 @@ mod tests {
     fn wire_handshake_rejects_different_major_versions() {
         let peer = ProtocolVersion::new(3, 0);
         let error = ensure_wire_protocol_compatible(peer, "peer hello").unwrap_err();
-        assert!(error.to_string().contains("local 2.0, peer 3.0"));
+        assert!(error.to_string().contains("local 2.1, peer 3.0"));
     }
 }

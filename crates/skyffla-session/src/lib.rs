@@ -11,6 +11,7 @@ pub struct SessionPeer {
     pub peer_fingerprint: Option<String>,
     pub peer_ticket: Option<String>,
     pub file_transfer_version: Option<ProtocolVersion>,
+    pub pipe_stream_version: Option<ProtocolVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

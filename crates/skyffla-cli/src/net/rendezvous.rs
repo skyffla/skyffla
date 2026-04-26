@@ -218,6 +218,7 @@ mod tests {
             peer_name: "peer".into(),
             machine: false,
             json_events: false,
+            quiet: false,
             local_mode: false,
             auto_accept_policy: AutoAcceptPolicy::none(),
             automation: None,

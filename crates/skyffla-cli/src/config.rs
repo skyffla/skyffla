@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -71,6 +72,15 @@ pub(crate) struct SessionArgs {
     )]
     pub(crate) receive_clipboard: bool,
     #[arg(
+        long,
+        help = "Stream raw bytes through the room, inferring send or receive from stdin/stdout redirection"
+    )]
+    pub(crate) pipe: bool,
+    #[arg(long, help = "Stream raw stdin bytes to all current room members")]
+    pub(crate) pipe_send: bool,
+    #[arg(long, help = "Receive one raw pipe stream and write it to stdout")]
+    pub(crate) pipe_receive: bool,
+    #[arg(
         short = 'S',
         long,
         env = "SKYFFLA_RENDEZVOUS_URL",
@@ -88,6 +98,12 @@ pub(crate) struct SessionArgs {
     pub(crate) name: Option<String>,
     #[arg(short = 'j', long)]
     pub(crate) json: bool,
+    #[arg(
+        short = 'q',
+        long,
+        help = "Suppress human status and warning logs in automation and pipe modes"
+    )]
+    pub(crate) quiet: bool,
     #[arg(short = 'l', long)]
     pub(crate) local: bool,
     #[arg(short = 'a', long, conflicts_with = "reject_all")]
@@ -113,6 +129,15 @@ pub(crate) enum AutomationMode {
     },
     SendClipboard,
     ReceiveClipboard,
+    Pipe {
+        direction: PipeDirection,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PipeDirection {
+    Send,
+    Receive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,9 +155,16 @@ pub(crate) struct SessionConfig {
     pub(crate) peer_name: String,
     pub(crate) machine: bool,
     pub(crate) json_events: bool,
+    pub(crate) quiet: bool,
     pub(crate) local_mode: bool,
     pub(crate) auto_accept_policy: AutoAcceptPolicy,
     pub(crate) automation: Option<AutomationMode>,
+}
+
+impl SessionConfig {
+    pub(crate) fn is_pipe_mode(&self) -> bool {
+        matches!(self.automation, Some(AutomationMode::Pipe { .. }))
+    }
 }
 
 impl SessionConfig {
@@ -156,6 +188,7 @@ impl SessionConfig {
             ),
             machine: args.machine,
             json_events: args.json,
+            quiet: args.quiet,
             local_mode: args.local,
             auto_accept_policy: resolve_auto_accept_policy(args.auto_accept, args.reject_all).0,
             automation,
@@ -164,6 +197,18 @@ impl SessionConfig {
 }
 
 fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>, CliError> {
+    resolve_automation_mode_with_tty(
+        args,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )
+}
+
+fn resolve_automation_mode_with_tty(
+    args: &SessionArgs,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<Option<AutomationMode>, CliError> {
     if args.as_name.is_some() && args.send.is_none() {
         return Err(CliError::usage("--as can only be used with --send"));
     }
@@ -176,13 +221,16 @@ fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>,
         args.receive,
         args.send_clipboard,
         args.receive_clipboard,
+        args.pipe,
+        args.pipe_send,
+        args.pipe_receive,
     ]
     .into_iter()
     .filter(|selected| *selected)
     .count();
     if selected_modes > 1 {
         return Err(CliError::usage(
-            "--send, --receive, --send-clipboard, and --receive-clipboard are mutually exclusive",
+            "--send, --receive, --send-clipboard, --receive-clipboard, --pipe, --pipe-send, and --pipe-receive are mutually exclusive",
         ));
     }
     if selected_modes == 0 {
@@ -191,17 +239,17 @@ fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>,
 
     if args.machine {
         return Err(CliError::usage(
-            "--send/--receive/--send-clipboard/--receive-clipboard already use the machine runtime; do not combine them with --machine",
+            "--send/--receive/--send-clipboard/--receive-clipboard/--pipe already use the machine runtime; do not combine them with --machine",
         ));
     }
     if args.json {
         return Err(CliError::usage(
-            "--send/--receive/--send-clipboard/--receive-clipboard provide human-readable CLI logs; do not combine them with --json",
+            "--send/--receive/--send-clipboard/--receive-clipboard/--pipe provide human-readable CLI logs; do not combine them with --json",
         ));
     }
     if args.auto_accept || args.reject_all {
         return Err(CliError::usage(
-            "--send/--receive/--send-clipboard/--receive-clipboard manage transfer acceptance automatically; do not combine them with --auto-accept or --reject-all",
+            "--send/--receive/--send-clipboard/--receive-clipboard/--pipe manage channel acceptance automatically; do not combine them with --auto-accept or --reject-all",
         ));
     }
 
@@ -211,19 +259,51 @@ fn resolve_automation_mode(args: &SessionArgs) -> Result<Option<AutomationMode>,
             args.receive,
             args.send_clipboard,
             args.receive_clipboard,
+            args.pipe,
+            args.pipe_send,
+            args.pipe_receive,
         ) {
-            (Some(path), false, false, false) => Some(AutomationMode::SendPath {
-                path: path.clone(),
-                display_name: resolve_send_display_name(path, args.as_name.as_deref())?,
-            }),
-            (None, true, false, false) => Some(AutomationMode::ReceivePaths {
+            (Some(path), false, false, false, false, false, false) => {
+                Some(AutomationMode::SendPath {
+                    path: path.clone(),
+                    display_name: resolve_send_display_name(path, args.as_name.as_deref())?,
+                })
+            }
+            (None, true, false, false, false, false, false) => Some(AutomationMode::ReceivePaths {
                 output: resolve_receive_output(args.output.as_deref())?,
             }),
-            (None, false, true, false) => Some(AutomationMode::SendClipboard),
-            (None, false, false, true) => Some(AutomationMode::ReceiveClipboard),
+            (None, false, true, false, false, false, false) => Some(AutomationMode::SendClipboard),
+            (None, false, false, true, false, false, false) => {
+                Some(AutomationMode::ReceiveClipboard)
+            }
+            (None, false, false, false, true, false, false) => Some(AutomationMode::Pipe {
+                direction: infer_pipe_direction(stdin_is_terminal, stdout_is_terminal)?,
+            }),
+            (None, false, false, false, false, true, false) => Some(AutomationMode::Pipe {
+                direction: PipeDirection::Send,
+            }),
+            (None, false, false, false, false, false, true) => Some(AutomationMode::Pipe {
+                direction: PipeDirection::Receive,
+            }),
             _ => None,
         },
     )
+}
+
+fn infer_pipe_direction(
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<PipeDirection, CliError> {
+    match (stdin_is_terminal, stdout_is_terminal) {
+        (false, true) => Ok(PipeDirection::Send),
+        (true, false) => Ok(PipeDirection::Receive),
+        (true, true) => Err(CliError::usage(
+            "--pipe needs redirected stdin for send or redirected stdout for receive; use --pipe-send or --pipe-receive to force a direction",
+        )),
+        (false, false) => Err(CliError::usage(
+            "--pipe is ambiguous when both stdin and stdout are redirected; use --pipe-send or --pipe-receive",
+        )),
+    }
 }
 
 fn resolve_send_display_name(
@@ -305,8 +385,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        resolve_auto_accept_policy, resolve_automation_mode, resolve_peer_name, resolve_room_id,
-        validate_room_id, AutomationMode, Cli, ReceiveOutput, SessionArgs, DEFAULT_RENDEZVOUS_URL,
+        resolve_auto_accept_policy, resolve_automation_mode, resolve_automation_mode_with_tty,
+        resolve_peer_name, resolve_room_id, validate_room_id, AutomationMode, Cli, PipeDirection,
+        ReceiveOutput, SessionArgs, DEFAULT_RENDEZVOUS_URL,
     };
     use crate::accept_policy::AutoAcceptPolicy;
     use clap::CommandFactory;
@@ -321,10 +402,14 @@ mod tests {
             output: None,
             send_clipboard: false,
             receive_clipboard: false,
+            pipe: false,
+            pipe_send: false,
+            pipe_receive: false,
             server: DEFAULT_RENDEZVOUS_URL.into(),
             download_dir: ".".into(),
             name: None,
             json: false,
+            quiet: false,
             local: false,
             auto_accept: false,
             reject_all: false,
@@ -427,6 +512,7 @@ mod tests {
             "-H",
             "-m",
             "-j",
+            "-q",
             "-l",
             "-n",
             "beta",
@@ -441,6 +527,7 @@ mod tests {
         assert!(cli.host);
         assert!(cli.session.machine);
         assert!(cli.session.json);
+        assert!(cli.session.quiet);
         assert!(cli.session.local);
         assert_eq!(cli.session.name.as_deref(), Some("beta"));
         assert_eq!(cli.session.server, "http://127.0.0.1:8080");
@@ -466,6 +553,10 @@ mod tests {
             <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-C"])
                 .expect("-C should parse as --receive-clipboard");
         assert!(receive_clipboard_cli.session.receive_clipboard);
+
+        let quiet_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-q"])
+            .expect("-q should parse as --quiet");
+        assert!(quiet_cli.session.quiet);
     }
 
     #[test]
@@ -569,6 +660,10 @@ mod tests {
 
         assert!(help.contains("--as <NAME>"));
         assert!(help.contains("--output <PATH>"));
+        assert!(help.contains("--pipe"));
+        assert!(help.contains("--pipe-send"));
+        assert!(help.contains("--pipe-receive"));
+        assert!(help.contains("--quiet"));
         assert!(help.contains("stdin"));
         assert!(help.contains("stdout"));
         assert!(help.contains("display name for this peer"));
@@ -603,5 +698,59 @@ mod tests {
         args.receive = true;
         args.receive_clipboard = true;
         assert!(resolve_automation_mode(&args).is_err());
+    }
+
+    #[test]
+    fn pipe_directional_modes_are_selected() {
+        let mut send_args = session_args();
+        send_args.pipe_send = true;
+        assert!(matches!(
+            resolve_automation_mode(&send_args).unwrap(),
+            Some(AutomationMode::Pipe {
+                direction: PipeDirection::Send
+            })
+        ));
+
+        let mut receive_args = session_args();
+        receive_args.pipe_receive = true;
+        assert!(matches!(
+            resolve_automation_mode(&receive_args).unwrap(),
+            Some(AutomationMode::Pipe {
+                direction: PipeDirection::Receive
+            })
+        ));
+    }
+
+    #[test]
+    fn symmetric_pipe_infers_unambiguous_direction() {
+        let mut args = session_args();
+        args.pipe = true;
+
+        assert!(matches!(
+            resolve_automation_mode_with_tty(&args, false, true).unwrap(),
+            Some(AutomationMode::Pipe {
+                direction: PipeDirection::Send
+            })
+        ));
+        assert!(matches!(
+            resolve_automation_mode_with_tty(&args, true, false).unwrap(),
+            Some(AutomationMode::Pipe {
+                direction: PipeDirection::Receive
+            })
+        ));
+        assert!(resolve_automation_mode_with_tty(&args, true, true).is_err());
+        assert!(resolve_automation_mode_with_tty(&args, false, false).is_err());
+    }
+
+    #[test]
+    fn pipe_modes_conflict_with_other_automation() {
+        let mut args = session_args();
+        args.pipe = true;
+        args.receive = true;
+        assert!(resolve_automation_mode_with_tty(&args, false, true).is_err());
+
+        args.receive = false;
+        args.pipe_send = true;
+        assert!(resolve_automation_mode_with_tty(&args, false, true).is_err());
     }
 }

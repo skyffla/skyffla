@@ -142,10 +142,24 @@ Open a file channel:
 }
 ```
 
+Open a pipe channel:
+
+```json
+{
+  "type":"open_channel",
+  "channel_id":"p1",
+  "kind":"pipe",
+  "to":{"type":"all"},
+  "name":"pipe"
+}
+```
+
 Rules:
 
 - `file` channels require `transfer`
-- `machine` and `clipboard` channels must not include `transfer`
+- `machine`, `clipboard`, and `pipe` channels must not include `transfer`
+- `pipe` channels authorize a native raw byte stream over the transfer ALPN;
+  bytes are not carried as `channel_data`
 
 ### `send_path`
 
@@ -219,7 +233,7 @@ For `machine` and `clipboard` channels:
 {"type":"send_channel_data","channel_id":"c7","body":"partial output"}
 ```
 
-`file` channels do not use inline `channel_data`.
+`file` and `pipe` channels do not use inline `channel_data`.
 
 ### `close_channel`
 

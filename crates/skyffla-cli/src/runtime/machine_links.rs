@@ -37,6 +37,7 @@ pub(crate) struct PeerHandle {
     pub(crate) member: Member,
     pub(crate) ticket: Option<String>,
     pub(crate) file_transfer_version: Option<ProtocolVersion>,
+    pub(crate) pipe_stream_version: Option<ProtocolVersion>,
     pub(crate) pending_events: Vec<MachineEvent>,
 }
 

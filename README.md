@@ -121,20 +121,25 @@ line wins over the environment variable.
 |  | `--output <path>` | Receive output destination; use `-` with `--receive` to write one received file payload to stdout |
 | `-c` | `--send-clipboard` | Stay online and send local clipboard text changes to room members |
 | `-C` | `--receive-clipboard` | Stay online and apply incoming clipboard text updates locally |
+|  | `--pipe` | Stream raw bytes through the room, inferring send/receive from stdin/stdout redirection |
+|  | `--pipe-send` | Stream raw stdin bytes to all current room members |
+|  | `--pipe-receive` | Receive one raw pipe stream and write it to stdout |
 | `-S <url>` | `--server <url>` | Use a rendezvous server instead of the default public server |
 | `-d <path>` | `--download-dir <path>` | Save accepted transfers in this directory |
 | `-n <name>` | `--name <name>` | Set the display name for this peer; overrides `SKYFFLA_NAME` |
 | `-j` | `--json` | Emit machine events as JSON |
+| `-q` | `--quiet` | Suppress human status and warning logs in automation and pipe modes |
 | `-l` | `--local` | Use LAN-only mDNS discovery instead of rendezvous |
 | `-a` | `--auto-accept` | Auto-accept incoming file, folder, and clipboard channels in TUI or machine mode |
 | `-R` | `--reject-all` | Reject incoming channels by default |
 | `-h` | `--help` | Print help |
 | `-V` | `--version` | Print version |
 
-`--send`, `--receive`, `--send-clipboard`, and `--receive-clipboard` are
-automation modes and are mutually exclusive. They already manage the machine
-runtime, logging, and transfer acceptance policy, so do not combine them with
-`--machine`, `--json`, `--auto-accept`, or `--reject-all`.
+`--send`, `--receive`, `--send-clipboard`, `--receive-clipboard`, `--pipe`,
+`--pipe-send`, and `--pipe-receive` are automation modes and are mutually
+exclusive. They already manage the machine runtime, logging, and channel
+acceptance policy, so do not combine them with `--machine`, `--json`,
+`--auto-accept`, or `--reject-all`.
 
 Use `--send - --as <name>` when a pipeline produces the payload. Stdin sends
 are one-shot: after at least one peer receives or rejects the payload, the sender
@@ -149,6 +154,23 @@ logs go to stderr in this mode.
 
 ```sh
 skyffla copper-731 --receive --output - > logs.tgz
+```
+
+Use native pipe mode when the payload is a stream rather than a named file.
+`--pipe` infers direction only when exactly one side is redirected; use
+`--pipe-send` or `--pipe-receive` when a script needs an explicit direction.
+Pipe mode sends to all current room members, fixes the receiver set when the
+stream opens, and uses lossless backpressure. A slow receiver can slow the room
+stream; Skyffla warns on stderr unless `--quiet` is set.
+
+```sh
+producer | skyffla copper-731 --pipe
+skyffla copper-731 --pipe > output.txt
+```
+
+```sh
+tail -f app.log | skyffla logs --pipe-send
+skyffla logs --pipe-receive | grep ERROR
 ```
 
 ## Room Surfaces
