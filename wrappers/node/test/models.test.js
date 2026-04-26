@@ -34,7 +34,7 @@ test("documented chat event shape round trips", () => {
 test("room welcome uses structured protocol version", () => {
   const event = parseMachineEvent({
     type: "room_welcome",
-    protocol_version: { major: 2, minor: 0 },
+    protocol_version: { major: 2, minor: 1 },
     room_id: "warehouse",
     self_member: "m1",
     host_member: "m1",
@@ -44,7 +44,7 @@ test("room welcome uses structured protocol version", () => {
   assert.deepEqual(event.protocol_version, MACHINE_PROTOCOL_VERSION);
   assert.deepEqual(dumpMessage(event), {
     type: "room_welcome",
-    protocol_version: { major: 2, minor: 0 },
+    protocol_version: { major: 2, minor: 1 },
     room_id: "warehouse",
     self_member: "m1",
     host_member: "m1",
@@ -70,6 +70,29 @@ test("documented open channel command shape round trips", () => {
     kind: "machine",
     to: { type: "member", member_id: "m2" },
     name: "agent-link",
+  });
+});
+
+test("pipe channel kind round trips", () => {
+  const event = parseMachineEvent({
+    type: "channel_opened",
+    channel_id: "p1",
+    kind: "pipe",
+    from: "m2",
+    from_name: "beta",
+    to: { type: "all" },
+    name: "pipe",
+  });
+
+  assert.equal(event.kind, ChannelKind.PIPE);
+  assert.deepEqual(dumpMessage(event), {
+    type: "channel_opened",
+    channel_id: "p1",
+    kind: "pipe",
+    from: "m2",
+    from_name: "beta",
+    to: { type: "all" },
+    name: "pipe",
   });
 });
 

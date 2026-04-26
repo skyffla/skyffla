@@ -28,6 +28,7 @@ class ChannelKind(str, Enum):
     MACHINE = "machine"
     FILE = "file"
     CLIPBOARD = "clipboard"
+    PIPE = "pipe"
 
 
 class BlobFormat(str, Enum):
@@ -71,7 +72,7 @@ class ProtocolVersion(SkyfflaModel):
         return f"{self.major}.{self.minor}"
 
 
-MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=2, minor=0)
+MACHINE_PROTOCOL_VERSION = ProtocolVersion(major=2, minor=1)
 
 
 class BlobRef(SkyfflaModel):

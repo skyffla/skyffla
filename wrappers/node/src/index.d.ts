@@ -214,7 +214,7 @@ export type MachineEvent =
   | TransferProgress
   | ErrorEvent;
 
-export type ChannelKindValue = "machine" | "file" | "clipboard";
+export type ChannelKindValue = "machine" | "file" | "clipboard" | "pipe";
 export type BlobFormatValue = "blob" | "collection";
 export type TransferItemKindValue = "file" | "folder";
 export type TransferPhaseValue = "preparing" | "downloading" | "exporting";
@@ -223,6 +223,7 @@ export const ChannelKind: Readonly<{
   MACHINE: "machine";
   FILE: "file";
   CLIPBOARD: "clipboard";
+  PIPE: "pipe";
 }>;
 
 export const BlobFormat: Readonly<{

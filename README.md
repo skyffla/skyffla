@@ -114,20 +114,20 @@ line wins over the environment variable.
 | Short | Long | Purpose |
 | --- | --- | --- |
 | `-H` | `--host` | Explicitly host the room instead of join-or-promote |
-| `-m` | `--machine` | Use the machine protocol instead of the default TUI |
+| `-m` | `--machine` | Run the JSON-lines machine protocol: commands on stdin, events on stdout, diagnostics on stderr |
 | `-s <path>` | `--send <path>` | Stay online and send a file or folder to each room member once; use `-` to read a finite one-shot file payload from stdin |
 |  | `--as <name>` | Receiver-facing transfer name; required when `--send` is `-` |
 | `-r` | `--receive` | Stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
-|  | `--output <path>` | Receive output destination; use `-` with `--receive` to write one received file payload to stdout |
+| `-o <path>` | `--output <path>` | Receive output destination; use `-` with `--receive` to write one file payload to stdout and logs to stderr |
 | `-c` | `--send-clipboard` | Stay online and send local clipboard text changes to room members |
 | `-C` | `--receive-clipboard` | Stay online and apply incoming clipboard text updates locally |
-|  | `--pipe` | Stream raw bytes through the room, inferring send/receive from stdin/stdout redirection |
-|  | `--pipe-send` | Stream raw stdin bytes into a live room pipe; current members get the stream and late receivers join from that point onward |
-|  | `--pipe-receive` | Receive one raw pipe stream and write it to stdout |
+| `-p` | `--pipe` | Stream raw bytes through the room; infers send from piped stdin or receive from redirected stdout |
+|  | `--pipe-send` | Stream raw stdin bytes into a live room pipe; late receivers join from the current byte position |
+|  | `--pipe-receive` | Receive one raw pipe stream on stdout; status and warnings stay on stderr |
 | `-S <url>` | `--server <url>` | Use a rendezvous server instead of the default public server |
 | `-d <path>` | `--download-dir <path>` | Save accepted transfers in this directory |
 | `-n <name>` | `--name <name>` | Set the display name for this peer; overrides `SKYFFLA_NAME` |
-| `-j` | `--json` | Emit machine events as JSON |
+| `-j` | `--json` | Emit runtime diagnostics and top-level errors as JSON on stderr; machine events are always JSON on stdout |
 | `-q` | `--quiet` | Suppress human status and warning logs in automation and pipe modes |
 | `-l` | `--local` | Use LAN-only mDNS discovery instead of rendezvous |
 | `-a` | `--auto-accept` | Auto-accept incoming file, folder, and clipboard channels in TUI or machine mode |
@@ -159,8 +159,8 @@ skyffla copper-731 --receive --output - > logs.tgz
 Use native pipe mode when the payload is a stream rather than a named file.
 `--pipe` infers direction only when exactly one side is redirected; use
 `--pipe-send` or `--pipe-receive` when a script needs an explicit direction.
-Pipe mode sends to all current room members, lets later receivers join live from
-the current byte position, and uses lossless backpressure for active receivers.
+Pipe mode sends to active room receivers, lets later receivers join live from the
+current byte position, and uses lossless backpressure for active receivers.
 If the sender starts before any receiver is ready, Skyffla waits before draining
 stdin, so the first receiver may still get whatever data accumulated in the OS
 pipe or producer-side buffer before streaming begins. Later receivers do not get

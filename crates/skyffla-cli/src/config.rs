@@ -31,7 +31,7 @@ pub(crate) struct SessionArgs {
     #[arg(
         short = 'm',
         long,
-        help = "Use the machine protocol instead of the default TUI"
+        help = "Run the JSON-lines machine protocol: commands on stdin, events on stdout, diagnostics on stderr"
     )]
     pub(crate) machine: bool,
     #[arg(
@@ -55,8 +55,9 @@ pub(crate) struct SessionArgs {
     pub(crate) receive: bool,
     #[arg(
         long,
+        short = 'o',
         value_name = "PATH",
-        help = "Receive output destination; use '-' with --receive to write one received file payload to stdout"
+        help = "Receive output destination; use '-' with --receive to write one file payload to stdout and logs to stderr"
     )]
     pub(crate) output: Option<String>,
     #[arg(
@@ -73,12 +74,19 @@ pub(crate) struct SessionArgs {
     pub(crate) receive_clipboard: bool,
     #[arg(
         long,
-        help = "Stream raw bytes through the room, inferring send or receive from stdin/stdout redirection"
+        short = 'p',
+        help = "Stream raw bytes through the room; infers send from piped stdin or receive from redirected stdout"
     )]
     pub(crate) pipe: bool,
-    #[arg(long, help = "Stream raw stdin bytes to all current room members")]
+    #[arg(
+        long,
+        help = "Stream raw stdin bytes into a live room pipe; late receivers join from the current byte position"
+    )]
     pub(crate) pipe_send: bool,
-    #[arg(long, help = "Receive one raw pipe stream and write it to stdout")]
+    #[arg(
+        long,
+        help = "Receive one raw pipe stream on stdout; status and warnings stay on stderr"
+    )]
     pub(crate) pipe_receive: bool,
     #[arg(
         short = 'S',
@@ -96,7 +104,11 @@ pub(crate) struct SessionArgs {
         help = "Set the display name for this peer; overrides SKYFFLA_NAME"
     )]
     pub(crate) name: Option<String>,
-    #[arg(short = 'j', long)]
+    #[arg(
+        short = 'j',
+        long,
+        help = "Emit runtime diagnostics and top-level errors as JSON on stderr; machine events are always JSON on stdout"
+    )]
     pub(crate) json: bool,
     #[arg(
         short = 'q',
@@ -104,11 +116,25 @@ pub(crate) struct SessionArgs {
         help = "Suppress human status and warning logs in automation and pipe modes"
     )]
     pub(crate) quiet: bool,
-    #[arg(short = 'l', long)]
+    #[arg(
+        short = 'l',
+        long,
+        help = "Use LAN-only mDNS discovery instead of the rendezvous server"
+    )]
     pub(crate) local: bool,
-    #[arg(short = 'a', long, conflicts_with = "reject_all")]
+    #[arg(
+        short = 'a',
+        long,
+        conflicts_with = "reject_all",
+        help = "Auto-accept incoming file, folder, and clipboard channels in TUI or machine mode"
+    )]
     pub(crate) auto_accept: bool,
-    #[arg(short = 'R', long, conflicts_with = "auto_accept")]
+    #[arg(
+        short = 'R',
+        long,
+        conflicts_with = "auto_accept",
+        help = "Reject incoming channels by default in TUI or machine mode"
+    )]
     pub(crate) reject_all: bool,
 }
 
@@ -545,6 +571,11 @@ mod tests {
             .expect("-r should parse as --receive");
         assert!(receive_cli.session.receive);
 
+        let output_cli =
+            <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-r", "-o", "-"])
+                .expect("-o should parse as --output");
+        assert_eq!(output_cli.session.output.as_deref(), Some("-"));
+
         let send_clipboard_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-c"])
             .expect("-c should parse as --send-clipboard");
         assert!(send_clipboard_cli.session.send_clipboard);
@@ -557,6 +588,10 @@ mod tests {
         let quiet_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-q"])
             .expect("-q should parse as --quiet");
         assert!(quiet_cli.session.quiet);
+
+        let pipe_cli = <Cli as clap::Parser>::try_parse_from(["skyffla", "room", "-p"])
+            .expect("-p should parse as --pipe");
+        assert!(pipe_cli.session.pipe);
     }
 
     #[test]

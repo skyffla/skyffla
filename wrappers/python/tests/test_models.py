@@ -43,7 +43,7 @@ def test_room_welcome_uses_structured_protocol_version() -> None:
     event = parse_machine_event(
         {
             "type": "room_welcome",
-            "protocol_version": {"major": 2, "minor": 0},
+            "protocol_version": {"major": 2, "minor": 1},
             "room_id": "warehouse",
             "self_member": "m1",
             "host_member": "m1",
@@ -54,7 +54,7 @@ def test_room_welcome_uses_structured_protocol_version() -> None:
     assert event.protocol_version == MACHINE_PROTOCOL_VERSION
     assert dump_message(event) == {
         "type": "room_welcome",
-        "protocol_version": {"major": 2, "minor": 0},
+        "protocol_version": {"major": 2, "minor": 1},
         "room_id": "warehouse",
         "self_member": "m1",
         "host_member": "m1",
@@ -83,6 +83,31 @@ def test_documented_open_channel_command_shape_round_trips() -> None:
         "kind": "machine",
         "to": {"type": "member", "member_id": "m2"},
         "name": "agent-link",
+    }
+
+
+def test_pipe_channel_kind_round_trips() -> None:
+    event = parse_machine_event(
+        {
+            "type": "channel_opened",
+            "channel_id": "p1",
+            "kind": "pipe",
+            "from": "m2",
+            "from_name": "beta",
+            "to": {"type": "all"},
+            "name": "pipe",
+        }
+    )
+
+    assert event.kind == ChannelKind.PIPE
+    assert dump_message(event) == {
+        "type": "channel_opened",
+        "channel_id": "p1",
+        "kind": "pipe",
+        "from": "m2",
+        "from_name": "beta",
+        "to": {"type": "all"},
+        "name": "pipe",
     }
 
 

@@ -530,7 +530,7 @@ That keeps a clean split:
 
 - `machine` = machine control and event API
 - `--send - --as <name>` = finite one-shot raw stdin payload into a room file channel
-- `--receive --output -` = write one received file payload to stdout
+- `--receive --output -` = write one received file payload to stdout while logs stay on stderr
 - `--pipe` / `--pipe-send` / `--pipe-receive` = native raw byte stream with no file metadata
 
 For files and folders, there should also be a clean split:
@@ -575,23 +575,23 @@ An explicit command-line room ID takes precedence over the environment variable.
 | Short | Long | Meaning |
 | --- | --- | --- |
 | `-H` | `--host` | explicitly host a room |
-| `-m` | `--machine` | use the machine protocol instead of the default TUI |
+| `-m` | `--machine` | run the JSON-lines machine protocol: commands on stdin, events on stdout, diagnostics on stderr |
 | `-s <path>` | `--send <path>` | stay online and send a file or folder once to each room member; use `-` to read a finite one-shot file payload from stdin |
 |  | `--as <name>` | receiver-facing transfer name; required when `--send` is `-` |
 | `-r` | `--receive` | stay online and auto-accept incoming file or folder transfers, saving them to `--download-dir` unless `--output` is set |
-|  | `--output <path>` | receive output destination; use `-` with `--receive` to write one received file payload to stdout |
+| `-o <path>` | `--output <path>` | receive output destination; use `-` with `--receive` to write one file payload to stdout and logs to stderr |
 | `-c` | `--send-clipboard` | stay online and send clipboard text changes |
 | `-C` | `--receive-clipboard` | stay online and apply incoming clipboard text updates |
-|  | `--pipe` | stream raw bytes through the room, inferring send/receive from stdin/stdout redirection |
+| `-p` | `--pipe` | stream raw bytes through the room; infers send from piped stdin or receive from redirected stdout |
 |  | `--pipe-send` | stream raw stdin bytes into a live room pipe; late receivers join from the current byte position |
-|  | `--pipe-receive` | receive one raw pipe stream and write it to stdout |
+|  | `--pipe-receive` | receive one raw pipe stream on stdout; status and warnings stay on stderr |
 | `-S <url>` | `--server <url>` | use a specific rendezvous server |
 | `-d <path>` | `--download-dir <path>` | save accepted transfers in a specific directory |
 | `-n <name>` | `--name <name>` | set the peer display name; overrides `SKYFFLA_NAME` |
-| `-j` | `--json` | emit machine events as JSON |
+| `-j` | `--json` | emit runtime diagnostics and top-level errors as JSON on stderr; machine events are always JSON on stdout |
 | `-q` | `--quiet` | suppress human status and warning logs in automation and pipe modes |
 | `-l` | `--local` | use LAN-only mDNS discovery instead of rendezvous |
-| `-a` | `--auto-accept` | auto-accept incoming file, folder, and clipboard channels |
+| `-a` | `--auto-accept` | auto-accept incoming file, folder, and clipboard channels in TUI or machine mode |
 | `-R` | `--reject-all` | reject incoming channels by default |
 
 Not:

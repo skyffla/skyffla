@@ -9,6 +9,7 @@ export const ChannelKind = Object.freeze({
   MACHINE: "machine",
   FILE: "file",
   CLIPBOARD: "clipboard",
+  PIPE: "pipe",
 });
 
 export const BlobFormat = Object.freeze({
@@ -29,7 +30,7 @@ export const TransferPhase = Object.freeze({
 
 export const MACHINE_PROTOCOL_VERSION = Object.freeze({
   major: 2,
-  minor: 0,
+  minor: 1,
 });
 
 const ROUTE_TYPES = new Set(["all", "member"]);

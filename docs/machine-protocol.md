@@ -32,7 +32,7 @@ The convenience slash commands accepted by the CLI in `machine` mode are not par
 
 Current protocol version:
 
-- `2.0`
+- `2.1`
 
 The version is emitted in the initial `room_welcome` event.
 
@@ -252,7 +252,7 @@ directory.
 ```json
 {
   "type":"room_welcome",
-  "protocol_version":{"major":2,"minor":0},
+  "protocol_version":{"major":2,"minor":1},
   "room_id":"warehouse",
   "self_member":"m1",
   "host_member":"m1"
