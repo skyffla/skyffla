@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+- Add `-o` as a short alias for `--output` and `-p` as a short alias for `--pipe`.
+- Clarify CLI help and docs around stdin/stdout/stderr behavior for machine mode, JSON diagnostics, receive-to-stdout, and native pipe streams.
+- Align Python and Node wrapper protocol metadata with machine protocol `2.1`, including the additive `pipe` channel kind.
+
 ## [2.2.0] - 2026-04-26
 
 - Add stdin and stdout one-shot transfer automation for finite payloads, including `--send -`, `--as`, and `--receive --output -`.
