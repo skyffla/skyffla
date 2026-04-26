@@ -161,6 +161,10 @@ Use native pipe mode when the payload is a stream rather than a named file.
 `--pipe-send` or `--pipe-receive` when a script needs an explicit direction.
 Pipe mode sends to all current room members, lets later receivers join live from
 the current byte position, and uses lossless backpressure for active receivers.
+If the sender starts before any receiver is ready, Skyffla waits before draining
+stdin, so the first receiver may still get whatever data accumulated in the OS
+pipe or producer-side buffer before streaming begins. Later receivers do not get
+replay; they only receive bytes from the point where they join.
 A slow receiver can slow the room stream; Skyffla warns on stderr unless
 `--quiet` is set.
 

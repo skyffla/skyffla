@@ -544,6 +544,8 @@ Native pipe mode is intentionally stream-oriented instead of file-oriented:
 - sender exits when stdin reaches EOF and all active receiver streams close
 - receiver exits when the stream closes
 - receivers present at start get the full stream, and later receivers join live from the current byte position
+- if the sender starts first, Skyffla does not drain stdin until at least one receiver is ready, so the first receiver may see whatever bytes accumulated in the OS pipe or producer-side buffer before streaming begins
+- later receivers do not get replay; they only receive bytes produced after they join
 - broadcast is lossless; the slowest active receiver applies backpressure
 - sender warning logs identify receivers that block the stream for more than 5 seconds
 
