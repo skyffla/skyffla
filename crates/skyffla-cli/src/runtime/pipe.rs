@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -79,6 +79,7 @@ pub(crate) async fn run_pipe_host(
     let pipe_accept_handle = matches!(direction, PipeDirection::Send)
         .then(|| spawn_pipe_accept_loop(transport.clone(), pipe_tx));
     let (local_receive_tx, mut local_receive_rx) = mpsc::unbounded_channel();
+    let (broadcast_done_tx, mut broadcast_done_rx) = mpsc::unbounded_channel();
 
     let mut peers = BTreeMap::<MemberId, PeerHandle>::new();
     let mut sender = PipeSenderState::default();
@@ -112,13 +113,17 @@ pub(crate) async fn run_pipe_host(
                 local_receive?;
                 break;
             }
+            broadcast_done = broadcast_done_rx.recv(), if matches!(direction, PipeDirection::Send) => {
+                let Some(broadcast_done) = broadcast_done else { break; };
+                broadcast_done?;
+                close_host_pipe_channels(&mut log, &mut room, &host_member, &mut peers, &mut sender)?;
+                break;
+            }
             accepted = pipe_rx.recv(), if matches!(direction, PipeDirection::Send) => {
                 let Some(accepted) = accepted else { break; };
                 let stream = accepted?;
-                if handle_sender_pipe_stream(&mut log, &mut sender, stream).await?
-                    && maybe_run_sender_stream(config, &mut log, &mut room, &host_member, &mut peers, &mut sender).await?
-                {
-                    break;
+                if handle_sender_pipe_stream(&mut log, &mut sender, stream).await? {
+                    maybe_start_host_sender_stream(config.quiet, &mut log, &mut sender, broadcast_done_tx.clone()).await?;
                 }
             }
         }
@@ -173,10 +178,17 @@ pub(crate) async fn run_pipe_join_session(
         host_pipe_stream_version: host_peer.pipe_stream_version,
     };
     let mut sender = PipeSenderState::default();
+    let (broadcast_done_tx, mut broadcast_done_rx) = mpsc::unbounded_channel();
+    let mut authority_closed = false;
 
     loop {
         tokio::select! {
-            message = read_authority_link_message(authority_recv) => {
+            message = read_authority_link_message(authority_recv), if !authority_closed => {
+                let message = message?;
+                if message.is_none() && sender.streaming_started() {
+                    authority_closed = true;
+                    continue;
+                }
                 let should_break = handle_join_authority_message(
                     config,
                     transport,
@@ -185,7 +197,8 @@ pub(crate) async fn run_pipe_join_session(
                     &mut sender,
                     direction,
                     authority_send,
-                    message?,
+                    broadcast_done_tx.clone(),
+                    message,
                 ).await?;
                 if should_break {
                     break;
@@ -194,11 +207,15 @@ pub(crate) async fn run_pipe_join_session(
             accepted = pipe_rx.recv(), if matches!(direction, PipeDirection::Send) => {
                 let Some(accepted) = accepted else { break; };
                 let stream = accepted?;
-                if handle_sender_pipe_stream(&mut log, &mut sender, stream).await?
-                    && maybe_run_join_sender_stream(config, &mut log, &mut state, authority_send, &mut sender).await?
-                {
-                    break;
+                if handle_sender_pipe_stream(&mut log, &mut sender, stream).await? {
+                    maybe_start_join_sender_stream(config.quiet, &mut log, &mut sender, broadcast_done_tx.clone()).await?;
                 }
+            }
+            broadcast_done = broadcast_done_rx.recv(), if matches!(direction, PipeDirection::Send) => {
+                let Some(broadcast_done) = broadcast_done else { break; };
+                broadcast_done?;
+                close_join_pipe_channels(authority_send, &sender).await;
+                break;
             }
         }
     }
@@ -242,6 +259,7 @@ async fn handle_host_pipe_input(
             .await?;
             if matches!(direction, PipeDirection::Send) {
                 maybe_open_host_pipe_sender(config, log, room, host_member, peers, sender).await?;
+                maybe_open_host_late_pipe_receiver(log, room, host_member, peers, sender).await?;
             }
             Ok(false)
         }
@@ -263,12 +281,7 @@ async fn handle_host_pipe_input(
         HostInput::PeerDisconnected { member_id } => {
             peers.remove(&member_id);
             let _ = room.leave(&member_id, Some("peer disconnected".into()));
-            if sender.target_members.contains_key(&member_id) && !sender.completed {
-                return Err(CliError::runtime(format!(
-                    "pipe receiver {} disconnected before stream completed",
-                    member_id.as_str()
-                )));
-            }
+            sender.remove_member(&member_id);
             Ok(false)
         }
         HostInput::PeerProtocolError { message } => Err(CliError::protocol(message)),
@@ -471,9 +484,6 @@ async fn handle_host_peer_command(
             deliver_authority_events(host_member, routed, peers, |event| {
                 handle_host_sender_event(sender, event)
             })?;
-            if maybe_run_sender_stream_from_host(log, room, host_member, peers, sender).await? {
-                return Ok(true);
-            }
             Ok(false)
         }
         MachineCommand::RejectChannel { channel_id, reason } => {
@@ -532,6 +542,11 @@ async fn maybe_open_host_pipe_sender(
         .iter()
         .map(|(member_id, peer)| (member_id.clone(), peer.member.name.clone()))
         .collect();
+    sender.member_channels = sender
+        .target_members
+        .keys()
+        .map(|member_id| (member_id.clone(), channel_id.clone()))
+        .collect();
     let routed = room
         .open_channel(
             host_member,
@@ -547,6 +562,47 @@ async fn maybe_open_host_pipe_sender(
     log.info(&format!(
         "opened pipe stream to {} receiver(s)",
         sender.target_members.len()
+    ));
+    deliver_authority_events(host_member, routed, peers, |_| Ok(false))?;
+    Ok(())
+}
+
+async fn maybe_open_host_late_pipe_receiver(
+    log: &mut PipeLog,
+    room: &mut RoomEngine,
+    host_member: &MemberId,
+    peers: &mut BTreeMap<MemberId, PeerHandle>,
+    sender: &mut PipeSenderState,
+) -> Result<(), CliError> {
+    if !sender.streaming_started() {
+        return Ok(());
+    }
+    let Some((member_id, peer)) = peers
+        .iter()
+        .find(|(member_id, _)| !sender.target_members.contains_key(*member_id))
+    else {
+        return Ok(());
+    };
+    ensure_pipe_supported(peer.pipe_stream_version, &peer.member.name, "remote peer")?;
+    let channel_id = sender.next_late_channel_id(member_id)?;
+    sender.add_target(member_id.clone(), peer.member.name.clone(), channel_id.clone());
+    let routed = room
+        .open_channel(
+            host_member,
+            channel_id,
+            ChannelKind::Pipe,
+            Route::Member {
+                member_id: member_id.clone(),
+            },
+            Some("pipe".into()),
+            None,
+            None,
+            None,
+        )
+        .map_err(room_error)?;
+    log.info(&format!(
+        "late pipe receiver joined: {}",
+        sender.display_member(member_id)
     ));
     deliver_authority_events(host_member, routed, peers, |_| Ok(false))?;
     Ok(())
@@ -626,19 +682,13 @@ fn handle_host_sender_event(
     event: MachineEvent,
 ) -> Result<bool, CliError> {
     match event {
-        MachineEvent::ChannelAccepted {
-            channel_id,
-            member_id,
-            ..
-        } if sender.channel_id.as_ref() == Some(&channel_id) => {
-            sender.accepted_members.insert(member_id);
-        }
+        MachineEvent::ChannelAccepted { .. } => {}
         MachineEvent::ChannelRejected {
             channel_id,
             member_id,
             reason,
             ..
-        } if sender.channel_id.as_ref() == Some(&channel_id) => {
+        } if sender.channel_contains(&channel_id) => {
             return Err(CliError::runtime(format!(
                 "pipe receiver {} rejected the stream{}",
                 member_id.as_str(),
@@ -650,48 +700,37 @@ fn handle_host_sender_event(
     Ok(false)
 }
 
-async fn maybe_run_sender_stream_from_host(
+async fn maybe_start_host_sender_stream(
+    quiet: bool,
     log: &mut PipeLog,
-    room: &mut RoomEngine,
-    host_member: &MemberId,
-    peers: &mut BTreeMap<MemberId, PeerHandle>,
     sender: &mut PipeSenderState,
-) -> Result<bool, CliError> {
-    maybe_run_sender_stream(
-        &SessionConfigQuiet { quiet: log.quiet },
-        log,
-        room,
-        host_member,
-        peers,
-        sender,
-    )
-    .await
-}
-
-async fn maybe_run_sender_stream(
-    config: &impl HasQuiet,
-    log: &mut PipeLog,
-    room: &mut RoomEngine,
-    host_member: &MemberId,
-    peers: &mut BTreeMap<MemberId, PeerHandle>,
-    sender: &mut PipeSenderState,
+    done_tx: mpsc::UnboundedSender<Result<(), CliError>>,
 ) -> Result<bool, CliError> {
     if !sender.ready() {
         return Ok(false);
     }
-    sender.completed = true;
-    log.info("all receivers accepted pipe stream; streaming stdin");
-    broadcast_stdin_to_pipe_receivers(log, sender).await?;
-    if let Some(channel_id) = sender.channel_id.clone() {
+    sender.start_broadcast(quiet, log, done_tx)?;
+    Ok(true)
+}
+
+fn close_host_pipe_channels(
+    log: &mut PipeLog,
+    room: &mut RoomEngine,
+    host_member: &MemberId,
+    peers: &mut BTreeMap<MemberId, PeerHandle>,
+    sender: &mut PipeSenderState,
+) -> Result<(), CliError> {
+    for channel_id in sender.open_channel_ids() {
         let routed = room
             .close_channel(host_member, &channel_id, Some("done".into()))
             .map_err(room_error)?;
         deliver_authority_events(host_member, routed, peers, |_| Ok(false))?;
     }
-    if !config.quiet() {
+    if !log.quiet {
         log.info("pipe stream complete");
     }
-    Ok(true)
+    sender.completed = true;
+    Ok(())
 }
 
 async fn handle_join_authority_message(
@@ -702,6 +741,7 @@ async fn handle_join_authority_message(
     sender: &mut PipeSenderState,
     direction: PipeDirection,
     authority_send: &mut SendStream,
+    broadcast_done_tx: mpsc::UnboundedSender<Result<(), CliError>>,
     message: Option<AuthorityLinkMessage>,
 ) -> Result<bool, CliError> {
     match message {
@@ -714,6 +754,7 @@ async fn handle_join_authority_message(
                 sender,
                 direction,
                 authority_send,
+                broadcast_done_tx,
                 event,
             )
             .await
@@ -738,6 +779,7 @@ async fn handle_join_machine_event(
     sender: &mut PipeSenderState,
     direction: PipeDirection,
     authority_send: &mut SendStream,
+    broadcast_done_tx: mpsc::UnboundedSender<Result<(), CliError>>,
     event: MachineEvent,
 ) -> Result<bool, CliError> {
     match event {
@@ -764,21 +806,19 @@ async fn handle_join_machine_event(
             Ok(false)
         }
         MachineEvent::MemberJoined { member } => {
-            state.members.insert(member.member_id.clone(), member);
+            let member_id = member.member_id.clone();
+            state.members.insert(member_id.clone(), member);
             if matches!(direction, PipeDirection::Send) {
                 maybe_open_join_pipe_sender(log, state, sender, authority_send).await?;
+                maybe_open_join_late_pipe_receiver(log, state, sender, authority_send, &member_id)
+                    .await?;
             }
             Ok(false)
         }
         MachineEvent::MemberLeft { member_id, .. } => {
             state.members.remove(&member_id);
             state.member_tickets.remove(&member_id);
-            if sender.target_members.contains_key(&member_id) && !sender.completed {
-                return Err(CliError::runtime(format!(
-                    "pipe receiver {} left before stream completed",
-                    member_id.as_str()
-                )));
-            }
+            sender.remove_member(&member_id);
             Ok(false)
         }
         MachineEvent::ChannelOpened {
@@ -827,13 +867,10 @@ async fn handle_join_machine_event(
             let _ = send_authority_command(authority_send, MachineCommand::LeaveRoom).await;
             Ok(true)
         }
-        MachineEvent::ChannelAccepted {
-            channel_id,
-            member_id,
-            ..
-        } if sender.channel_id.as_ref() == Some(&channel_id) => {
-            sender.accepted_members.insert(member_id);
-            maybe_run_join_sender_stream(_config, log, state, authority_send, sender).await
+        MachineEvent::ChannelAccepted { channel_id, member_id, .. }
+            if sender.channel_matches_member(&channel_id, &member_id) =>
+        {
+            maybe_start_join_sender_stream(_config.quiet, log, sender, broadcast_done_tx.clone()).await
         }
         MachineEvent::ChannelRejected {
             channel_id,
@@ -878,6 +915,11 @@ async fn maybe_open_join_pipe_sender(
     let channel_id = ChannelId::new(PIPE_CHANNEL_ID).map_err(protocol_error)?;
     sender.channel_id = Some(channel_id.clone());
     sender.target_members = targets;
+    sender.member_channels = sender
+        .target_members
+        .keys()
+        .map(|member_id| (member_id.clone(), channel_id.clone()))
+        .collect();
     send_authority_command(
         authority_send,
         MachineCommand::OpenChannel {
@@ -898,20 +940,55 @@ async fn maybe_open_join_pipe_sender(
     Ok(())
 }
 
-async fn maybe_run_join_sender_stream(
-    config: &SessionConfig,
+async fn maybe_open_join_late_pipe_receiver(
     log: &mut PipeLog,
-    _state: &mut JoinPipeState,
-    authority_send: &mut SendStream,
+    state: &JoinPipeState,
     sender: &mut PipeSenderState,
-) -> Result<bool, CliError> {
-    if !sender.ready() {
-        return Ok(false);
+    authority_send: &mut SendStream,
+    member_id: &MemberId,
+) -> Result<(), CliError> {
+    if !sender.streaming_started() || sender.target_members.contains_key(member_id) {
+        return Ok(());
     }
-    sender.completed = true;
-    log.info("all receivers accepted pipe stream; streaming stdin");
-    broadcast_stdin_to_pipe_receivers(log, sender).await?;
-    if let Some(channel_id) = sender.channel_id.clone() {
+    let member = state
+        .members
+        .get(member_id)
+        .ok_or_else(|| CliError::runtime(format!("unknown member {}", member_id.as_str())))?;
+    let channel_id = sender.next_late_channel_id(member_id)?;
+    sender.add_target(member_id.clone(), member.name.clone(), channel_id.clone());
+    send_authority_command(
+        authority_send,
+        MachineCommand::OpenChannel {
+            channel_id,
+            kind: ChannelKind::Pipe,
+            to: Route::Member {
+                member_id: member_id.clone(),
+            },
+            name: Some("pipe".into()),
+            size: None,
+            mime: None,
+            transfer: None,
+        },
+    )
+    .await?;
+    log.info(&format!(
+        "late pipe receiver joined: {}",
+        sender.display_member(member_id)
+    ));
+    Ok(())
+}
+
+async fn maybe_start_join_sender_stream(
+    quiet: bool,
+    log: &mut PipeLog,
+    sender: &mut PipeSenderState,
+    done_tx: mpsc::UnboundedSender<Result<(), CliError>>,
+) -> Result<bool, CliError> {
+    maybe_start_host_sender_stream(quiet, log, sender, done_tx).await
+}
+
+async fn close_join_pipe_channels(authority_send: &mut SendStream, sender: &PipeSenderState) {
+    for channel_id in sender.open_channel_ids() {
         let _ = send_authority_command(
             authority_send,
             MachineCommand::CloseChannel {
@@ -921,10 +998,6 @@ async fn maybe_run_join_sender_stream(
         )
         .await;
     }
-    if !config.quiet {
-        log.info("pipe stream complete");
-    }
-    Ok(true)
 }
 
 async fn handle_sender_pipe_stream(
@@ -933,7 +1006,7 @@ async fn handle_sender_pipe_stream(
     stream: IncomingPipeStream,
 ) -> Result<bool, CliError> {
     let member_id = MemberId::new(stream.member_id.clone()).map_err(protocol_error)?;
-    if sender.channel_id.as_ref().map(ChannelId::as_str) != Some(stream.channel_id.as_str()) {
+    if !sender.channel_contains_str(stream.channel_id.as_str()) {
         return Err(CliError::protocol(format!(
             "unexpected pipe stream for channel {} from {}",
             stream.channel_id,
@@ -951,85 +1024,145 @@ async fn handle_sender_pipe_stream(
         "pipe receiver connected: {}",
         sender.display_member(&member_id)
     ));
-    sender
-        .streams
-        .insert(member_id, PipeReceiverStream::new(stream));
+    sender.attach_stream(member_id, stream)?;
     Ok(sender.ready())
 }
 
-async fn broadcast_stdin_to_pipe_receivers(
-    log: &mut PipeLog,
-    sender: &mut PipeSenderState,
+async fn run_pipe_broadcast(
+    quiet: bool,
+    mut receivers: BTreeMap<MemberId, PipeReceiverStream>,
+    mut commands: mpsc::UnboundedReceiver<PipeBroadcastCommand>,
 ) -> Result<(), CliError> {
-    for (member_id, receiver) in sender.streams.iter_mut() {
-        wait_for_receiver_credit(
-            log,
-            member_id,
-            sender.target_members.get(member_id),
-            receiver,
-        )
-        .await?;
-    }
-
     let mut stdin = tokio::io::stdin();
     let mut buffer = vec![0_u8; PIPE_CHUNK_BYTES];
     loop {
-        let chunk_len = sender
-            .streams
+        while let Ok(command) = commands.try_recv() {
+            apply_broadcast_command(&mut receivers, command);
+        }
+
+        if receivers.is_empty() {
+            match commands.recv().await {
+                Some(command) => {
+                    apply_broadcast_command(&mut receivers, command);
+                    continue;
+                }
+                None => break,
+            }
+        }
+
+        if let Some(member_id) = first_pending_receiver(&receivers) {
+            let member_name = receivers
+                .get(&member_id)
+                .map(|receiver| receiver.member_name.clone())
+                .unwrap_or_default();
+            tokio::select! {
+                command = commands.recv() => {
+                    match command {
+                        Some(command) => apply_broadcast_command(&mut receivers, command),
+                        None => break,
+                    }
+                }
+                credit = async {
+                    let receiver = receivers.get_mut(&member_id).expect("pending receiver should exist");
+                    wait_for_receiver_credit(quiet, &member_id, &member_name, receiver).await
+                } => {
+                    if credit.is_err() {
+                        receivers.remove(&member_id);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let chunk_len = receivers
             .values()
+            .filter(|receiver| receiver.active)
             .map(|receiver| receiver.available_credit)
             .min()
             .unwrap_or(0)
             .min(PIPE_CHUNK_BYTES as u64) as usize;
         if chunk_len == 0 {
-            let blocked = sender
-                .streams
-                .iter_mut()
-                .filter(|(_, receiver)| receiver.available_credit == 0)
-                .map(|(member_id, receiver)| (member_id.clone(), receiver))
-                .collect::<Vec<_>>();
-            for (member_id, receiver) in blocked {
-                wait_for_receiver_credit(
-                    log,
-                    &member_id,
-                    sender.target_members.get(&member_id),
-                    receiver,
-                )
-                .await?;
+            let Some(member_id) = first_blocked_active_receiver(&receivers) else {
+                continue;
+            };
+            let member_name = receivers
+                .get(&member_id)
+                .map(|receiver| receiver.member_name.clone())
+                .unwrap_or_default();
+            tokio::select! {
+                command = commands.recv() => {
+                    match command {
+                        Some(command) => apply_broadcast_command(&mut receivers, command),
+                        None => break,
+                    }
+                }
+                credit = async {
+                    let receiver = receivers.get_mut(&member_id).expect("blocked receiver should exist");
+                    wait_for_receiver_credit(quiet, &member_id, &member_name, receiver).await
+                } => {
+                    if credit.is_err() {
+                        receivers.remove(&member_id);
+                    }
+                }
             }
             continue;
         }
 
-        let read = stdin
-            .read(&mut buffer[..chunk_len])
-            .await
-            .map_err(|error| CliError::local_io(format!("failed reading stdin: {error}")))?;
+        let read = tokio::select! {
+            command = commands.recv() => {
+                match command {
+                    Some(command) => {
+                        apply_broadcast_command(&mut receivers, command);
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            read = stdin.read(&mut buffer[..chunk_len]) => {
+                read.map_err(|error| CliError::local_io(format!("failed reading stdin: {error}")))?
+            }
+        };
         if read == 0 {
             break;
         }
-        for receiver in sender.streams.values_mut() {
-            receiver
-                .stream
-                .write_all(&buffer[..read])
-                .await
-                .map_err(|error| CliError::transport(error.to_string()))?;
-            receiver.available_credit = receiver.available_credit.saturating_sub(read as u64);
+        let member_ids = receivers.keys().cloned().collect::<Vec<_>>();
+        for member_id in member_ids {
+            let failed = {
+                let receiver = receivers
+                    .get_mut(&member_id)
+                    .expect("receiver should exist while broadcasting");
+                if !receiver.active {
+                    false
+                } else {
+                    match receiver.stream.write_all(&buffer[..read]).await {
+                        Ok(()) => {
+                            receiver.available_credit =
+                                receiver.available_credit.saturating_sub(read as u64);
+                            false
+                        }
+                        Err(_) => true,
+                    }
+                }
+            };
+            if failed {
+                receivers.remove(&member_id);
+            }
         }
     }
-    for receiver in sender.streams.values_mut() {
+    for receiver in receivers.values_mut() {
         receiver
             .stream
             .finish()
             .await
-            .map_err(|error| CliError::transport(error.to_string()))?;
+            .ok();
     }
     Ok(())
 }
 
 async fn wait_for_receiver_credit(
-    log: &mut PipeLog,
+    quiet: bool,
     member_id: &MemberId,
-    member_name: Option<&String>,
+    member_name: &str,
     receiver: &mut PipeReceiverStream,
 ) -> Result<(), CliError> {
     let mut warning_delay = Duration::from_secs(SLOW_RECEIVER_FIRST_WARNING_SECS);
@@ -1037,20 +1170,57 @@ async fn wait_for_receiver_credit(
         match time::timeout(warning_delay, receiver.stream.read_credit()).await {
             Ok(Ok(credit)) => {
                 receiver.available_credit = receiver.available_credit.saturating_add(credit);
+                receiver.active = true;
                 return Ok(());
             }
             Ok(Err(error)) => return Err(CliError::transport(error.to_string())),
             Err(_) => {
-                log.warn(&format!(
-                    "warning: {} ({}) is slowing pipe stream; blocked for {}s",
-                    member_name.map(String::as_str).unwrap_or("peer"),
-                    member_id.as_str(),
-                    SLOW_RECEIVER_FIRST_WARNING_SECS
-                ));
+                if !quiet {
+                    eprintln!(
+                        "warning: {} ({}) is slowing pipe stream; blocked for {}s",
+                        member_name,
+                        member_id.as_str(),
+                        SLOW_RECEIVER_FIRST_WARNING_SECS
+                    );
+                }
                 warning_delay = Duration::from_secs(SLOW_RECEIVER_REPEAT_WARNING_SECS);
             }
         }
     }
+}
+
+fn apply_broadcast_command(
+    receivers: &mut BTreeMap<MemberId, PipeReceiverStream>,
+    command: PipeBroadcastCommand,
+) {
+    match command {
+        PipeBroadcastCommand::AddReceiver {
+            member_id,
+            member_name,
+            stream,
+        } => {
+            receivers.insert(member_id, PipeReceiverStream::new(stream, member_name));
+        }
+        PipeBroadcastCommand::RemoveReceiver { member_id } => {
+            receivers.remove(&member_id);
+        }
+    }
+}
+
+fn first_pending_receiver(receivers: &BTreeMap<MemberId, PipeReceiverStream>) -> Option<MemberId> {
+    receivers
+        .iter()
+        .find(|(_, receiver)| !receiver.active)
+        .map(|(member_id, _)| member_id.clone())
+}
+
+fn first_blocked_active_receiver(
+    receivers: &BTreeMap<MemberId, PipeReceiverStream>,
+) -> Option<MemberId> {
+    receivers
+        .iter()
+        .find(|(_, receiver)| receiver.active && receiver.available_credit == 0)
+        .map(|(member_id, _)| member_id.clone())
 }
 
 fn spawn_pipe_accept_loop(
@@ -1190,20 +1360,40 @@ fn room_error(error: RoomEngineError) -> CliError {
     CliError::protocol(error.to_string())
 }
 
-#[derive(Default)]
 struct PipeSenderState {
     channel_id: Option<ChannelId>,
     target_members: BTreeMap<MemberId, String>,
-    accepted_members: BTreeSet<MemberId>,
+    member_channels: BTreeMap<MemberId, ChannelId>,
     streams: BTreeMap<MemberId, PipeReceiverStream>,
+    broadcast_tx: Option<mpsc::UnboundedSender<PipeBroadcastCommand>>,
+    streaming: bool,
     completed: bool,
 }
 
 impl PipeSenderState {
     fn ready(&self) -> bool {
-        !self.target_members.is_empty()
-            && self.streams.len() == self.target_members.len()
+        !self.streaming
             && !self.completed
+            && !self.target_members.is_empty()
+            && self.streams.len() == self.target_members.len()
+    }
+
+    fn streaming_started(&self) -> bool {
+        self.streaming && !self.completed
+    }
+
+    fn channel_contains(&self, channel_id: &ChannelId) -> bool {
+        self.member_channels.values().any(|value| value == channel_id)
+    }
+
+    fn channel_contains_str(&self, channel_id: &str) -> bool {
+        self.member_channels
+            .values()
+            .any(|value| value.as_str() == channel_id)
+    }
+
+    fn channel_matches_member(&self, channel_id: &ChannelId, member_id: &MemberId) -> bool {
+        self.member_channels.get(member_id) == Some(channel_id)
     }
 
     fn display_member(&self, member_id: &MemberId) -> String {
@@ -1212,18 +1402,125 @@ impl PipeSenderState {
             .map(|name| format!("{name} ({})", member_id.as_str()))
             .unwrap_or_else(|| member_id.as_str().to_string())
     }
+
+    fn add_target(&mut self, member_id: MemberId, member_name: String, channel_id: ChannelId) {
+        self.target_members.insert(member_id.clone(), member_name);
+        self.member_channels.insert(member_id, channel_id);
+    }
+
+    fn next_late_channel_id(&self, member_id: &MemberId) -> Result<ChannelId, CliError> {
+        ChannelId::new(format!("{PIPE_CHANNEL_ID}-{}", member_id.as_str())).map_err(protocol_error)
+    }
+
+    fn attach_stream(
+        &mut self,
+        member_id: MemberId,
+        stream: IncomingPipeStream,
+    ) -> Result<(), CliError> {
+        if let Some(tx) = &self.broadcast_tx {
+            tx.send(PipeBroadcastCommand::AddReceiver {
+                member_name: self
+                    .target_members
+                    .get(&member_id)
+                    .cloned()
+                    .unwrap_or_else(|| member_id.as_str().to_string()),
+                member_id,
+                stream,
+            })
+            .map_err(|_| CliError::runtime("pipe broadcast task stopped unexpectedly"))?;
+        } else {
+            let member_name = self
+                .target_members
+                .get(&member_id)
+                .cloned()
+                .unwrap_or_else(|| member_id.as_str().to_string());
+            self.streams
+                .insert(member_id, PipeReceiverStream::new(stream, member_name));
+        }
+        Ok(())
+    }
+
+    fn start_broadcast(
+        &mut self,
+        quiet: bool,
+        log: &mut PipeLog,
+        done_tx: mpsc::UnboundedSender<Result<(), CliError>>,
+    ) -> Result<(), CliError> {
+        if self.streaming || self.completed {
+            return Ok(());
+        }
+        self.streaming = true;
+        log.info("pipe stream started; streaming stdin");
+        let initial_receivers = std::mem::take(&mut self.streams);
+        let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
+        self.broadcast_tx = Some(broadcast_tx);
+        tokio::spawn(async move {
+            let _ = done_tx.send(run_pipe_broadcast(quiet, initial_receivers, broadcast_rx).await);
+        });
+        Ok(())
+    }
+
+    fn remove_member(&mut self, member_id: &MemberId) {
+        self.target_members.remove(member_id);
+        self.member_channels.remove(member_id);
+        self.streams.remove(member_id);
+        if let Some(tx) = &self.broadcast_tx {
+            let _ = tx.send(PipeBroadcastCommand::RemoveReceiver {
+                member_id: member_id.clone(),
+            });
+        }
+    }
+
+    fn open_channel_ids(&self) -> Vec<ChannelId> {
+        let mut unique = BTreeMap::<String, ChannelId>::new();
+        for channel_id in self.member_channels.values() {
+            unique
+                .entry(channel_id.as_str().to_string())
+                .or_insert_with(|| channel_id.clone());
+        }
+        unique.into_values().collect()
+    }
 }
 
 struct PipeReceiverStream {
     stream: IncomingPipeStream,
+    member_name: String,
     available_credit: u64,
+    active: bool,
 }
 
 impl PipeReceiverStream {
-    fn new(stream: IncomingPipeStream) -> Self {
+    fn new(stream: IncomingPipeStream, member_name: String) -> Self {
         Self {
             stream,
+            member_name,
             available_credit: 0,
+            active: false,
+        }
+    }
+}
+
+enum PipeBroadcastCommand {
+    AddReceiver {
+        member_id: MemberId,
+        member_name: String,
+        stream: IncomingPipeStream,
+    },
+    RemoveReceiver {
+        member_id: MemberId,
+    },
+}
+
+impl Default for PipeSenderState {
+    fn default() -> Self {
+        Self {
+            channel_id: None,
+            target_members: BTreeMap::new(),
+            member_channels: BTreeMap::new(),
+            streams: BTreeMap::new(),
+            broadcast_tx: None,
+            streaming: false,
+            completed: false,
         }
     }
 }
@@ -1271,31 +1568,5 @@ impl PipeLog {
         if !self.quiet {
             eprintln!("{message}");
         }
-    }
-
-    fn warn(&self, message: &str) {
-        if !self.quiet {
-            eprintln!("{message}");
-        }
-    }
-}
-
-trait HasQuiet {
-    fn quiet(&self) -> bool;
-}
-
-impl HasQuiet for SessionConfig {
-    fn quiet(&self) -> bool {
-        self.quiet
-    }
-}
-
-struct SessionConfigQuiet {
-    quiet: bool,
-}
-
-impl HasQuiet for SessionConfigQuiet {
-    fn quiet(&self) -> bool {
-        self.quiet
     }
 }

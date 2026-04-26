@@ -543,7 +543,7 @@ Native pipe mode is intentionally stream-oriented instead of file-oriented:
 - no filename, size, temp file, or digest metadata
 - sender exits when stdin reaches EOF and all active receiver streams close
 - receiver exits when the stream closes
-- the receiver set is fixed when the pipe channel opens
+- receivers present at start get the full stream, and later receivers join live from the current byte position
 - broadcast is lossless; the slowest active receiver applies backpressure
 - sender warning logs identify receivers that block the stream for more than 5 seconds
 
@@ -581,7 +581,7 @@ An explicit command-line room ID takes precedence over the environment variable.
 | `-c` | `--send-clipboard` | stay online and send clipboard text changes |
 | `-C` | `--receive-clipboard` | stay online and apply incoming clipboard text updates |
 |  | `--pipe` | stream raw bytes through the room, inferring send/receive from stdin/stdout redirection |
-|  | `--pipe-send` | stream raw stdin bytes to all current room members |
+|  | `--pipe-send` | stream raw stdin bytes into a live room pipe; late receivers join from the current byte position |
 |  | `--pipe-receive` | receive one raw pipe stream and write it to stdout |
 | `-S <url>` | `--server <url>` | use a specific rendezvous server |
 | `-d <path>` | `--download-dir <path>` | save accepted transfers in a specific directory |

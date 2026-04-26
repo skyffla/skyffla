@@ -3,6 +3,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use iroh::endpoint::{Connection, ReadError, ReadExactError, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
@@ -13,6 +14,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    time,
 };
 
 pub const SKYFFLA_ALPN: &[u8] = b"skyffla/native/1";
@@ -193,7 +195,7 @@ impl IncomingPipeStream {
         self.send
             .finish()
             .map_err(|error| TransportError::DirectFileSend(error.to_string()))?;
-        let _ = self.request_recv.read_to_end(1024).await;
+        let _ = time::timeout(Duration::from_millis(250), self.request_recv.read_to_end(1024)).await;
         Ok(())
     }
 }

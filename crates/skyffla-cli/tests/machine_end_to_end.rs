@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, Mutex};
 
 mod support;
@@ -504,6 +504,149 @@ async fn native_pipe_streams_stdin_to_multiple_receivers() -> Result<()> {
     receiver1.wait_for_exit().await?;
     receiver2.wait_for_exit().await?;
     sender.wait_for_exit().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pipe_allows_late_receivers_to_join_live_stream() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let receiver1_home = fresh_test_dir("skyffla-cli-pipe-late-receiver1");
+    let receiver2_home = fresh_test_dir("skyffla-cli-pipe-late-receiver2");
+    let sender_home = fresh_test_dir("skyffla-cli-pipe-late-sender");
+    for home in [&receiver1_home, &receiver2_home, &sender_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut receiver1 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver1",
+        &receiver1_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    wait_for_room_ready(&server.url, &room).await?;
+
+    let mut sender = AutoProc::spawn_args_live_stdin(
+        &room,
+        &server.url,
+        "sender",
+        &sender_home,
+        &["--pipe-send"],
+    )
+    .await?;
+    sender
+        .expect_stderr_contains("pipe receiver connected: receiver1")
+        .await?;
+
+    sender.write_stdin(b"first\n").await?;
+    receiver1.expect_stdout_contains("first").await?;
+
+    let mut receiver2 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver2",
+        &receiver2_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    sender
+        .expect_stderr_contains("pipe receiver connected: receiver2")
+        .await?;
+
+    sender.write_stdin(b"second\n").await?;
+    receiver1.expect_stdout_contains("second").await?;
+    receiver2.expect_stdout_contains("second").await?;
+
+    let receiver2_stdout = receiver2.stdout_seen.lock().await.join("\n");
+    assert!(
+        !receiver2_stdout.contains("first"),
+        "late receiver unexpectedly saw earlier bytes:\n{}",
+        receiver2.debug_dump().await
+    );
+
+    sender.close_stdin().await?;
+    sender.wait_for_exit().await?;
+    receiver1.wait_for_exit().await?;
+    receiver2.wait_for_exit().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pipe_continues_after_receiver_disconnect() -> Result<()> {
+    let Some(server) = TestServer::spawn().await? else {
+        return Ok(());
+    };
+
+    let receiver1_home = fresh_test_dir("skyffla-cli-pipe-drop-receiver1");
+    let receiver2_home = fresh_test_dir("skyffla-cli-pipe-drop-receiver2");
+    let sender_home = fresh_test_dir("skyffla-cli-pipe-drop-sender");
+    for home in [&receiver1_home, &receiver2_home, &sender_home] {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("failed to create {}", home.display()))?;
+    }
+
+    let room = unique_room_name();
+    let mut receiver1 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver1",
+        &receiver1_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    wait_for_room_ready(&server.url, &room).await?;
+
+    let mut receiver2 = AutoProc::spawn_args(
+        &room,
+        &server.url,
+        "receiver2",
+        &receiver2_home,
+        &["--pipe-receive"],
+        None,
+    )
+    .await?;
+    receiver1.expect_stderr_contains("connected to receiver2").await?;
+    receiver2.expect_stderr_contains("connected to receiver1").await?;
+
+    let mut sender = AutoProc::spawn_args_live_stdin(
+        &room,
+        &server.url,
+        "sender",
+        &sender_home,
+        &["--pipe-send"],
+    )
+    .await?;
+    sender
+        .expect_stderr_contains("pipe receiver connected: receiver1")
+        .await?;
+    sender
+        .expect_stderr_contains("pipe receiver connected: receiver2")
+        .await?;
+
+    sender.write_stdin(b"one\n").await?;
+    receiver1.expect_stdout_contains("one").await?;
+    receiver2.expect_stdout_contains("one").await?;
+
+    receiver2.shutdown().await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    sender.write_stdin(b"two\n").await?;
+    receiver1.expect_stdout_contains("two").await?;
+
+    sender.close_stdin().await?;
+    sender.wait_for_exit().await?;
+    receiver1.wait_for_exit().await?;
     server.abort();
     Ok(())
 }
@@ -1054,6 +1197,7 @@ struct MachineProc {
 struct AutoProc {
     label: String,
     child: Child,
+    stdin: Option<ChildStdin>,
     stdout_rx: mpsc::UnboundedReceiver<String>,
     stderr_rx: mpsc::UnboundedReceiver<String>,
     stdout_seen: Arc<Mutex<Vec<String>>>,
@@ -1134,6 +1278,29 @@ impl AutoProc {
         args: &[&str],
         stdin_payload: Option<&[u8]>,
     ) -> Result<Self> {
+        Self::spawn_args_with_stdin_mode(room, server_url, name, home, args, stdin_payload, false)
+            .await
+    }
+
+    async fn spawn_args_live_stdin(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        args: &[&str],
+    ) -> Result<Self> {
+        Self::spawn_args_with_stdin_mode(room, server_url, name, home, args, None, true).await
+    }
+
+    async fn spawn_args_with_stdin_mode(
+        room: &str,
+        server_url: &str,
+        name: &str,
+        home: &Path,
+        args: &[&str],
+        stdin_payload: Option<&[u8]>,
+        keep_stdin_open: bool,
+    ) -> Result<Self> {
         let bin = env!("CARGO_BIN_EXE_skyffla");
         let mut command = Command::new(bin);
         command
@@ -1146,7 +1313,7 @@ impl AutoProc {
             .env("HOME", home)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if stdin_payload.is_some() {
+        if stdin_payload.is_some() || keep_stdin_open {
             command.stdin(Stdio::piped());
         } else {
             command.stdin(Stdio::null());
@@ -1156,16 +1323,21 @@ impl AutoProc {
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn automation process {name}"))?;
+        let mut stdin = child.stdin.take();
         if let Some(payload) = stdin_payload {
-            let mut stdin = child.stdin.take().context("child stdin missing")?;
-            stdin
+            let mut stdin_handle = stdin.take().context("child stdin missing")?;
+            stdin_handle
                 .write_all(payload)
                 .await
                 .with_context(|| format!("failed to write stdin payload for {name}"))?;
-            stdin
-                .shutdown()
-                .await
-                .with_context(|| format!("failed to close stdin payload for {name}"))?;
+            if keep_stdin_open {
+                stdin = Some(stdin_handle);
+            } else {
+                stdin_handle
+                    .shutdown()
+                    .await
+                    .with_context(|| format!("failed to close stdin payload for {name}"))?;
+            }
         }
         let stdout = child.stdout.take().context("child stdout missing")?;
         let stderr = child.stderr.take().context("child stderr missing")?;
@@ -1179,11 +1351,38 @@ impl AutoProc {
         Ok(Self {
             label: format!("auto:{name}"),
             child,
+            stdin,
             stdout_rx,
             stderr_rx,
             stdout_seen,
             stderr_seen,
         })
+    }
+
+    async fn write_stdin(&mut self, bytes: &[u8]) -> Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("{} stdin already closed", self.label))?;
+        stdin
+            .write_all(bytes)
+            .await
+            .with_context(|| format!("failed writing stdin for {}", self.label))?;
+        stdin
+            .flush()
+            .await
+            .with_context(|| format!("failed flushing stdin for {}", self.label))?;
+        Ok(())
+    }
+
+    async fn close_stdin(&mut self) -> Result<()> {
+        if let Some(mut stdin) = self.stdin.take() {
+            stdin
+                .shutdown()
+                .await
+                .with_context(|| format!("failed closing stdin for {}", self.label))?;
+        }
+        Ok(())
     }
 
     async fn expect_stdout_contains(&mut self, needle: &str) -> Result<String> {
