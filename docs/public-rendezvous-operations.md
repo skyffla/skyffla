@@ -65,6 +65,43 @@ counter, then verify HTTPS health and a complete host/join flow. Also verify
 that the service dependency and rule survive a reboot during a maintenance
 window. Never exempt public response traffic from the cap to improve latency.
 
+## Administrator access
+
+Use authenticated Google IAP for SSH. For the IPv4-only rendezvous VM, scope
+both firewall rules to its service tag: allow TCP 22 from `35.235.240.0/20`
+at priority 800, then deny TCP 22, TCP/UDP 3389 and ICMP from `0.0.0.0/0`
+at priority 900. The IAP allowance must take precedence over the deny rule,
+and both must take precedence over the network's default allow rules.
+Keep firewall packet logging disabled to avoid attack-driven logging charges.
+Review equivalent IPv6 rules before adding an external IPv6 address.
+
+Test a fresh IAP session with the existing administrator SSH key before applying
+the deny rule, and repeat the test afterward. Configure the administrator's
+SSH host entry with an IAP `ProxyCommand`, preserving the existing username
+and key. Its command takes this form (replace the uppercase placeholders):
+
+```sh
+gcloud compute start-iap-tunnel INSTANCE_NAME 22 --listen-on-stdin \
+  --project=PROJECT_ID --zone=ZONE --verbosity=error
+```
+
+IAP requires a valid Google Cloud login and appropriate IAM access in addition
+to the VM's SSH authentication. Verify that new public SSH/RDP connections and
+ping fail while IAP SSH and public HTTPS still work. The web-response limiter
+does not cap authenticated administrative traffic.
+
+## Dollar ceiling limitations
+
+Google Cloud spend-cap budgets do not currently cover Compute Engine. Even
+eligible services can exceed a cap before enforcement. Budget-triggered billing
+shutdown also has reporting delays and can disrupt or delete project resources;
+it cannot guarantee a precise monthly maximum.
+
+For a contractual hosting ceiling, use a fixed-price service with included
+bandwidth and no automatic usage overages, checking tax, renewal prices and
+optional extras before ordering. The controls here bound traffic and resource
+use; they do not turn Google Cloud usage billing into a fixed-price contract.
+
 ## Other cost controls
 
 - Keep one fixed-size VM and fixed-size disk; do not enable automatic scaling.
@@ -84,4 +121,6 @@ Pricing and service coverage must be rechecked when changing the deployment:
 
 - [Google Cloud network pricing](https://cloud.google.com/vpc/network-pricing)
 - [Google Cloud spend cap coverage](https://cloud.google.com/billing/docs/how-to/budgets-spend-caps)
+- [Budget-triggered shutdown limitations](https://cloud.google.com/billing/docs/how-to/disable-billing-with-notifications)
+- [Google IAP TCP forwarding](https://cloud.google.com/iap/docs/using-tcp-forwarding)
 - [nftables rate limiter](https://netfilter.org/projects/nftables/manpage.html)
