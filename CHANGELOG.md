@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the project aims to follow Semantic 
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-15
+
 - Require HTTPS for public rendezvous discovery and private ownership tokens for registration changes (rendezvous API `3.0`; clients and servers must upgrade together).
 - Validate and bound room registrations, cap registry size, and apply bounded per-IP and global request limits before JSON parsing.
 - Document public-service resource limits and enforced outbound traffic protection against bandwidth-cost abuse.
