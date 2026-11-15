@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from skyffla import (
 )
 
 RENDEZVOUS_VERSION_HEADER = "x-skyffla-rendezvous-version"
-RENDEZVOUS_API_VERSION = "2.0"
+RENDEZVOUS_API_VERSION = "3.0"
 
 
 def _find_binary() -> str:
@@ -113,6 +114,10 @@ class RendezvousHandler(BaseHTTPRequestHandler):
         self._send_json(200, payload)
 
     def do_PUT(self) -> None:  # noqa: N802
+        owner_token = self.headers.get("Authorization", "")
+        if not re.fullmatch(r"Bearer [0-9a-f]{64}", owner_token):
+            self._send_json(401, {"error": "ownership_token_required"})
+            return
         room_id = self._room_id()
         if room_id is None:
             self.send_error(404)
@@ -124,7 +129,7 @@ class RendezvousHandler(BaseHTTPRequestHandler):
 
         with self.server.lock:
             existing = self.server.rooms.get(room_id)
-            if existing is not None and existing["ticket"] != payload["ticket"]:
+            if existing is not None and existing["owner_token"] != owner_token:
                 self._send_json(
                     409,
                     {
@@ -134,6 +139,7 @@ class RendezvousHandler(BaseHTTPRequestHandler):
                 )
                 return
             self.server.rooms[room_id] = {
+                "owner_token": owner_token,
                 "ticket": payload["ticket"],
                 "capabilities": payload["capabilities"],
                 "expires_at_epoch_seconds": expires_at,
@@ -155,6 +161,10 @@ class RendezvousHandler(BaseHTTPRequestHandler):
             return
 
         with self.server.lock:
+            existing = self.server.rooms.get(room_id)
+            if existing is not None and existing["owner_token"] != self.headers.get("Authorization"):
+                self._send_json(403, {"error": "not_room_owner"})
+                return
             self.server.rooms.pop(room_id, None)
         self.send_response(204)
         self.send_header(RENDEZVOUS_VERSION_HEADER, RENDEZVOUS_API_VERSION)

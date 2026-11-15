@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Room, SkyfflaProcessExited } from "../src/index.js";
 
 const RENDEZVOUS_VERSION_HEADER = "x-skyffla-rendezvous-version";
-const RENDEZVOUS_API_VERSION = "2.0";
+const RENDEZVOUS_API_VERSION = "3.0";
 
 async function findBinary(t) {
   if (process.env.SKYFFLA_BIN) {
@@ -103,6 +103,11 @@ class RendezvousStub {
     }
 
     if (req.method === "PUT") {
+      const ownerToken = req.headers.authorization ?? "";
+      if (!/^Bearer [0-9a-f]{64}$/.test(ownerToken)) {
+        this.sendJson(res, 401, { error: "ownership_token_required" });
+        return;
+      }
       let body = "";
       req.setEncoding("utf8");
       req.on("data", (chunk) => {
@@ -112,7 +117,7 @@ class RendezvousStub {
         const payload = JSON.parse(body);
         const expiresAt = Math.floor(Date.now() / 1000) + Number(payload.ttl_seconds);
         const existing = this.rooms.get(roomId);
-        if (existing && existing.ticket !== payload.ticket) {
+        if (existing && existing.ownerToken !== ownerToken) {
           this.sendJson(res, 409, {
             error: "room_already_exists",
             message: `room ${roomId} is already hosted`,
@@ -120,6 +125,7 @@ class RendezvousStub {
           return;
         }
         this.rooms.set(roomId, {
+          ownerToken,
           ticket: payload.ticket,
           capabilities: payload.capabilities,
           expires_at_epoch_seconds: expiresAt,
@@ -134,6 +140,11 @@ class RendezvousStub {
     }
 
     if (req.method === "DELETE") {
+      const existing = this.rooms.get(roomId);
+      if (existing && existing.ownerToken !== req.headers.authorization) {
+        this.sendJson(res, 403, { error: "not_room_owner" });
+        return;
+      }
       this.rooms.delete(roomId);
       res.statusCode = 204;
       res.setHeader(RENDEZVOUS_VERSION_HEADER, RENDEZVOUS_API_VERSION);
