@@ -1,13 +1,13 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Args, Parser};
 
 use crate::accept_policy::AutoAcceptPolicy;
 use crate::cli_error::CliError;
 
-pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "http://rendezvous.skyffla.com:8080";
+pub(crate) const DEFAULT_RENDEZVOUS_URL: &str = "https://rendezvous.skyffla.com";
 
 #[derive(Parser)]
 #[command(name = "skyffla")]
@@ -393,17 +393,7 @@ fn resolve_auto_accept_policy(
 }
 
 fn validate_room_id(room_id: &str) -> Result<()> {
-    if room_id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        return Ok(());
-    }
-
-    bail!(
-        "invalid room id {:?}: use only ASCII letters, digits, '-' or '_'",
-        room_id
-    );
+    skyffla_rendezvous::validate_room_id(room_id).map_err(Into::into)
 }
 
 #[cfg(test)]

@@ -3694,9 +3694,11 @@ version = "2.2.1"
 dependencies = [
  "axum",
  "http-body-util",
+ "iroh-base",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "skyffla-protocol",
  "tokio",
  "tower",

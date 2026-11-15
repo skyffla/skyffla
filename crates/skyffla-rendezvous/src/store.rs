@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
-    GetRoomResponse, PutRoomRequest, PutRoomResponse, RegistryError, RoomRecord, RoomRegistry,
+    validate_room_id, GetRoomResponse, OwnerHash, PutRoomRequest, PutRoomResponse, RegistryError,
+    RoomRegistry, MAX_ROOMS,
 };
 
 pub trait RoomStore: Send + Sync {
@@ -12,12 +13,13 @@ pub trait RoomStore: Send + Sync {
         &self,
         room_id: &str,
         request: PutRoomRequest,
+        owner_hash: OwnerHash,
         now_epoch_seconds: u64,
     ) -> Result<PutRoomResponse, StoreError>;
 
     fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError>;
 
-    fn delete(&self, room_id: &str) -> Result<bool, StoreError>;
+    fn delete(&self, room_id: &str, owner_hash: OwnerHash) -> Result<bool, StoreError>;
 
     fn purge_expired(&self, now_epoch_seconds: u64) -> Result<usize, StoreError>;
 }
@@ -48,12 +50,13 @@ impl RoomStore for InMemoryRoomStore {
         &self,
         room_id: &str,
         request: PutRoomRequest,
+        owner_hash: OwnerHash,
         now_epoch_seconds: u64,
     ) -> Result<PutRoomResponse, StoreError> {
         self.inner
             .lock()
             .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
-            .put(room_id, request, now_epoch_seconds)
+            .put(room_id, request, owner_hash, now_epoch_seconds)
             .map_err(StoreError::from)
     }
 
@@ -65,12 +68,12 @@ impl RoomStore for InMemoryRoomStore {
             .map_err(StoreError::from)
     }
 
-    fn delete(&self, room_id: &str) -> Result<bool, StoreError> {
-        Ok(self
-            .inner
+    fn delete(&self, room_id: &str, owner_hash: OwnerHash) -> Result<bool, StoreError> {
+        self.inner
             .lock()
             .map_err(|_| StoreError::Storage("in-memory room store lock poisoned".into()))?
-            .delete(room_id))
+            .delete(room_id, owner_hash)
+            .map_err(StoreError::from)
     }
 
     fn purge_expired(&self, now_epoch_seconds: u64) -> Result<usize, StoreError> {
@@ -113,8 +116,23 @@ impl SqliteRoomStore {
                     room_id TEXT PRIMARY KEY,
                     ticket TEXT NOT NULL,
                     capabilities_json TEXT NOT NULL,
-                    expires_at_epoch_seconds INTEGER NOT NULL
+                    expires_at_epoch_seconds INTEGER NOT NULL,
+                    owner_hash BLOB
                 );",
+            )?;
+            let has_owner: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('rooms') WHERE name = 'owner_hash')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_owner {
+                connection.execute("ALTER TABLE rooms ADD COLUMN owner_hash BLOB", [])?;
+            }
+            // Legacy discovery records have no verifiable owner and cannot be adopted safely.
+            connection.execute_batch(
+                "DELETE FROM rooms WHERE owner_hash IS NULL;
+                 CREATE INDEX IF NOT EXISTS rooms_expiry ON rooms(expires_at_epoch_seconds);
+                 PRAGMA max_page_count = 16384;",
             )?;
             Ok(())
         })
@@ -136,10 +154,14 @@ impl RoomStore for SqliteRoomStore {
     fn put(
         &self,
         room_id: &str,
-        request: PutRoomRequest,
+        mut request: PutRoomRequest,
+        owner_hash: OwnerHash,
         now_epoch_seconds: u64,
     ) -> Result<PutRoomResponse, StoreError> {
+        request.validate(room_id)?;
         self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let connection = &transaction;
             connection.execute(
                 "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
                 params![now_epoch_seconds as i64],
@@ -147,16 +169,16 @@ impl RoomStore for SqliteRoomStore {
 
             let ttl_seconds = request.normalized_ttl_seconds()?;
             let expires_at_epoch_seconds = now_epoch_seconds + ttl_seconds;
-            let existing_ticket: Option<String> = connection
+            let existing_owner: Option<Vec<u8>> = connection
                 .query_row(
-                    "SELECT ticket FROM rooms WHERE room_id = ?1",
+                    "SELECT owner_hash FROM rooms WHERE room_id = ?1",
                     params![room_id],
                     |row| row.get(0),
                 )
                 .optional()?;
 
-            if let Some(ticket) = existing_ticket {
-                if ticket != request.ticket {
+            if let Some(existing_owner) = existing_owner {
+                if existing_owner != owner_hash {
                     return Err(StoreError::Registry(RegistryError::RoomAlreadyExists {
                         room_id: room_id.to_string(),
                     }));
@@ -166,28 +188,35 @@ impl RoomStore for SqliteRoomStore {
                     serde_json::to_string(&request.capabilities).map_err(StoreError::from)?;
                 connection.execute(
                     "UPDATE rooms
-                     SET capabilities_json = ?1, expires_at_epoch_seconds = ?2
+                     SET capabilities_json = ?1, expires_at_epoch_seconds = ?2, ticket = ?4
                      WHERE room_id = ?3",
                     params![
                         capabilities_json,
                         expires_at_epoch_seconds as i64,
-                        room_id
+                        room_id,
+                        request.ticket
                     ],
                 )?;
             } else {
+                let count: usize = connection.query_row("SELECT COUNT(*) FROM rooms", [], |row| row.get(0))?;
+                if count >= MAX_ROOMS {
+                    return Err(RegistryError::CapacityExceeded.into());
+                }
                 let capabilities_json =
                     serde_json::to_string(&request.capabilities).map_err(StoreError::from)?;
                 connection.execute(
-                    "INSERT INTO rooms (room_id, ticket, capabilities_json, expires_at_epoch_seconds)
-                     VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO rooms (room_id, ticket, capabilities_json, expires_at_epoch_seconds, owner_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         room_id,
                         request.ticket,
                         capabilities_json,
-                        expires_at_epoch_seconds as i64
+                        expires_at_epoch_seconds as i64,
+                        owner_hash.as_slice()
                     ],
                 )?;
             }
+            transaction.commit()?;
 
             Ok(PutRoomResponse {
                 room_id: room_id.to_string(),
@@ -198,13 +227,14 @@ impl RoomStore for SqliteRoomStore {
     }
 
     fn get(&self, room_id: &str, now_epoch_seconds: u64) -> Result<GetRoomResponse, StoreError> {
+        validate_room_id(room_id)?;
         self.with_connection(|connection| {
             connection.execute(
                 "DELETE FROM rooms WHERE expires_at_epoch_seconds <= ?1",
                 params![now_epoch_seconds as i64],
             )?;
 
-            let record: Option<RoomRecord> = connection
+            let record: Option<GetRoomResponse> = connection
                 .query_row(
                     "SELECT room_id, ticket, capabilities_json, expires_at_epoch_seconds
                      FROM rooms
@@ -220,7 +250,7 @@ impl RoomStore for SqliteRoomStore {
                                     Box::new(error),
                                 )
                             })?;
-                        Ok(RoomRecord {
+                        Ok(GetRoomResponse {
                             room_id: row.get(0)?,
                             ticket: row.get(1)?,
                             capabilities,
@@ -230,7 +260,7 @@ impl RoomStore for SqliteRoomStore {
                 )
                 .optional()?;
 
-            record.map(|entry| entry.as_get_response()).ok_or_else(|| {
+            record.ok_or_else(|| {
                 StoreError::Registry(RegistryError::RoomNotFound {
                     room_id: room_id.to_string(),
                 })
@@ -238,10 +268,22 @@ impl RoomStore for SqliteRoomStore {
         })
     }
 
-    fn delete(&self, room_id: &str) -> Result<bool, StoreError> {
+    fn delete(&self, room_id: &str, owner_hash: OwnerHash) -> Result<bool, StoreError> {
+        validate_room_id(room_id)?;
         self.with_connection(|connection| {
-            let deleted =
-                connection.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
+            let deleted = connection.execute(
+                "DELETE FROM rooms WHERE room_id = ?1 AND owner_hash = ?2",
+                params![room_id, owner_hash.as_slice()],
+            )?;
+            if deleted == 0
+                && connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM rooms WHERE room_id = ?1)",
+                    params![room_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return Err(RegistryError::NotOwner.into());
+            }
             Ok(deleted > 0)
         })
     }
@@ -309,9 +351,65 @@ mod tests {
 
     fn sample_request() -> PutRoomRequest {
         PutRoomRequest {
-            ticket: "bootstrap-ticket".into(),
+            ticket: crate::test_ticket(1),
             ttl_seconds: DEFAULT_TTL_SECONDS,
             capabilities: Capabilities::default(),
+        }
+    }
+
+    #[test]
+    fn legacy_unowned_records_are_removed_but_owned_records_survive_reopening() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE rooms (room_id TEXT PRIMARY KEY, ticket TEXT NOT NULL,
+             capabilities_json TEXT NOT NULL, expires_at_epoch_seconds INTEGER NOT NULL);
+             INSERT INTO rooms VALUES ('legacy', 'old-ticket', '{}', 9999999999);",
+            )
+            .unwrap();
+        let store = SqliteRoomStore::from_connection(connection).unwrap();
+        assert!(matches!(
+            store.get("legacy", 1000).unwrap_err().as_registry_error(),
+            Some(RegistryError::RoomNotFound { .. })
+        ));
+        store.put("owned", sample_request(), [1; 32], 1000).unwrap();
+        let store =
+            SqliteRoomStore::from_connection(store.connection.into_inner().unwrap()).unwrap();
+        assert!(store.get("owned", 1001).is_ok());
+        assert!(matches!(
+            store
+                .delete("owned", [2; 32])
+                .unwrap_err()
+                .as_registry_error(),
+            Some(RegistryError::NotOwner)
+        ));
+        assert!(store.delete("owned", [1; 32]).unwrap());
+    }
+
+    #[test]
+    fn both_stores_bound_registration_count_without_preventing_owner_refresh_or_expiry_reuse() {
+        for store in [
+            Arc::new(InMemoryRoomStore::new()) as SharedRoomStore,
+            Arc::new(SqliteRoomStore::new_in_memory().unwrap()),
+        ] {
+            for index in 0..MAX_ROOMS {
+                store
+                    .put(&format!("room-{index}"), sample_request(), [1; 32], 1000)
+                    .unwrap();
+            }
+            assert!(matches!(
+                store
+                    .put("overflow", sample_request(), [1; 32], 1001)
+                    .unwrap_err()
+                    .as_registry_error(),
+                Some(RegistryError::CapacityExceeded)
+            ));
+            store
+                .put("room-0", sample_request(), [1; 32], 1001)
+                .unwrap();
+            store
+                .put("overflow", sample_request(), [2; 32], 1601)
+                .unwrap();
         }
     }
 
@@ -319,7 +417,7 @@ mod tests {
     fn sqlite_store_put_get_and_delete_round_trip() {
         let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
-            .put("demo-room", sample_request(), 1_000)
+            .put("demo-room", sample_request(), [1; 32], 1_000)
             .expect("put should succeed");
 
         let resolved = store
@@ -327,7 +425,9 @@ mod tests {
             .expect("get should resolve stored room");
         assert_eq!(resolved.room_id, "demo-room");
 
-        assert!(store.delete("demo-room").expect("delete should succeed"));
+        assert!(store
+            .delete("demo-room", [1; 32])
+            .expect("delete should succeed"));
         let missing = store.get("demo-room", 1_001);
         assert!(matches!(
             missing,
@@ -339,12 +439,12 @@ mod tests {
     fn sqlite_store_rejects_conflicting_live_host() {
         let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
-            .put("demo-room", sample_request(), 1_000)
+            .put("demo-room", sample_request(), [1; 32], 1_000)
             .expect("first put should succeed");
 
         let mut conflicting = sample_request();
-        conflicting.ticket = "different-ticket".into();
-        let result = store.put("demo-room", conflicting, 1_050);
+        conflicting.ticket = crate::test_ticket(2);
+        let result = store.put("demo-room", conflicting, [2; 32], 1_050);
         assert!(matches!(
             result,
             Err(StoreError::Registry(
@@ -354,16 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_store_refreshes_matching_ticket() {
+    fn sqlite_store_refreshes_matching_owner() {
         let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
-            .put("demo-room", sample_request(), 1_000)
+            .put("demo-room", sample_request(), [1; 32], 1_000)
             .expect("first put should succeed");
 
         let mut refresh = sample_request();
         refresh.ttl_seconds = MAX_TTL_SECONDS + 10;
         let response = store
-            .put("demo-room", refresh, 1_100)
+            .put("demo-room", refresh, [1; 32], 1_100)
             .expect("matching ticket should refresh");
         assert_eq!(response.expires_at_epoch_seconds, 1_100 + MAX_TTL_SECONDS);
     }
@@ -372,7 +472,7 @@ mod tests {
     fn sqlite_store_purges_expired_rows() {
         let store = SqliteRoomStore::new_in_memory().expect("store should initialize");
         store
-            .put("demo-room", sample_request(), 1_000)
+            .put("demo-room", sample_request(), [1; 32], 1_000)
             .expect("first put should succeed");
 
         let purged = store.purge_expired(1_700).expect("purge should succeed");

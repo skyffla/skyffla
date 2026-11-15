@@ -12,7 +12,9 @@ use crate::config::{Role, SessionArgs, SessionConfig};
 use crate::net::local_discovery::{
     enable_local_discovery, resolve_local_join_decision, LocalAnnouncement, LocalJoinDecision,
 };
-use crate::net::rendezvous::{delete_room, register_room, resolve_room, RegisterRoomError};
+use crate::net::rendezvous::{
+    delete_room, new_client, register_room, resolve_room, RegisterRoomError, RoomRegistration,
+};
 use crate::runtime::machine::run_machine_host;
 use crate::runtime::pipe::run_pipe_host;
 use crate::runtime::room_tui::run_room_tui;
@@ -42,22 +44,32 @@ pub(crate) async fn run_host(args: SessionArgs) -> Result<(), CliError> {
         return run_host_local(&config, &sink, &mut session).await;
     }
 
-    let client = Client::new();
+    let client = new_client(&config).map_err(|error| CliError::rendezvous(error.to_string()))?;
     let transport = IrohTransport::bind_with_options(TransportOptions { local_only: false })
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
     let ticket = transport
         .local_ticket()
         .map_err(|error| CliError::transport(error.to_string()))?;
-    register_room(&client, &config, &ticket)
-        .await
-        .map_err(|error| match error {
-            RegisterRoomError::AlreadyHosted { room_id, .. } => {
-                CliError::rendezvous(format!("room {room_id} is already hosted"))
-            }
-            RegisterRoomError::Other(error) => CliError::rendezvous(error.to_string()),
-        })?;
-    wait_for_incoming_peer(&config, &sink, &mut session, &client, transport, false).await
+    let registration =
+        register_room(&client, &config, &ticket)
+            .await
+            .map_err(|error| match error {
+                RegisterRoomError::AlreadyHosted { room_id, .. } => {
+                    CliError::rendezvous(format!("room {room_id} is already hosted"))
+                }
+                RegisterRoomError::Other(error) => CliError::rendezvous(error.to_string()),
+            })?;
+    wait_for_incoming_peer(
+        &config,
+        &sink,
+        &mut session,
+        &client,
+        transport,
+        registration,
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
@@ -83,7 +95,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
         return run_join_local(&mut config, &sink, &mut session).await;
     }
 
-    let client = Client::new();
+    let client = new_client(&config).map_err(|error| CliError::rendezvous(error.to_string()))?;
     let transport = IrohTransport::bind_with_options(TransportOptions { local_only: false })
         .await
         .map_err(|error| CliError::transport(error.to_string()))?;
@@ -98,7 +110,7 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
         .local_ticket()
         .map_err(|error| CliError::transport(error.to_string()))?;
     match register_room(&client, &config, &ticket).await {
-        Ok(()) => {
+        Ok(registration) => {
             config.role = Role::Host;
             sink.emit_runtime_event(state_changed_event(
                 session
@@ -108,7 +120,16 @@ pub(crate) async fn run_join(args: SessionArgs) -> Result<(), CliError> {
                     .context("failed to enter hosting state after join lookup")
                     .map_err(|error| CliError::runtime(error.to_string()))?,
             ));
-            wait_for_incoming_peer(&config, &sink, &mut session, &client, transport, true).await
+            wait_for_incoming_peer(
+                &config,
+                &sink,
+                &mut session,
+                &client,
+                transport,
+                registration,
+                true,
+            )
+            .await
         }
         Err(RegisterRoomError::AlreadyHosted { room_id, .. }) => {
             let peer = resolve_room(&client, &config)
@@ -240,6 +261,7 @@ async fn wait_for_incoming_peer(
     session: &mut SessionMachine,
     client: &Client,
     transport: IrohTransport,
+    registration: RoomRegistration,
     created_by_join: bool,
 ) -> Result<(), CliError> {
     sink.emit_runtime_event(state_changed_event(
@@ -278,14 +300,14 @@ async fn wait_for_incoming_peer(
                 .context("failed to listen for Ctrl-C")
                 .map_err(|error| CliError::runtime(error.to_string()));
             if let Err(error) = signal_error {
-                let delete_result = delete_room(client, config)
+                let delete_result = delete_room(client, config, &registration)
                     .await
                     .map_err(|delete_error| CliError::rendezvous(delete_error.to_string()));
                 transport.close().await;
                 delete_result?;
                 return Err(error);
             }
-            let delete_result = delete_room(client, config)
+            let delete_result = delete_room(client, config, &registration)
                 .await
                 .map_err(|error| CliError::rendezvous(error.to_string()));
             transport.close().await;
@@ -293,7 +315,7 @@ async fn wait_for_incoming_peer(
             return Err(CliError::runtime("interrupted"));
         }
     };
-    let delete_result = delete_room(client, config)
+    let delete_result = delete_room(client, config, &registration)
         .await
         .map_err(|error| CliError::rendezvous(error.to_string()));
     transport.close().await;

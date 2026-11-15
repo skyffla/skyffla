@@ -1,6 +1,7 @@
 use std::fmt;
 
 use anyhow::{anyhow, Context, Result};
+use rand_core::{OsRng, RngCore};
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde::Deserialize;
 use skyffla_protocol::{Capabilities, ProtocolVersion};
@@ -12,13 +13,50 @@ use skyffla_transport::PeerTicket;
 
 use crate::config::SessionConfig;
 
+pub(crate) struct RoomRegistration {
+    token: String,
+}
+
+pub(crate) fn new_client(config: &SessionConfig) -> Result<Client> {
+    let url = reqwest::Url::parse(&config.rendezvous_server).context("invalid rendezvous URL")?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    });
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        anyhow::bail!("rendezvous requires HTTPS (HTTP is allowed only for a loopback IP)");
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!("rendezvous URL must not contain credentials, a query or a fragment");
+    }
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to create rendezvous client")
+}
+
 pub(crate) async fn register_room(
     client: &Client,
     config: &SessionConfig,
     ticket: &PeerTicket,
-) -> std::result::Result<(), RegisterRoomError> {
+) -> std::result::Result<RoomRegistration, RegisterRoomError> {
+    let mut token = [0_u8; 32];
+    OsRng.try_fill_bytes(&mut token).map_err(|error| {
+        RegisterRoomError::Other(anyhow!("failed to generate room ownership token: {error}"))
+    })?;
+    let registration = RoomRegistration {
+        token: hex::encode(token),
+    };
     let response = client
         .put(room_url(config))
+        .bearer_auth(&registration.token)
         .json(&PutRoomRequest {
             ticket: ticket.encoded.clone(),
             ttl_seconds: DEFAULT_TTL_SECONDS,
@@ -48,7 +86,7 @@ pub(crate) async fn register_room(
                 .await,
         ));
     }
-    Ok(())
+    Ok(registration)
 }
 
 pub(crate) async fn resolve_room(
@@ -81,9 +119,14 @@ pub(crate) async fn resolve_room(
     Ok(Some(room))
 }
 
-pub(crate) async fn delete_room(client: &Client, config: &SessionConfig) -> Result<()> {
+pub(crate) async fn delete_room(
+    client: &Client,
+    config: &SessionConfig,
+    registration: &RoomRegistration,
+) -> Result<()> {
     let response = client
         .delete(room_url(config))
+        .bearer_auth(&registration.token)
         .send()
         .await
         .context("failed to delete room from rendezvous server")?;
@@ -208,9 +251,8 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue};
     use skyffla_rendezvous::{RENDEZVOUS_API_VERSION, RENDEZVOUS_VERSION_HEADER};
 
-    #[test]
-    fn room_url_trims_trailing_slash_from_server() {
-        let config = SessionConfig {
+    fn test_config() -> SessionConfig {
+        SessionConfig {
             role: Role::Host,
             room_id: "room".into(),
             rendezvous_server: format!("{DEFAULT_RENDEZVOUS_URL}/"),
@@ -222,12 +264,40 @@ mod tests {
             local_mode: false,
             auto_accept_policy: AutoAcceptPolicy::none(),
             automation: None,
-        };
+        }
+    }
+
+    #[test]
+    fn room_url_trims_trailing_slash_from_server() {
+        let config = test_config();
 
         assert_eq!(
             room_url(&config),
             format!("{DEFAULT_RENDEZVOUS_URL}/v1/rooms/room")
         );
+    }
+
+    #[test]
+    fn ownership_credentials_require_https_except_for_literal_loopback_addresses() {
+        let mut config = test_config();
+        for url in [
+            "https://rendezvous.example.com",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            config.rendezvous_server = url.into();
+            assert!(super::new_client(&config).is_ok(), "{url}");
+        }
+        for url in [
+            "http://rendezvous.example.com",
+            "http://192.0.2.1:8080",
+            "http://localhost:8080",
+            "https://user:pass@example.com",
+            "https://example.com?secret=value",
+        ] {
+            config.rendezvous_server = url.into();
+            assert!(super::new_client(&config).is_err(), "{url}");
+        }
     }
 
     #[test]

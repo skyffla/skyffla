@@ -3,17 +3,19 @@ use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Request, State};
 use axum::http::{header::HeaderValue, request::Parts, HeaderMap, StatusCode};
-use axum::middleware::map_response;
+use axum::middleware::{from_fn_with_state, map_response, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::store::{SharedRoomStore, StoreError};
 use crate::{
-    unix_timestamp_seconds, PutRoomRequest, RENDEZVOUS_API_VERSION, RENDEZVOUS_VERSION_HEADER,
+    unix_timestamp_seconds, OwnerHash, PutRoomRequest, MAX_REQUEST_BYTES, RENDEZVOUS_API_VERSION,
+    RENDEZVOUS_VERSION_HEADER,
 };
 
 #[derive(Clone)]
@@ -30,8 +32,51 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/rooms/{room_id}",
             put(put_room).get(get_room).delete(delete_room),
         )
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(from_fn_with_state(state.clone(), limit_requests))
         .layer(map_response(add_version_header))
         .with_state(state)
+}
+
+async fn limit_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let now = match unix_timestamp_seconds() {
+        Ok(now) => now,
+        Err(error) => return ApiError::internal_time(error).into_response(),
+    };
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    let ip = client_ip_from_request(request.headers(), peer, state.trust_proxy_headers);
+    if let Err(error) = state.rate_limiter.check(ip, now) {
+        return error.into_response();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    }
+}
+
+fn owner_hash(headers: &HeaderMap) -> Result<OwnerHash, ApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|_| {
+            headers
+                .get_all(axum::http::header::AUTHORIZATION)
+                .iter()
+                .count()
+                == 1
+        })
+        .filter(|value| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "ownership_token_required",
+            message: "a 256-bit room ownership token is required".into(),
+            retry_after_seconds: None,
+        })?;
+    Ok(Sha256::digest(token.as_bytes()).into())
 }
 
 async fn health() -> &'static str {
@@ -56,11 +101,11 @@ async fn put_room(
 ) -> Result<Json<crate::PutRoomResponse>, ApiError> {
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
-    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
+    let owner_hash = owner_hash(&headers)?;
 
     let response = state
         .store
-        .put(&room_id, request, now_epoch_seconds)
+        .put(&room_id, request, owner_hash, now_epoch_seconds)
         .map_err(ApiError::from_store)?;
     log_request("register", &room_id, client_ip, StatusCode::OK, "ok");
     Ok(Json(response))
@@ -72,9 +117,9 @@ async fn get_room(
     headers: HeaderMap,
     MaybeConnectInfo(peer_addr): MaybeConnectInfo,
 ) -> Result<Json<crate::GetRoomResponse>, ApiError> {
+    crate::validate_room_id(&room_id).map_err(|error| ApiError::from_store(error.into()))?;
     let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
-    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
 
     let response = state
         .store
@@ -100,11 +145,11 @@ async fn delete_room(
     headers: HeaderMap,
     MaybeConnectInfo(peer_addr): MaybeConnectInfo,
 ) -> Result<StatusCode, ApiError> {
-    let now_epoch_seconds = unix_timestamp_seconds().map_err(ApiError::internal_time)?;
+    crate::validate_room_id(&room_id).map_err(|error| ApiError::from_store(error.into()))?;
     let client_ip = client_ip_from_request(&headers, peer_addr, state.trust_proxy_headers);
-    state.rate_limiter.check(client_ip, now_epoch_seconds)?;
+    let owner_hash = owner_hash(&headers)?;
 
-    state.store.delete(&room_id).map_err(|error| {
+    state.store.delete(&room_id, owner_hash).map_err(|error| {
         let api_error = ApiError::from_store(error);
         log_request(
             "delete",
@@ -124,7 +169,7 @@ fn client_ip_from_request(
     peer_addr: Option<SocketAddr>,
     trust_proxy_headers: bool,
 ) -> IpAddr {
-    if trust_proxy_headers {
+    if trust_proxy_headers && peer_addr.is_some_and(|addr| addr.ip().is_loopback()) {
         if let Some(forwarded_ip) = forwarded_ip_from_headers(headers) {
             return forwarded_ip;
         }
@@ -183,25 +228,45 @@ fn log_request(
 pub struct IpRateLimiter {
     limit: usize,
     window_seconds: u64,
-    buckets: Mutex<HashMap<IpAddr, VecDeque<u64>>>,
+    state: Mutex<RateLimitState>,
 }
+
+#[derive(Debug, Default)]
+struct RateLimitState {
+    buckets: HashMap<IpAddr, VecDeque<u64>>,
+    global: VecDeque<u64>,
+}
+
+const MAX_CLIENT_BUCKETS: usize = 4096;
+const GLOBAL_REQUEST_LIMIT: usize = 600;
 
 impl IpRateLimiter {
     pub fn new(limit: usize, window_seconds: u64) -> Self {
         Self {
             limit,
             window_seconds,
-            buckets: Mutex::new(HashMap::new()),
+            state: Mutex::new(RateLimitState::default()),
         }
     }
 
     pub fn check(&self, ip: IpAddr, now_epoch_seconds: u64) -> Result<(), ApiError> {
         let window_start = now_epoch_seconds.saturating_sub(self.window_seconds);
-        let mut buckets = self
-            .buckets
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| ApiError::internal("rate limiter lock poisoned"))?;
-        let bucket = buckets.entry(ip).or_default();
+        state
+            .buckets
+            .retain(|_, bucket| bucket.back().is_some_and(|ts| *ts > window_start));
+        while state.global.front().is_some_and(|ts| *ts <= window_start) {
+            state.global.pop_front();
+        }
+        if state.global.len() >= GLOBAL_REQUEST_LIMIT
+            || (!state.buckets.contains_key(&ip) && state.buckets.len() >= MAX_CLIENT_BUCKETS)
+        {
+            return Err(ApiError::rate_limited(self.window_seconds.max(1)));
+        }
+        let bucket = state.buckets.entry(ip).or_default();
 
         while bucket.front().copied().is_some_and(|ts| ts <= window_start) {
             bucket.pop_front();
@@ -221,6 +286,7 @@ impl IpRateLimiter {
         }
 
         bucket.push_back(now_epoch_seconds);
+        state.global.push_back(now_epoch_seconds);
         Ok(())
     }
 }
@@ -236,6 +302,24 @@ pub struct ApiError {
 impl ApiError {
     fn from_store(error: StoreError) -> Self {
         match error.as_registry_error() {
+            Some(crate::RegistryError::InvalidRequest(message)) => Self {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_registration",
+                message: (*message).into(),
+                retry_after_seconds: None,
+            },
+            Some(crate::RegistryError::NotOwner) => Self {
+                status: StatusCode::FORBIDDEN,
+                code: "not_room_owner",
+                message: "room ownership token does not match".into(),
+                retry_after_seconds: None,
+            },
+            Some(crate::RegistryError::CapacityExceeded) => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "registry_full",
+                message: "room registry is full; retry after rooms expire".into(),
+                retry_after_seconds: Some(60),
+            },
             Some(crate::RegistryError::InvalidTtl { ttl_seconds }) => Self {
                 status: StatusCode::BAD_REQUEST,
                 code: "invalid_ttl",
@@ -254,7 +338,10 @@ impl ApiError {
                 message: format!("room {room_id} was not found"),
                 retry_after_seconds: None,
             },
-            None => Self::internal(error.to_string()),
+            None => {
+                eprintln!("room storage error: {error}");
+                Self::internal("room storage unavailable")
+            }
         }
     }
 
@@ -334,6 +421,204 @@ mod tests {
         })
     }
 
+    fn room_request(method: &str, token: Option<char>, ticket: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/v1/rooms/security-test")
+            .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header(
+                "authorization",
+                format!("Bearer {}", token.to_string().repeat(64)),
+            );
+        }
+        request
+            .body(Body::from(
+                serde_json::to_vec(&PutRoomRequest {
+                    ticket: ticket.into(),
+                    ttl_seconds: 600,
+                    capabilities: Capabilities::default(),
+                })
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_lookup_does_not_allow_a_stranger_to_refresh_delete_or_replace_the_host() {
+        for store in [
+            Arc::new(InMemoryRoomStore::new()) as SharedRoomStore,
+            Arc::new(crate::store::SqliteRoomStore::new_in_memory().unwrap()),
+        ] {
+            let app = build_router(AppState {
+                store,
+                rate_limiter: Arc::new(IpRateLimiter::new(120, 60)),
+                trust_proxy_headers: false,
+            });
+            let ticket = crate::test_ticket(1);
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("PUT", None, &ticket))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("PUT", Some('a'), &ticket))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+            let public = app
+                .clone()
+                .oneshot(room_request("GET", None, ""))
+                .await
+                .unwrap();
+            let bytes = public.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 4);
+            assert_eq!(value["ticket"], ticket);
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("PUT", Some('b'), &ticket))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("DELETE", None, ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("DELETE", Some('b'), ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("PUT", Some('b'), &crate::test_ticket(2)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("GET", None, ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(room_request("DELETE", Some('a'), ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                app.oneshot(room_request("GET", None, ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_opaque_tickets_and_limits_bodies_before_json_parsing() {
+        let app = test_app(10, false);
+        assert_eq!(
+            app.clone()
+                .oneshot(room_request("PUT", Some('a'), "not-a-ticket"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(room_request("PUT", Some('a'), &"x".repeat(5000)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            app.oneshot(room_request("GET", None, ""))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_json_and_unknown_routes_still_consume_the_request_budget() {
+        let app = test_app(1, false);
+        let first = Request::builder()
+            .method("PUT")
+            .uri("/v1/rooms/missing")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(first).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let second = Request::builder()
+            .uri("/unknown")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(second).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn direct_clients_cannot_spoof_a_trusted_local_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.1".parse().unwrap());
+        let remote: SocketAddr = "192.0.2.1:1234".parse().unwrap();
+        assert_eq!(
+            client_ip_from_request(&headers, Some(remote), true),
+            remote.ip()
+        );
+    }
+
+    #[test]
+    fn global_budget_bounds_distributed_requests_and_expired_ip_state_is_removed() {
+        let limiter = IpRateLimiter::new(120, 60);
+        for id in 1..=GLOBAL_REQUEST_LIMIT {
+            limiter
+                .check(IpAddr::V6((id as u128).into()), 1000)
+                .unwrap();
+        }
+        assert!(limiter.check("192.0.2.1".parse().unwrap(), 1000).is_err());
+        assert_eq!(
+            limiter.state.lock().unwrap().buckets.len(),
+            GLOBAL_REQUEST_LIMIT
+        );
+        limiter.check("192.0.2.1".parse().unwrap(), 1061).unwrap();
+        assert_eq!(limiter.state.lock().unwrap().buckets.len(), 1);
+    }
+
     #[tokio::test]
     async fn put_then_get_room_via_http() {
         let app = test_app(10, false);
@@ -343,12 +628,14 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("PUT")
                     .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", "a".repeat(64)))
                     .body(Body::from(
                         serde_json::to_vec(&crate::PutRoomRequest {
-                            ticket: "bootstrap-ticket".into(),
+                            ticket: crate::test_ticket(1),
                             ttl_seconds: 600,
                             capabilities: Capabilities::default(),
                         })
@@ -371,6 +658,7 @@ mod tests {
         let get_response = app
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/demo-room")
                     .body(Body::empty())
@@ -403,7 +691,7 @@ mod tests {
         let app = test_app(10, false);
 
         let first_body = serde_json::to_vec(&crate::PutRoomRequest {
-            ticket: "ticket-a".into(),
+            ticket: crate::test_ticket(1),
             ttl_seconds: 600,
             capabilities: Capabilities::default(),
         })
@@ -411,9 +699,11 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("PUT")
                     .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", "a".repeat(64)))
                     .body(Body::from(first_body))
                     .expect("request should build"),
             )
@@ -421,7 +711,7 @@ mod tests {
             .expect("request should succeed");
 
         let second_body = serde_json::to_vec(&crate::PutRoomRequest {
-            ticket: "ticket-b".into(),
+            ticket: crate::test_ticket(2),
             ttl_seconds: 600,
             capabilities: Capabilities::default(),
         })
@@ -429,9 +719,11 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("PUT")
                     .uri("/v1/rooms/demo-room")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", "b".repeat(64)))
                     .body(Body::from(second_body))
                     .expect("request should build"),
             )
@@ -449,6 +741,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .body(Body::empty())
@@ -461,6 +754,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .body(Body::empty())
@@ -479,6 +773,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.10")
@@ -492,6 +787,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.11")
@@ -511,6 +807,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.10")
@@ -524,6 +821,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::builder()
+                    .extension(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()))
                     .method("GET")
                     .uri("/v1/rooms/missing")
                     .header("x-forwarded-for", "203.0.113.11")

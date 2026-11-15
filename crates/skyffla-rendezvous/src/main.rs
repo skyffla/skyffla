@@ -92,6 +92,13 @@ impl Config {
             .map(|value| parse_bool_env(&value))
             .unwrap_or(false);
 
+        if cleanup_interval_seconds == 0
+            || rate_limit_requests == 0
+            || rate_limit_window_seconds == 0
+        {
+            return Err("cleanup interval and rate limits must be greater than zero".into());
+        }
+
         Ok(Self {
             listen_addr,
             database_path,

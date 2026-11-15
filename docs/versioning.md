@@ -104,11 +104,28 @@ Current constant:
 
 Clients should validate the rendezvous version header and require the same major API version.
 
-The current rendezvous major is `2.x`. It reflects the breaking capability
-schema cleanup that removed the legacy stdio capability bit from room
-registration payloads. A `2.x` client talking to a `1.x` server should fail
-fast with an explicit rendezvous API version mismatch instead of reaching
-request-body deserialization errors.
+The current rendezvous major is `3.x`. Registration and deletion require an
+`Authorization: Bearer <token>` header containing 64 hexadecimal characters
+from 32 cryptographically random bytes. The host generates this token for each
+registration and retains it until cleanup. Only its SHA-256 hash is stored;
+lookups never return the token or hash. Refreshing a live room requires the same
+owner token; knowing the public ticket does not grant ownership. A competing
+registration returns `409`, missing credentials return `401`, and deleting
+another owner's room returns `403`.
+
+Public discovery requires HTTPS. The CLI permits plain HTTP only for literal
+loopback IPs and never follows rendezvous redirects. Room IDs are limited to
+1-64 ASCII letters, digits, hyphens and underscores. Requests are limited to
+4096 bytes and tickets to 2048 bytes; tickets must decode as iroh endpoint
+addresses and are stored in canonical form. The registry holds at most 1000
+live rooms, with the existing one-hour maximum TTL.
+
+The URL remains `/v1/rooms/...`; the response header is the compatibility
+boundary. Older clients must upgrade before using a `3.x` server. The SQLite
+migration removes legacy registrations without an ownership hash, because their
+owners cannot be authenticated; existing peer connections are unaffected.
+Deploy a matching client release together with the server. The peer wire and
+machine protocol versions are unchanged.
 
 ## Operational Guidance
 

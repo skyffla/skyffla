@@ -8,7 +8,7 @@ and release tooling.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SKYFFLA_ROOM_ID` | none | Room ID used when `ROOM_ID` is omitted from `skyffla [OPTIONS] [ROOM_ID]`. A command-line room ID takes precedence. |
-| `SKYFFLA_RENDEZVOUS_URL` | `http://rendezvous.skyffla.com:8080` | Rendezvous server used by the CLI. `--server` / `-S` takes precedence. |
+| `SKYFFLA_RENDEZVOUS_URL` | `https://rendezvous.skyffla.com` | Rendezvous server used by the CLI. `--server` / `-S` takes precedence. HTTPS is required except for literal loopback IPs. |
 | `SKYFFLA_NAME` | none | Peer display name used when `--name` / `-n` is not set. Falls back to `USER`, then `USERNAME`, then `skyffla-peer`. |
 | `SKYFFLA_DIRECTORY_TRANSFER_WORKERS` | `4` | Number of parallel workers used for directory transfer entry requests. Invalid or zero values are ignored. |
 
@@ -29,9 +29,9 @@ These variables configure `skyffla-rendezvous`.
 | `SKYFFLA_RENDEZVOUS_ADDR` | `127.0.0.1:8080` | Listen address. |
 | `SKYFFLA_RENDEZVOUS_DB_PATH` | `skyffla-rendezvous.db` | SQLite database path. |
 | `SKYFFLA_RENDEZVOUS_CLEANUP_INTERVAL_SECONDS` | `30` | Room cleanup interval in seconds. |
-| `SKYFFLA_RENDEZVOUS_RATE_LIMIT` | `120` | Maximum requests per rate-limit window. |
+| `SKYFFLA_RENDEZVOUS_RATE_LIMIT` | `120` | Maximum requests per IP per rate-limit window; all IPs also share a fixed 600-request limit. Invalid requests consume the limit too. |
 | `SKYFFLA_RENDEZVOUS_RATE_WINDOW_SECONDS` | `60` | Rate-limit window length in seconds. |
-| `SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS` | `false` | Trust proxy forwarding headers. Truthy values are `1`, `true`, `yes`, and `on`. Only enable behind a trusted proxy. |
+| `SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-For` only on connections from loopback IPs. Truthy values are `1`, `true`, `yes`, and `on`. Only enable behind a local proxy that overwrites that header, with the app bound to loopback. |
 
 ## Python And Node Wrappers
 

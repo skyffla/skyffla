@@ -55,7 +55,7 @@ Install the rendezvous server only if you want to self-host discovery:
 brew install skyffla-rendezvous
 ```
 
-By default, the CLI uses the public rendezvous at `http://rendezvous.skyffla.com:8080`.
+By default, the CLI uses the public rendezvous at `https://rendezvous.skyffla.com`.
 
 Check the installed CLI version:
 
@@ -244,7 +244,7 @@ SKYFFLA_RENDEZVOUS_URL=http://127.0.0.1:8080 skyffla copper-731
 ```
 
 `skyffla-rendezvous` ignores `X-Forwarded-For` by default. Only set
-`SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS=true` when it is behind a trusted proxy
+`SKYFFLA_RENDEZVOUS_TRUST_PROXY_HEADERS=true` when it is behind a trusted local proxy
 that you control.
 
 ## Docs
@@ -252,6 +252,7 @@ that you control.
 - [`docs/room-architecture.md`](docs/room-architecture.md): room-native architecture and design boundaries
 - [`docs/machine-protocol.md`](docs/machine-protocol.md): wrapper-facing `machine` contract
 - [`docs/iroh-infra-notes.md`](docs/iroh-infra-notes.md): self-hosting guidance for rendezvous, relays, and blob transfer infrastructure
+- [`docs/public-rendezvous-operations.md`](docs/public-rendezvous-operations.md): public-service security limits and bandwidth-cost protection
 - [`docs/versioning.md`](docs/versioning.md): compatibility rules for wire, machine, and rendezvous protocols
 - [`docs/environment.md`](docs/environment.md): environment variables for the CLI, rendezvous server, wrappers, tests, and release tooling
 
